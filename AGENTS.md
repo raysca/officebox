@@ -23,6 +23,11 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 - [Calendar](specs/calendar.md)
 - [Documents, Whiteboards & Files](specs/documents.md)
 
+**Cross-cutting specs** (every feature follows these):
+- [Permissions](specs/permissions.md)
+- [Notifications & Attention](specs/notifications.md)
+- [Platform Rules](specs/platform.md): lifecycle, cascades, retention, export, admin settings, limits, outbound fetching, email links, timers, connection budget, provisioning, schema
+
 **When documents disagree:** a spec overrides the PRD on feature detail, and the TDD governs implementation. Don't silently pick one. Flag the conflict in your PR and fix the losing document in the same PR.
 
 ## 3. Workflow

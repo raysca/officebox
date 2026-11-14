@@ -3,7 +3,10 @@
 **Status:** Draft for review
 **Date:** 14 November 2026
 **Inputs:** [PRD](PRD.md) v1.3, [TDD](TDD.md) v1.3, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
-**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md). These supersede the scope lists in §4 where they differ. Working rules are in [AGENTS.md](AGENTS.md).
+**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md).
+**Cross-cutting specs:** [Permissions](specs/permissions.md) · [Notifications & Attention](specs/notifications.md) · [Platform Rules](specs/platform.md) (lifecycle, cascades, retention, export, settings, limits, timers, schema).
+
+The specs supersede the scope lists in §4 wherever they differ; each spec assigns its features to slices. Working rules are in [AGENTS.md](AGENTS.md).
 
 ## 1. Approach
 
@@ -14,7 +17,7 @@ We build a **foundation first** and then add features as **vertical slices** on 
 - **Always deployable.** `main` deploys to a fresh Cloudflare account with the Deploy button at every milestone.
 - **Promote the spike, don't copy it.** The spike proved the designs. Production code re-implements them inside the new module structure and applies the spike's findings, most importantly typed RPC results instead of thrown errors (§6).
 
-**Feature order:** authentication → chat → Campfire (huddles) → calendar → documents. Other work fits around these (§4).
+**Feature order:** authentication → chat → calls → calendar → documents. Other work fits around these (§4).
 
 ## 2. Codebase structure
 
@@ -27,7 +30,7 @@ officebox/
 │   │   ├── src/core/           router, auth middleware, errors/results, ids, db helpers, audit,
 │   │   │                       settings, rate limits, cron dispatcher, queues + outbox, DO base class
 │   │   ├── src/features/       one folder per feature: routes, Durable Objects, services, jobs
-│   │   │   ├── auth/  members/  realtime/  chat/  files/  campfire/
+│   │   │   ├── auth/  members/  realtime/  chat/  files/  calls/
 │   │   │   ├── calendar/  docs/  inbox/  search/  admin/
 │   │   ├── migrations/         D1 migrations (single sequence; files named by feature)
 │   │   └── test/               Workers-runtime integration tests
@@ -65,16 +68,16 @@ officebox/
 | M1 | **Identity and access** | Setup, sign-in, sessions, invitations, email, profiles, roles, groups, permission engine | M0 | L |
 | M2 | **Realtime backbone** | UserHub, presence, realtime client, fan-out, notifications and inbox basics, revocation | M1 | M |
 | M3 | **Chat** | Channels, DMs, threads, reactions, files, search, notifications | M2 | XL (3 slices) |
-| M4 | **Campfire** | Audio, video, screen sharing, present mode | M3, real-media run passed | L |
-| M5 | **Calendar** | Personal, group and workspace calendars, holidays, time off, events, reminders | M2 (M4 for "join Campfire" links) | L |
-| M6 | **Documents** | Docs, whiteboards, sharing, comments, history, present mode, search | M2 | L |
+| M4 | **Calls** | Channel and DM calls: audio, video, screen sharing, ringing | M3, real-media run passed | L |
+| M5 | **Calendar** (M5a–M5c) | Calendars, events, holidays, time off, invitations, reminders, ICS. Event calls land in M5b. | M2, M4 | L |
+| M6 | **Documents** (M6a–M6c) | Drives, docs, whiteboards, sharing, comments, history, files, offline. Document calls and present mode land here. | M2, M4 | L |
 | M7 | **Operations** | Health, storage protection, usage panel, export/restore, upgrades | M1 (grows alongside) | M |
 | M8 | **Personal Inbox** | Today / Upcoming / Assigned / Following views | M3, M5, M6 | M |
 | Later | Projects and issues · MFA and SSO · imports · API and webhooks · AI | PRD Phases 2–3 | — | — |
 
 Sizes are relative: M ≈ 1×, L ≈ 2×, XL ≈ 3×.
 
-After M2, **chat, calendar and documents are independent** (separate Durable Objects and tables). Two people or agents can build them in parallel. Campfire waits for chat and for a passing real-media run.
+After M2, **chat, calendar and documents are independent** (separate Durable Objects and tables). Two people or agents can build them in parallel. Calls wait for chat and for a passing real-media run. The calendar and document parts of calls ship with M5b and M6.
 
 ## 4. Milestones in detail
 
@@ -124,6 +127,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 - **First-run setup** with the setup token, either the deploy secret or a generated token in the logs, and an atomic claim (TDD §6.8).
 - **Sign-in:**
   - email and password, hashed with PBKDF2-SHA256 at 600k iterations in a versioned format
+  - **magic links** by email and **passkeys** (members may be passkey-only; owners must keep a password)
   - `HttpOnly` session cookie plus rotating refresh cookie, reuse detection, and `session_epoch` revocation
   - sign out and sign out everywhere
 - **Invitations:**
@@ -135,16 +139,17 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 - **Profiles:** display name, avatar (R2), **time zone**, **working hours** and **location/region** (the calendar needs all three), and status text with an emoji.
 - **Roles and groups:** owner, admin and member; admin-managed groups (PRD §10.1).
 - **Members administration:** list, invite, change role, disable, delete (anonymise), and transfer document ownership.
-- **Permission engine** in `packages/shared` plus Worker services. It resolves workspace role → channel membership → resource grants (user, group, channel) → general access, as in TDD §2.1. Every feature calls it, and it has its own test suite.
+- **Permission engine** in `packages/shared` plus Worker services, implementing [specs/permissions.md](specs/permissions.md). It uses the union rule across item, folders, drive and general access, includes the admin-power limits, and has its own matrix test suite. Every feature calls it.
+- **Provisioning** of the objects other features expect (personal calendar, My files and so on), as set out in platform §13.
 - **Security:**
   - CSRF header and `Origin` checks, the CSP and security headers
   - rate limits on sign-in, setup, invitations and reset
   - audit entries for every admin action
 - **Owner recovery** through the `RECOVERY_TOKEN` secret.
 
-**Should:** the "allowed email domains" setting for invitations; a session list in the profile showing devices and last seen.
+**Must (also):** the "My devices" session list. **Should:** the "allowed email domains" setting for invitations.
 
-**Later:** TOTP MFA; Cloudflare Access SSO; passkeys (PRD §6).
+**Later:** TOTP MFA; Cloudflare Access SSO (PRD §6).
 
 **Exit criteria:**
 - These end-to-end tests pass: setup with a token, invite by link with no email configured, invite by email, password reset, disable user, and an expired invitation being refused.
@@ -203,20 +208,22 @@ Delivered in three slices, each releasable on its own.
   - image previews and the allow-listed inline types (TDD §8.3)
   - a files tab per channel
 - **Pins and saved items:** pinned messages per channel; "saved for later" per user.
-- **Mentions:** `@channel` / `@here`, restricted to channel admins in large channels; links to Officebox objects shown as permission-checked previews.
+- **Mentions:** anyone can use `@channel` / `@here`, with a confirmation in channels over 20 members; links to Officebox objects shown as permission-checked previews.
 - **Search:**
   - FTS5 over messages and file names
   - filters `from:`, `in:`, `has:file` and dates
   - jump to a result in context.
 
 **M3c — Notifications and polish:**
-- **Notifications:** mention and DM notifications into the inbox and to email, per-channel notification levels and mute, and a "huddle/Campfire started" system message slot.
+- **Notifications:** mention and DM notifications into the inbox and to email, per-channel notification levels and mute, and a "call started" system message slot.
 - **Moderation:** channel admins remove messages and manage members; admins archive channels.
 - **Keyboard:** quick switcher (Cmd/Ctrl+K) and other keyboard shortcuts.
 
 **Later:**
-- scheduled messages, message reminders and polls
-- slash commands and external link unfurling
+- scheduled messages and message reminders
+- slash commands
+
+(Polls, pins, saved items and external link previews are first-release features. The chat spec assigns them to slices.)
 - custom emoji
 - Slack import (PRD §19).
 
@@ -229,7 +236,7 @@ Delivered in three slices, each releasable on its own.
   - unread counts are correct after a reconnect.
 - p95 message round trip is under 300 ms in-region (TDD §9.2).
 
-### M4 — Campfire (huddles)
+### M4 — Calls (huddles)
 
 **Goal:** instant audio-first calls from any channel, DM, document or calendar event, with screen sharing.
 
@@ -238,11 +245,11 @@ Delivered in three slices, each releasable on its own.
 **Must:**
 - **HuddleRoom Durable Object and Worker signalling,** promoted from the spike. Expected denials become typed results, not thrown errors.
 - **SFU integration:** sessions, publish and subscribe, renegotiation, simulcast layers, and TURN credentials.
-- **Campfire UI:**
+- **Call UI:**
   - join and leave; mute, camera and raise hand
   - participant tiles and active-speaker highlight
   - device selection and reconnect handling
-- **Context indicators:** "Campfire in progress" in the channel header and sidebar, plus start/end system messages with duration and attendees.
+- **Context indicators:** "Call in progress" in the channel header and sidebar, plus start/end system messages with duration and attendees.
 - **Screen sharing (PRD §5.8):**
   - one presenter, with take-over requests
   - text-first quality with a motion mode
@@ -251,6 +258,8 @@ Delivered in three slices, each releasable on its own.
   - the workspace policy and resolution cap.
 - **Present mode** for documents and whiteboards (TDD §4.5). It needs M6's editor, so if M4 ships first, it lands in M6 instead.
 - **Mobile:** viewing and audio on mobile browsers; the share control is hidden where screen capture isn't available.
+
+**Moved:** event calls ship with M5b, and document calls and present mode with M6 ([specs/calls.md](specs/calls.md)).
 
 **Later:** transcription and summaries (Phase 3); recording stays out of scope.
 
@@ -278,7 +287,7 @@ Calendar is **new scope**. The PRD currently plans only an outbound ICS feed in 
   - **recurrence** (RFC 5545 RRULE) with "this event / this and following / all events" edits and exceptions
   - attendees (users and groups) with RSVP: yes, no, maybe
   - visibility: normal, private (others see "busy"), or public within the calendar
-  - an optional **"Campfire" link**, so joining the event starts or joins its Campfire (once M4 has shipped)
+  - an optional **call**, so joining the event starts or joins its call (M5b)
   - links to related documents and channels
 - **Views:**
   - day, week, month and agenda views
@@ -291,16 +300,19 @@ Calendar is **new scope**. The PRD currently plans only an outbound ICS feed in 
   - public holidays are generated locally from a bundled open dataset, so there's no external API
   - admins add **company holidays** on the workspace calendar
 - **Time off:**
-  - members declare out-of-office periods (vacation, sick, other) with an optional note
+  - members declare out-of-office periods (vacation, sick, personal, other) with an optional note visible only to them
   - time off appears on their team calendars and shows as an "away until …" status in chat
 - **Reminders:** per-event reminders delivered as inbox notifications (and email if the member chose it) with **minute precision**.
 - **Notifications:** invitations, updates, cancellations and RSVP responses through the M2 notifications core.
 - **ICS feed:** a private, revocable per-member ICS feed URL to subscribe to from Google, Outlook or Apple calendars (PRD §5.3).
 
-**Should:**
-- an **approval step for time off** (an approver per group)
-- subscribing to external ICS calendars (read-only)
-- an "invite this channel" shortcut.
+**Also must:** subscribing to external ICS calendars (read-only, personal only).
+
+**Should:** an "invite this channel" shortcut.
+
+**Slices:** M5a (calendars, events, recurrence, views, holidays, time off), M5b (invitations and RSVP, external invitations, reminders, find a time, focus time and working location, event calls), M5c (ICS in and out, group view polish). See [specs/calendar.md](specs/calendar.md).
+
+**Gate:** choose the holiday dataset (licence and bundle size) before M5 starts.
 
 **Later:** two-way Google and Microsoft calendar sync; room and resource booking.
 
@@ -345,7 +357,9 @@ Calendar is **new scope**. The PRD currently plans only an outbound ICS feed in 
 - **Whiteboards:** Excalidraw with an Officebox-maintained Yjs binding.
 - **Present mode** (if it wasn't delivered with M4).
 
-**Later:** templates, import from Notion and Google Docs (PRD §19), and offline editing beyond the IndexedDB cache.
+**Slices:** M6a (drives, folders, document editor, sharing, search), M6b (comments, version history, embeds, export and import), M6c (whiteboards, file versions, offline). Document calls and present mode ship with M6. See [specs/documents.md](specs/documents.md).
+
+**Later:** templates, public links, import from Notion and Google Docs (PRD §19).
 
 **Exit criteria:**
 - Two people co-edit and converge.
@@ -392,29 +406,24 @@ The Today, Upcoming, Inbox, Assigned to me and Following views (PRD §5.3).
 | `chat-channel.ts`, `projection.ts` | `features/chat` | Typed results; generic outbox from `core`; files and pins events |
 | `doc-room.ts` | `features/docs` | Search projection, versions to R2, comment anchors |
 | `user-hub.ts`, `presence.ts`, `fanout.ts` | `features/realtime` | Generic fan-out API; tab leader election on the client |
-| `huddle-room.ts`, `sfu.ts`, `fake-sfu.ts` | `features/campfire` | Typed results instead of thrown denials; keep the fake SFU for tests |
-| `client/screen-share.ts`, `client/probe.ts` | `apps/web/src/features/campfire` | UI around it; keep the media run as a CI job |
+| `huddle-room.ts`, `sfu.ts`, `fake-sfu.ts` | `features/calls` | Typed results instead of thrown denials; keep the fake SFU for tests |
+| `client/screen-share.ts`, `client/probe.ts` | `apps/web/src/features/calls` | UI around it; keep the media run as a CI job |
 | `test/*` helpers | `apps/worker/test` | Unique-ID fixtures (storage isn't isolated between tests) |
 
 When a module has been promoted and its tests pass in the new structure, its spike counterpart is deleted.
 
 ## 7. Documentation updates this plan implies
 
-- **PRD:**
-  - add a **Calendar** section (§5.x) with the scope in M5
-  - move calendar from "ICS feed in Phase 2" to its own phase
-  - adopt **Campfire** as the product name for huddles, if confirmed (§8)
-  - update the phase lists to match this milestone order.
-- **TDD:** add the calendar data model, the ReminderScheduler Durable Object, the holiday dataset, the codebase structure (§2) and the typed-result convention.
+The feature and cross-cutting specs change several PRD and TDD statements. These include: calendar scope, passkeys and magic links at launch, chat attachments, document defaults, the union permission rule, notifications and DND, retention and export of new objects, schema value lists, the socket budget, and timers. Both documents are being brought in line with the specs (see each spec's notes and platform §14).
 
-## 8. Decisions needed
+## 8. Decisions
 
-1. **The name "Campfire."** 37signals sells a group-chat product called *Campfire* (the ONCE product). Using the same name for our calls feature could confuse people, or raise a trademark question. Options:
-   - keep "Campfire" after a quick trademark check
-   - choose another name, such as "Hearth", "Huddle" or "Lounge"
-   - keep "huddles" as the feature name.
-2. **Calendar scope for the first release.** Is the M5 **must** list right? In particular: do you want time-off **approvals** in the first release, and how soon do you need two-way Google and Microsoft sync?
-3. **Holiday regions.** Which countries matter first? Is a bundled open dataset with no external API acceptable?
-4. **Stack.** Confirmed: Hono, Zod, TanStack Router and Query, and Tailwind without Radix (§2).
-5. **Milestone order.** The plan follows your order (auth → chat → Campfire → calendar → documents). Calendar and documents could run in parallel with chat after M2 if you want features sooner.
+Resolved:
+1. **Feature names:** generic names ("Chat", "Calls", "Calendar", "Documents") for now. Marketing names come later.
+2. **Calendar scope:** time off is declare-only; ICS in and out at launch; two-way Google and Microsoft sync later.
+3. **Holiday regions:** all countries, from a bundled dataset. UK & Ireland, US & Canada and EU are verified first.
+4. **Stack:** Hono, Zod, TanStack Router and Query, and Tailwind without Radix.
+5. **Milestone order:** auth → chat → calls → calendar → documents. Event and document calls ship with their features.
+
+Open:
 6. **Upgrades.** Confirm the release-sync upgrade work stays deferred until just before the first external install (M7).
