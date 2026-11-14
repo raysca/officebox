@@ -3,6 +3,7 @@
 **Status:** Draft for review
 **Date:** 14 November 2026
 **Inputs:** [PRD](PRD.md) v1.3, [TDD](TDD.md) v1.3, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
+**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md). These supersede the scope lists in §4 where they differ. Working rules are in [AGENTS.md](AGENTS.md).
 
 ## 1. Approach
 
