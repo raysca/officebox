@@ -1,8 +1,9 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.3  
+**Version:** 1.4  
 **Date:** 14 November 2026  
+**Changes in 1.4:** Feature specs ([identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md)) and cross-cutting specs ([permissions](specs/permissions.md), [notifications](specs/notifications.md), [platform rules](specs/platform.md)) adopted. Calendar becomes a first-class feature (§5.10). Decisions from the spec interviews and the independent review are folded in: identity (§6), chat (§5.4), documents and files (§5.5, §5.7), calls (§5.8), notifications (§8), permissions (§10.1), retention (§10.2), export (§13), phases (§15) and limits (§18). **Where this PRD and a spec differ on feature detail, the spec wins.**  
 **Changes in 1.3:** Screen sharing and present mode (§5.8). Remaining review items addressed:
 - persona-to-role mapping (§3)
 - SSO through Cloudflare Access and owner recovery (§6)
@@ -61,7 +62,7 @@ Officebox is not multi-tenant SaaS. Each customer deploys their own instance int
 - Own your workspace. Your data lives in your Cloudflare account, not ours.
 - Deploy in one click. A Deploy to Cloudflare button gets you from GitHub to a working workspace with no servers, databases or ports to configure.
 - No per-seat fees, ever. Officebox is open source. Infrastructure cost is your own Cloudflare bill, typically the $5/month Workers Paid plan for a small team, plus usage-based charges that grow with data and activity rather than headcount.
-- One integrated experience. Chat, documents, whiteboards, files, projects, issues and huddles are connected workspace objects, not disconnected apps.
+- One integrated experience. Chat, calls, calendars, documents, whiteboards, files, projects and issues are connected workspace objects, not disconnected apps.
 - Realtime without operational burden. Presence, chat and collaborative editing work out of the box on Cloudflare's managed realtime primitives.
 - AI on your terms. Bring your own model provider key via AI Gateway; AI is optional and never disables core collaboration.
 - Upgrade on your schedule. Stable and beta channels. New releases arrive as a reviewable pull request in your repository, and merging it upgrades the workspace. Rollback is supported.
@@ -121,7 +122,7 @@ Core object types:
 - Documents and knowledge pages.
 - Whiteboards.
 - Projects, boards, issues and tasks.
-- Meetings and collaboration sessions.
+- Calendars, events and calls (huddles).
 - Files and attachments.
 - Users, teams and groups.
 
@@ -140,7 +141,7 @@ Relationships are represented in application data, not only pasted URLs. Users c
 Users can move between activities without losing context:
 
 - Create a document from a conversation, carrying over title, source link and selected context.
-- Start a huddle from a document or project and retain context in the meeting.
+- Start a call from a conversation, document or calendar event and retain context in the call.
 - Create an issue from a message or a decision in a document.
 - Link an existing issue into a document or conversation.
 - Convert a plan/document into a project while preserving content and links.
@@ -158,7 +159,7 @@ It should answer:
 3. What is coming up?
 4. What has changed in work I'm involved in?
 
-The Personal Inbox ships in Phase 2. Phase 1 provides basic in-app notifications, which become the Inbox's first sources.
+The Personal Inbox ships in the first release, in its own milestone after the main features (PLAN M8). Earlier milestones provide in-app notifications, which become the Inbox's first sources.
 
 Initial conceptual views:
 
@@ -201,46 +202,53 @@ The first release uses Officebox-native sources: mentions, direct messages, assi
 - **Automatic resolution:** items resolve themselves when the underlying work is done. Replying in a thread resolves the mention that prompted the reply. Opening a DM marks it read. Closing or reassigning an issue resolves its assignment item. Completing a review resolves the review request.
 - **Retention:** resolved items are purged after 90 days (§10.2).
 
-**Calendar:**
-
-- *Phase 2:* each user gets a private, revocable ICS feed URL of their Officebox schedule items (due dates, milestones, scheduled huddles). It can be subscribed to from Google Calendar, Outlook or Apple Calendar. This is outbound only, with no OAuth and no third-party data stored.
-- *Phase 3 or later:* read-only, per-user Google and Microsoft calendar connections that show meetings in Today and Upcoming, if design partners ask for them. Write-back to external calendars is out of scope.
+**Calendar in the Inbox:** today's events appear at the top of **Today**, and upcoming events, invitations and reminders in **Upcoming** and **Inbox**. If the calendar ships before the Personal Inbox, the calendar has its own Today panel until the Inbox arrives. There is no agenda email. The calendar itself is described in §5.10 and [specs/calendar.md](specs/calendar.md).
 
 ### 5.4 Chat and communication
 
-Initial capabilities:
+First-release capabilities (detail in [specs/chat.md](specs/chat.md)):
 
-- Public and private channels.
-- One-to-one direct messages.
-- Durable message history and search.
-- Threads/replies.
-- Reactions.
-- Mentions.
-- Presence and unread indicators.
-- Attachments.
-- Links/previews to workspace objects.
-- Notification preferences.
+- **Conversations:**
+  - public and private channels, which any member can create
+  - **announcement channels**, where only channel admins and chosen posters write
+  - an optional **read-only #general**
+  - one-to-one DMs, and **group DMs** for 3–8 people with fixed membership (adding someone starts a new group DM).
+- **Private channels** are hidden from non-members. Members add people and channel admins remove them. A public channel can become private, never the reverse.
+- **Messages:**
+  - a rich-text composer with Markdown shortcuts; mentions of people, groups, `#channels`, `@channel` and `@here`
+  - reactions, edits and deletes at any time (shown as "edited", with no public history).
+- **Threads:** the first 3 replies show inline under the parent; from the 4th, the thread collapses into an "N replies" marker that opens a side panel. Threads are always visibly marked.
+- **Pins, saved items, polls** (multiple choice, closing time, and truly anonymous polls whose voters can't be recovered from exports) and **external link previews** at launch.
+- **`@channel` / `@here`** are open to anyone, with a confirmation in channels of more than 20 members.
+- **Files** belong to their message (same access, deleted with it) and appear in the channel's Files tab. **"Save to folder"** copies a file into a drive as an independent file.
+- **Message actions:** forwarding shares a **live reference**, so people without access see nothing, and the app warns before forwarding out of a private channel. "Create document from message" and "Reply privately" copy the text.
+- **Other:** no read receipts; unread markers, presence and typing indicators; a customisable sidebar (starred, custom sections, unreads-first, mute and hide); permission-filtered search.
 
 Messages are durable workspace data. Each channel's Durable Object stores that channel's message history in its own SQLite storage. This is the **source of truth** for the channel. A message is written there before it is shown to anyone. Every message change (create, edit, delete, reaction) is then reliably copied to D1, where it supports cross-channel search, the Personal Inbox, notifications and export. The realtime connection is never the only copy of a message. The D1 copy may lag by a few seconds but is guaranteed to catch up. WebSocket connections use the Hibernation WebSocket API, so idle channels do not accrue billable duration while clients remain connected.
 
-Huddles are specified in §5.8.
+Calls (huddles) are specified in §5.8.
 
 ### 5.5 Knowledge, documents and whiteboards
 
 Officebox provides shared documents and knowledge pages that connect naturally to conversations and work.
 
-Initial document capabilities:
+First-release document capabilities (detail in [specs/documents.md](specs/documents.md)):
 
-- Rich document authoring using Tiptap with the Yjs Collaboration extension.
-- Rendered editing with common formatting, headings, lists, links and images.
-- Autosave and clear save state.
-- Document title, ownership and access controls.
-- Revision history. Automatic versions are kept hourly for 7 days and daily for 90 days. Named versions are kept for the document's lifetime. Users can view, compare and restore any version, and restoring creates a new version.
-- Comments on documents, available to users with commenter access or higher (Phase 2).
-- Searchable title and content.
-- Links to originating conversations, projects and related issues.
+- **Organisation:** folders and documents in **My files** (private until shared) and **shared drives** (one per group automatically, plus drives members create). New items take their container's access (§10.1).
+- **Editing:**
+  - real-time co-editing with Tiptap and Yjs, autosave and a clear save state
+  - headings, lists, tables, task lists, links, images and mentions
+  - **slash commands**, **callouts**, **toggles** and **code blocks**
+  - live **Officebox embeds** of messages, events, whiteboards and other documents, which respect access.
+- **Comments:** inline and page-level threads with mentions, resolve and reopen, and moderation by the document owner. No suggestion mode.
+- **Revision history:** automatic versions hourly for 7 days and daily for 90 days, plus named versions kept for the document's lifetime. Users can view and restore any version, and restoring creates a new version. **Comparing versions** is custom work (Tiptap's compare is a paid extension) and may move later.
+- **Offline:** the 20 most recently opened documents (up to 100 MB) stay editable offline and sync when back online. Caches are wiped on sign-out.
+- **Export and import:** export as **Markdown** or **PDF** (printed by the browser); import Markdown and HTML.
+- **Search:** title and content.
+- **Links** to originating conversations, events and related objects.
+- **Later:** templates and public links.
 
-Whiteboards are a first-class collaborative surface, built on the same Yjs collaboration model. Documents and whiteboards are both persisted as CRDT state in Durable Object SQLite, with periodic snapshots.
+Whiteboards are a first-class collaborative surface, built on the same Yjs collaboration model, both standalone and embedded in documents (editable in place). Documents and whiteboards are both persisted as CRDT state in Durable Object SQLite, with periodic snapshots.
 
 Officebox does not build a rich-text editing engine from scratch. The editor is Tiptap; collaborative state is Yjs. Officebox uses only the MIT-licensed open-source Tiptap packages:
 - the core
@@ -248,7 +256,7 @@ Officebox does not build a rich-text editing engine from scratch. The editor is 
 - Collaboration and the collaboration caret
 - Link, Image, Table, Task list, Mention and Placeholder.
 
-It does not depend on Tiptap's paid cloud features. Comments and version history are built on Officebox's own Yjs storage, so they stay in the customer's account and remain compatible with the AGPL. A stock Yjs client can connect to the Durable Object sync endpoint using the standard Yjs protocol (y-websocket).
+It does not depend on Tiptap's paid cloud features. Comments are stored in Officebox's database, anchored to the document with Yjs relative positions. Version history is built on Officebox's own Yjs storage. Both stay in the customer's account and remain compatible with the AGPL. A stock Yjs client can connect to the Durable Object sync endpoint using the standard Yjs protocol (y-websocket).
 
 ### 5.6 Projects, boards, issues and tasks
 
@@ -270,44 +278,48 @@ Officebox evaluates mature open-source React board components before building cu
 
 ### 5.7 Files
 
-Initial capabilities:
+First-release capabilities (detail in [specs/documents.md](specs/documents.md)):
 
-- Shared file storage and folders in R2.
-- Uploads and attachments.
-- File metadata and access controls.
-- Download links and previews where practical.
-- Links to messages, documents, projects and issues.
-- Versioning phased in as requirements become clear.
-- Files up to 2 GB by default (configurable by owners).
+- **Drives:** **My files** per member, a **group drive** per group (listed by name to everyone, contents for the group only), **shared drives** that members create, and a **Channels drive** with one folder per channel. Shared drives belong to the team, so their content survives people leaving.
+- **Channel folders:** their access follows channel membership, and channel members can edit everything in them. They hold documents and **saved copies** from chat. Chat attachments themselves stay with their message. DMs have no folder. When a channel is deleted, documents in its folder move to their creators.
+- **Files:** uploads, metadata, access controls, downloads and previews, all stored in R2.
+- **Versions:** upload a new version and keep the old ones, which can be downloaded or restored. Links always open the latest.
+- **Files up to 2 GB by default** (configurable by owners).
 - Images, PDFs, audio and video preview in the browser. Other types, including HTML and SVG, download instead of opening, for safety.
 - Owners can block chosen file types.
 - Files are not scanned for malware (§14).
 
-### 5.8 Realtime collaboration and huddles
+### 5.8 Realtime collaboration and calls (huddles)
 
 Realtime is fundamental to Officebox. The architecture uses two distinct realtime planes:
 
 - Application realtime (Durable Objects): chat delivery, presence, typing indicators, inbox updates and object-link changes. WebSocket connections to Durable Objects, with hibernation to keep idle cost near zero.
 - Collaborative state (Durable Objects + Yjs): document and whiteboard editing. One Durable Object holds one document or whiteboard; the authoritative Y.Doc lives in the object and is persisted to its SQLite storage, with snapshots and compaction.
 
-Media (huddles) uses Cloudflare Realtime SFU:
+Media for **calls** (called "huddles" in earlier drafts) uses Cloudflare Realtime SFU. Detail is in [specs/calls.md](specs/calls.md).
 
-- **Instant huddles:** audio-first huddles start from conversations, documents and projects. Starting one notifies the context's members, and anyone with access to that context can join.
+- **Ad-hoc, audio-first calls:** start one from a channel, DM, document or calendar event. Each context has one active call, and it ends 30 seconds after the last person leaves. There are no persistent rooms.
+- **Who is alerted:**
+  - **Channel calls never ring or ping anyone.** The channel shows a "call in progress" banner plus start and end messages.
+  - **DM and group-DM calls ring** the others for 30 seconds. Unanswered rings become a "missed call".
+  - Do-not-disturb, focus time and time off suppress ringing.
+- **Calendar event calls** can be joined from 10 minutes before the start, and attendees get a "starting now" notification. **Document calls** are recorded in the document's activity list.
+- **Joining:** mic on, camera off; automatically muted when the call already has 6 or more people. One call at a time per person. **Handoff** moves a call to another device. **Call waiting** rings someone already in a call, who must leave their current call to accept.
 - **Video:** optional, and off by default.
 - **Screen sharing and present mode:** see below.
-- **No scheduling:** join and leave without calendar ceremony.
-- **Visible context:** each huddle shows the context it started in and links back to it, and the context shows who is in the huddle. When a huddle ends, a short summary (duration, participants) is posted to the context.
-- **Size:** up to 25 participants per huddle by default.
-- **Controls:** mute, camera, share screen, raise hand and leave. The person who started the huddle, and channel admins for channel huddles, can mute participants and stop a share.
+- **Visible context:** each call shows where it started and links back to it, and the context shows who is in the call. When a call ends, a short summary (duration, participants) is posted to the context.
+- **In-call chat** is kept afterwards: as a thread in channel and DM calls, and with the document or event otherwise.
+- **Size:** up to 25 participants per call by default.
+- **Controls:** mute, camera, share screen, reactions, raise hand (an ordered queue), noise suppression and leave. Moderation (muting, stopping a share, lowering hands, removing someone) belongs to the host and to channel admins, document owners or event organisers. It passes on if the host leaves.
 - **Encryption:** media is encrypted in transit. It passes through Cloudflare's SFU and is not end-to-end encrypted, and Officebox says so plainly.
-- **TURN:** provided by Cloudflare Realtime, sharing the SFU free tier: the first 1,000 GB of egress per month is free, then $0.05/GB. For small-team audio huddles this is effectively free.
+- **TURN:** provided by Cloudflare Realtime, sharing the SFU free tier: the first 1,000 GB of egress per month is free, then $0.05/GB. For small-team audio calls this is effectively free.
 
 #### Screen sharing
 
-Users can share their screen in any huddle, or start a huddle by sharing straight from a channel, DM, document or project.
+Users can share their screen in any call, or start a call by sharing straight from a channel, DM, document or event.
 
 - **What can be shared:** an entire screen, a single application window or a single browser tab, through the browser's standard picker. Tab audio can be included where the browser supports it (Chromium-based browsers). Full system audio is not promised.
-- **One presenter at a time,** which keeps attention focused and bandwidth predictable. Another participant can ask to take over, and the presenter accepts with one click. The huddle starter or a channel admin can hand over directly.
+- **One presenter at a time,** which keeps attention focused and bandwidth predictable. Another participant can ask to take over, and the presenter accepts with one click. The call's host or a moderator can hand over directly.
 - **Viewing:**
   - the share becomes the main view, with participant tiles alongside
   - viewers can go full screen or pop the share into its own window (picture-in-picture where supported)
@@ -330,18 +342,18 @@ When the thing being shown is an Officebox document or whiteboard, users can **p
 
 - Followers' views track the presenter's position, zoom and selection in real time, at full quality and with no video bandwidth.
 - Any follower can break away to look around, then rejoin with one click.
-- Present mode works inside a huddle or on its own. For example, a user can walk a colleague through a spec while talking on a call elsewhere.
+- Present mode works inside a call or on its own. For example, a user can walk a colleague through a spec while talking on a call elsewhere.
 
 #### Media usage
 
-Screen sharing and video use the most bandwidth. As a guide, a 30-minute 1080p share watched by 8 people uses about 3–4 GB of SFU egress, so the free allowance covers a few hundred such sessions a month. The usage panel (§13) shows huddle bandwidth.
+Screen sharing and video use the most bandwidth. As a guide, a 30-minute 1080p share watched by 8 people uses about 3–4 GB of SFU egress, so the free allowance covers a few hundred such sessions a month. The usage panel (§13) shows call bandwidth.
 
 Delivery sequence:
 
 1. Application realtime (Durable Objects) and core chat presence.
 2. Collaborative documents and whiteboards (Durable Objects + Yjs).
-3. Audio huddles (Realtime SFU).
-4. Video, screen sharing and present mode.
+3. Channel and DM calls with audio, video and screen sharing (Realtime SFU).
+4. Event calls (with the calendar) and document calls with present mode (with documents).
 5. Optional AI transcription, summaries and action items, with consent and retention controls.
 
 Recording is not an initial requirement.
@@ -363,6 +375,38 @@ AI actions that modify data or affect external systems require confirmation and 
 
 Semantic retrieval uses Vectorize with Workers AI embeddings. The retrieval pipeline filters results by the requesting user's permissions before returning content to the model.
 
+### 5.10 Calendar
+
+A team calendar built into the workspace. It replaces the earlier plan of only an outbound ICS feed. Detail is in [specs/calendar.md](specs/calendar.md).
+
+- **Calendar kinds:**
+  - **personal** (one per member; others see free/busy only)
+  - **group** (one per group, viewable by everyone)
+  - **channel** (optional)
+  - **standalone** shared calendars (such as an on-call rota)
+  - a **workspace** calendar for all-hands and company holidays
+  - a generated **public holidays** overlay.
+- **Events:**
+  - timed or all-day, with explicit time zones and recurrence ("this event", "this and following", "all events")
+  - private events show others "busy"
+  - optional **call** links and links to documents and channels.
+- **Invitations:** inviting members adds the event to their calendar straight away as *tentative* until they reply Yes, No or Maybe.
+- **Outside attendees:**
+  - invited by email with a standard calendar invitation
+  - on by default, limited to 50 external recipients per member per day; admins can restrict or turn this off
+  - RSVP links open a confirmation page, so mail scanners can't answer for people.
+- **Public holidays for every country** from a bundled dataset, with no external service. Each member's region is highlighted. Admins add company holidays.
+- **Time off** is declared without approval:
+  - everyone sees the dates; the type and note are visible only to the member
+  - it sets an "away until" status and silences rings and email.
+- **Focus time** (acts as do-not-disturb), **working location** (office, home, elsewhere) and **deadlines and milestones**.
+- **Reminders:** 10 minutes before timed events and 09:00 the day before all-day events, in-app by default. Email reminders are opt-in.
+- **Find a time** across attendees' working hours, time zones, time off and holidays.
+- **ICS feeds:**
+  - **Out:** a private, revocable feed per member, to subscribe to from Google, Outlook or Apple.
+  - **In:** read-only subscriptions to external calendars, visible only to the subscriber.
+  - Two-way Google and Microsoft sync comes later.
+
 ## 6. Identity, onboarding and authentication
 
 Initial product direction:
@@ -370,28 +414,29 @@ Initial product direction:
 - Built-in local user accounts in D1.
 - Invitation-based membership; no public registration.
 - First-run setup creates the initial owner. **Setup is protected by a one-time setup token** that only the person who deployed can obtain, either set as a secret during deployment or read from the Worker's logs in their Cloudflare dashboard. Without the token, a freshly deployed URL cannot be claimed by anyone who finds it. Once setup completes, the setup flow is permanently disabled.
-- Administrators invite members.
-- Invitation links are single-use and expire.
-- When email is unavailable, administrators can copy and share invitation links manually.
-- Users complete account setup and receive a concise first-use introduction.
+- **Owners and admins invite members.** Only owners can invite or promote admins.
+- Invitation links are single-use, bound to the invitee's email, and expire after 7 days. When email is unavailable, admins copy and share links manually.
+- **Onboarding:** account creation, a profile step, joining default (public) channels, a welcome post and a short tour.
 
-Planned security capabilities:
+First-release sign-in and security (detail in [specs/identity.md](specs/identity.md)):
 
-- Secure password storage.
-- Secure browser sessions.
-- Password reset when outgoing email is configured.
-- Configurable email verification.
-- TOTP multi-factor authentication.
-- Account disablement and session revocation by administrators.
-- Login activity visibility.
-
-OIDC/SSO and passkeys are future considerations, not MVP dependencies.
+- **Email and password, magic links by email, and passkeys.** Members may be passkey-only; **owners must keep a password**. Passkeys are tied to the workspace's domain (§13).
+- Secure browser sessions: 30 days, sliding. Members can see their devices and sign them out ("My devices" doubles as login-activity visibility).
+- **Scanner-safe email links:** magic-link, reset, recovery, invitation and email-change links open a confirmation page, and only a deliberate click uses them. Mail scanners can't use them up.
+- Password reset when email is configured. Email changes are confirmed through the new address.
+- **Admin powers are limited:**
+  - Admins can disable, delete, change the email of, or issue a **recovery link** to *members*.
+  - Doing any of those to admins or owners needs an owner.
+  - Every use notifies the person, by email to their old address and with an in-app banner, and revokes their pending sign-in links.
+- **Profiles:** name, unique **@handle** (shared namespace with groups), avatar, time zone, working hours, region, title, team, pronouns, phone, location and status. The directory shows contact details to every member.
+- **Groups** have **group managers**, and **@group mentions** notify members who can see the conversation.
+- **TOTP multi-factor authentication arrives after launch.**
 
 Further identity capabilities:
 
 - **SSO through Cloudflare Access (Phase 2):** customers can put their workspace behind Cloudflare Access, which is free for small teams. Officebox then signs members in with the company's identity provider, such as Google Workspace, Microsoft Entra, Okta or GitHub. This gives single sign-on and identity-provider MFA without Officebox implementing OIDC. Only existing or invited members can sign in this way. Owners can turn off local passwords for members.
 - **Owner recovery:** if every owner is locked out (password and MFA lost, and no email configured), someone with access to the Cloudflare account can set a one-time recovery secret. The secret allows resetting one owner's password and MFA. Recovery is audited, and a banner shows until the secret is removed.
-- **Disabled members:** their content stays. Their documents stay theirs until an admin transfers ownership, and their open issue assignments are flagged for reassignment.
+- **Disabled members:** their content stays, and so does their ownership. Their open issue assignments are flagged for reassignment. **Deleting** a member transfers their My files to an admin and erases their personal data. What happens per feature is set out in [platform §3](specs/platform.md).
 - **Device data:** signing out clears cached workspace data from the device. Revoking a session clears it the next time that device connects.
 
 ## 7. Email
@@ -416,28 +461,25 @@ Notifications are a product capability with multiple delivery channels:
 - Email notifications.
 - Future native mobile push through APNs/FCM if native apps are built.
 
-User controls:
+Behaviour is specified in [specs/notifications.md](specs/notifications.md), including the catalogue of notification types.
 
-- Per-event preferences.
-- Per-channel preferences.
-- Per-conversation or per-channel mute settings.
-- Do-not-disturb schedules.
-- Email digest preferences.
-- Per-device push settings where appropriate.
+- **Levels per conversation:**
+  - **All**
+  - **Mentions** (the default for channels)
+  - **Mute** (only direct @you mentions, no badges)
+  - **Nothing** (complete silence).
 
-Potential notification events:
-
-- Direct messages.
-- Mentions.
-- Thread replies.
-- Channel invitations.
-- Document sharing and review requests.
-- Task/issue assignments.
-- Due dates and project milestones.
-- A huddle starting in a channel, document or project the user follows.
-- Important security or system events.
-
-The first release includes basic in-app notifications. PWA installation and web push are Phase 2.
+  DMs default to All.
+- **Do-not-disturb:**
+  - Manual or on a weekly schedule. Working hours don't imply DND.
+  - DND holds in-app banners and sounds, **email notifications** and **call rings**. The inbox still records everything.
+  - In DMs, a sender can choose **"Notify anyway"** to break through, which is rate-limited.
+- **Focus time** acts as DND. **Time off** silences rings and email.
+- **Disclosure:** presence, senders and callers see "in do-not-disturb", "focusing until…" or "away until…".
+- **Offline email:** sent after 10 minutes unread by default; configurable to 5 or 30 minutes, hourly or daily digests, or off. Batched per conversation and cancelled when read.
+- **Emails for DMs, group DMs and private channels contain no message text** unless the member opts in.
+- **Security notices** (recovery link issued, email changed, role changed) are never held or muted.
+- **Web push** (PWA) arrives in Phase 2.
 
 Push payloads are generic by default and avoid sensitive message content. The client fetches the actual content after authenticating.
 
@@ -477,35 +519,47 @@ All object relationships, previews, inbox aggregations, search results and AI re
 
 | Role | Can |
 |---|---|
-| Owner | Everything an admin can, plus manage admins and owners, transfer ownership, and see installation, upgrade, backup and export settings. At least one active owner must always exist. |
-| Admin | Invite, disable and remove members; reset member MFA; manage groups; configure email, notifications and storage thresholds; archive or delete any channel or object; view the audit log. |
+| Owner | Everything an admin can, plus invite, promote and manage admins and owners, transfer ownership, and see installation, upgrade, backup and export settings. Owners must keep a password. At least one active owner must always exist. |
+| Admin | Invite members; disable, delete, change the email of, or issue recovery links to *members* (acting on admins or owners needs an owner, and the person is always notified); manage groups; configure workspace settings; archive or delete any channel or object (without reading private content); view the audit log. |
 | Member | Use the workspace; create public and private channels, documents, whiteboards and files; share what they own. |
 
 Guest and external-collaborator accounts are out of scope for the first release. A **guest** role is planned for Phase 2. Guests can see only the channels and documents explicitly shared with them. They never see the member directory, public channels or workspace-wide search, and they can't create channels or invite others. The `users.role` column reserves this value, so adding guests needs no schema redesign.
 
 The baseline role model is validated through interviews with at least five design-partner teams before Phase 1 exits.
 
-**Groups.** Admins create named groups (for example, teams or departments). A group can be granted access anywhere a user can.
+**Groups.** Admins create named groups (for example, teams or departments) and appoint group managers. A group can be granted access to documents, folders, drives and calendars. It can't be a member of a channel: "invite this group" adds its members individually.
+
+The full role and access rules, including the permission matrix for every object type, are in [specs/permissions.md](specs/permissions.md).
 
 **Channels.**
 
 - *Public channels:* every member can find, read and join them.
-- *Private channels:* visible only to their members. Members are added by a channel admin.
-- *Direct messages:* visible only to their participants.
+- *Private channels:* visible only to their members. **Members can add people; channel admins remove them.** Workspace admins can archive or delete private channels and remove members, but **can't join or read them** unless a member adds them.
+- *Announcement channels:* everyone can read; only channel admins and chosen posters write.
+- *Direct messages and group DMs:* visible only to their participants.
 
-Channel roles are *channel admin* (rename, manage members, archive) and *channel member*.
+Channel roles are *channel admin* (rename, manage members, archive), *poster* (announcement channels) and *channel member*.
 
-**Documents and whiteboards.** Resource roles are *owner*, *editor*, *commenter* and *viewer*. They can be granted to a user, a group, or a channel's members. Each document also has a general-access setting:
+**Documents, whiteboards, folders, drives and files.**
+- **Roles:** *owner*, *editor*, *commenter* and *viewer* (drives add *manager*). They can be granted to a user, a group, or a channel's members.
+- **General access:** *restricted*, *workspace can view*, *workspace can comment* or *workspace can edit*.
+- **Effective access is the union** of the item's own grants, its folders up to the drive, the drive, and general access; the highest role wins. Sharing can widen access, never narrow it below what the folder gives.
+- **New items take their container's access:**
+  - My files: private
+  - a shared or group drive or folder: that drive's or folder's access
+  - a channel folder: channel members, who can edit.
 
-- *Restricted:* only explicit grants.
-- *Workspace can view*, *workspace can comment* or *workspace can edit*.
+  Nothing starts workspace-wide unless its folder is.
+- **A channel made private** keeps any explicitly wider shares on items in its folder. The conversion dialog lists them so the channel admin can restrict them first.
+- **Group drives** are listed by name to everyone; their contents are visible only to the group unless shared.
 
-Defaults:
+**Files attached to messages** belong to the message and share its access. Drive files follow the document rules.
 
-- A document created from a public channel or from scratch: workspace can edit.
-- A document created from a private channel or DM: restricted, with editor access for that channel's members.
-
-**Files.** A file attached to a message, document or issue inherits the access of that object. Files in shared folders use the same grants and general access as documents.
+**Calendars.**
+- **Personal calendars** show others only when the person is busy (*free/busy*).
+- **Group calendars** are viewable by every member. Standalone calendars are shared like documents.
+- **Private events** show calendar editors a "busy" block they can't open or edit. Invitees always see the details.
+- **Time off:** everyone sees the dates; the type and note are visible only to the member.
 
 **Projects (Phase 2).** Public or private, like channels.
 
@@ -517,7 +571,7 @@ Defaults:
 
 ### 10.2 Retention and deletion (baseline)
 
-These rules are the baseline for the Phase 1 schema. Phase 1 uses the fixed defaults below. **Configurable retention policies** arrive in Phase 2: owners can set per-workspace and per-channel auto-deletion of messages and files after N days. The schema supports them from the start, through `purge_after` and the purge pipeline.
+These rules are the baseline for the Phase 1 schema. Full detail per object, including who can restore from Trash, is in [platform §5](specs/platform.md). Phase 1 uses the fixed defaults below. **Configurable retention policies** arrive in Phase 2: owners can set per-workspace and per-channel auto-deletion of messages and files after N days. The schema supports them from the start, through `purge_after` and the purge pipeline.
 
 | Data | Default retention | On deletion |
 |---|---|---|
@@ -530,7 +584,17 @@ These rules are the baseline for the Phase 1 schema. Phase 1 uses the fixed defa
 | User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, password, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents passes to an admin. |
 | Audit log | 365 days, configurable | Purged automatically. It never stores message or document content. |
 | AI interaction logs (Phase 3) | 30 days, configurable | Purged automatically. |
-| Huddle history | 365 days | Metadata only (context, participants, times). No audio, video or screen content is ever recorded. |
+| Call (huddle) history | 365 days | Metadata only (context, participants, times, rings). No audio, video or screen content is ever recorded. Separate from in-call chat. |
+| In-call chat | Life of its context | Channel and DM calls: a thread in the conversation. Document and event calls: kept with the document or event, not purged with the call record. |
+| Calendars and events | Kept until deleted | Trash for 30 days, restorable by the owner, organiser, calendar editors or an admin |
+| Time off | Until the member deletes it | Erased when the member is deleted (it can contain sensitive types) |
+| External attendee emails | 90 days after the event ends (the last occurrence, for a series) | Purged automatically |
+| Drives and folders | Kept until deleted | Trash for 30 days, restorable by drive managers, editors of the parent folder or an admin |
+| Comments | Life of the document | Deleted immediately when the author or a moderator deletes them |
+| File versions | With their file (at most 100 versions; the oldest are dropped first) | Purged with the file |
+| Polls and votes | Life of the channel | Votes are stored only as per-poll hashed keys |
+| Saved items | Until removed, or until access is lost or the message is deleted | — |
+| Access requests | Pending ones expire after 30 days; decided ones are kept 90 days | Purged automatically |
 | Search and AI indexes | Same as the source object | Updated or removed whenever the source is edited, deleted or has its access changed. |
 
 **Platform recovery windows.** Cloudflare keeps point-in-time recovery data for up to 30 days: D1 Time Travel, Durable Object point-in-time recovery, and R2 noncurrent versions if the customer enables versioning. So purged data can remain recoverable by the account owner for up to 30 days after purge. Officebox documents this rather than promising instant permanent erasure.
@@ -587,7 +651,7 @@ The primary deployment mechanism is the Deploy to Cloudflare button. It copies t
 
 During deployment the customer can set a setup token secret. If they skip it, the application generates a one-time token and writes it to the Worker's logs, which only the Cloudflare account can see. The first visit to the workspace asks for this token before the owner account can be created.
 
-**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs and push subscriptions are tied to the domain, so changing it later signs everyone out and push must be re-enabled.
+**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later signs everyone out, push must be re-enabled, and passkeys stop working: passkey-only members recover through an admin recovery link. Officebox warns when a passkey is registered on a `workers.dev` address.
 
 **Data location.** D1 keeps its primary copy in one location, chosen at deployment with a location hint. Durable Objects are created near their first user. Performance targets assume members are in the same broad region as the data; members elsewhere see higher latency. An **EU data-residency option** (Phase 2) keeps D1, R2 and Durable Objects in Cloudflare's EU jurisdiction wherever each service supports it.
 
@@ -652,7 +716,10 @@ D1 Time Travel provides point-in-time recovery to any minute within the last 30 
   - one JSON Lines file per table
   - channel messages
   - document and whiteboard state, both in native Yjs form and as readable Markdown or JSON
-  - all files.
+  - all files and their versions
+  - calendars, events, attendees and time off; drives and folders; comments; polls (votes as hashed keys only); saved items and preferences.
+
+  **Excluded:** sessions, sign-in tokens, passkeys (members register again after a restore to a new domain), MFA secrets, ICS feed tokens and the URLs of subscribed external calendars, which are secrets. Full coverage is in [platform §6](specs/platform.md).
 
   The format is documented and stable across versions, so other tools can read it.
 - **Running exports:** an export can be started on demand or on a schedule (for example, weekly). Each export is internally consistent per object, recording each channel's message position and each document's state. It is not one instant across the whole workspace. For a fully consistent export, the owner can put the workspace in read-only maintenance mode while the export runs.
@@ -660,6 +727,8 @@ D1 Time Travel provides point-in-time recovery to any minute within the last 30 
 - **Testing:** restore is tested on every release.
 
 Data ownership is the customer's. They can export, delete or migrate their data at any time. Deletion follows the rules in §10.2, including Cloudflare's recovery windows of up to 30 days. Officebox does not hold customer data outside the customer's Cloudflare account.
+
+Admin settings and rate limits are listed in [platform §7–§8](specs/platform.md).
 
 Missing backup or export configuration does not block startup. Demos, evaluation and development remain possible. Warnings are visible to administrators, not ordinary users.
 
@@ -686,7 +755,7 @@ Officebox monitors each store against its real limit and never silently discards
 - Kubernetes-based deployment (Cloudflare-native only).
 - Native desktop and native mobile apps at launch.
 - Enterprise-scale compliance and administration features before customer need is demonstrated.
-- Recording huddles, remote control of shared screens, and annotation on shared screens.
+- Recording calls, remote control of shared screens, and annotation on shared screens.
 - Malware scanning of uploaded files.
 - A separate personal AI memory system in the first AI release.
 
@@ -694,7 +763,9 @@ Officebox monitors each store against its real limit and never silently discards
 
 Phases describe product capability, not a requirement to postpone foundational architecture. Durable Objects, the shared workspace object model, permissions and durable event handling are architectural foundations even when some user-facing features arrive later.
 
-### Phase 1 — Integrated workspace foundation
+### Phase 1 — First release
+
+Delivered in the milestones in [PLAN.md](PLAN.md): foundation → identity → realtime → chat → calls → calendar → documents, with operations and the Personal Inbox alongside.
 
 - One-click Deploy to Cloudflare deployment.
 - Token-protected first-run setup.
@@ -702,12 +773,17 @@ Phases describe product capability, not a requirement to postpone foundational a
 - Trash, purge and the retention rules in §10.2.
 - Member invitations and basic administration.
 - React application shell and responsive experience.
-- Channels and direct messages.
+- Sign-in with password, magic links and passkeys; profiles, @handles, groups and group managers (§6).
+- Notifications, levels, do-not-disturb and offline email (§8).
+- Chat: channels, announcement channels, DMs and group DMs, threads, pins, saved items, polls and link previews (§5.4).
 - Durable message history in channel Durable Objects, with a D1 copy for search.
+- Calls: channel and DM calls with audio, video, screen sharing and ringing; event and document calls; present mode (§5.8).
+- Calendar: personal, group, channel, standalone and workspace calendars, holidays, time off, invitations (including outside attendees), reminders, focus time, working location and ICS in and out (§5.10).
 - Basic permission-filtered full-text search across messages and documents.
-- Shared documents using Tiptap + Yjs in Durable Objects.
-- Whiteboards using Yjs in Durable Objects.
-- R2 file uploads and attachments.
+- Documents in drives and folders using Tiptap + Yjs in Durable Objects, with comments, version history, embeds, export and offline editing (§5.5).
+- Whiteboards using Yjs in Durable Objects, standalone and embedded.
+- Files in R2: message attachments and versioned drive files (§5.7).
+- Personal Inbox with Today, Upcoming, Inbox, Assigned to me and Following views, using Officebox-native sources (§5.3).
 - Explicit links between conversations and documents.
 - Basic in-app notifications via Durable Objects.
 - SMTP configuration for transactional email.
@@ -720,17 +796,14 @@ Phases describe product capability, not a requirement to postpone foundational a
 
 ### Phase 2 — Connected collaboration and work management
 
-- Audio huddles via Cloudflare Realtime SFU.
-- Video, screen sharing and present mode (§5.8).
 - Guest role; SSO through Cloudflare Access; configurable retention policies.
 - Imports from Slack, Notion and Google Docs; webhooks and the public REST API (§19).
-- Document comments; personal calendar (ICS) feed.
 - EU data-residency option.
-- PWA installation and web push.
+- PWA installation and web push (including ringing when the app is closed).
 - Projects, boards, issues and lightweight tasks.
-- Personal Inbox with Today, Upcoming, Inbox, Assigned to me and Following views, using Officebox-native event sources.
+- Two-way Google and Microsoft calendar sync; time-off approvals; booking pages.
+- Document templates, public links and suggestion mode.
 - Richer contextual object links and previews.
-- More complete document editing, revision history and collaborative awareness.
 - TOTP MFA.
 - Richer search filters and cross-object search.
 - Improved notification preferences and digest controls.
@@ -745,7 +818,7 @@ Phases describe product capability, not a requirement to postpone foundational a
 - Optional meeting transcription and summaries, subject to consent and retention controls.
 - Further Personal Inbox intelligence, such as suggested follow-ups and extracted commitments, with user review and clear provenance.
 
-The exact sequencing should be validated against user research, component evaluations and implementation capacity. Calendar support is an outbound ICS feed in Phase 2 and optional read-only calendar connections in Phase 3 or later (§5.3).
+The exact sequencing should be validated against user research, component evaluations and implementation capacity. The calendar ships in its own milestone after calls (§5.10, PLAN M5).
 
 ## 16. Product success criteria
 
@@ -758,7 +831,8 @@ The initial product should be judged by whether a small organisation can:
 - Move between conversations and related workspace objects without losing context.
 - Understand what needs their attention through a coherent Personal Inbox as that capability ships.
 - Receive useful notifications without being overwhelmed.
-- Collaborate in realtime and use huddles without a separate account or disconnected workflow.
+- Collaborate in realtime and use calls without a separate account or disconnected workflow.
+- Plan their time with shared calendars, holidays and time off in the same workspace.
 - Operate without configuring AI.
 - Configure AI without surrendering control of its provider account.
 - Understand its storage, backup and data ownership responsibilities.
@@ -785,6 +859,9 @@ Before Phase 1 exit, validate at minimum:
 - No acknowledged message is lost when the D1 copy is delayed or fails. Edits and deletions reach every connected client, the D1 copy and search.
 - Deleting a message, document, file or user removes the content as described in §10.2, including from search indexes.
 - A member without access cannot read a private channel, DM or restricted document through any route: the API, WebSocket, search, previews or links.
+- The permission engine passes the matrix test across every role and object type in [specs/permissions.md](specs/permissions.md). Admins can't act on admins or owners without an owner.
+- Disabling or deleting a member behaves as the lifecycle matrix in [platform §3](specs/platform.md) says, including dropping them from open calls, documents and channels.
+- Email links (magic link, reset, recovery, invitation, RSVP) survive being opened by a mail scanner without being used up.
 - Storage warnings and protective mode behave safely as D1 approaches its limit, and trimming the searchable message copy frees space without losing messages.
 - Durable Object WebSocket hibernation keeps idle channels connected without accruing billable duration.
 - Durable Object Yjs sync supports a stock Yjs client and persists document state across object eviction.
@@ -800,11 +877,11 @@ Every question open at v1.1 now has a recommended decision, recorded here and in
 |---|---|---|---|
 | Role model, and whether guests are needed sooner | Keep the §10.1 baseline. Guest role in Phase 2. Validate with at least five design-partner teams. | §10.1 | Validate before Phase 1 exit |
 | Configurable retention policies | Fixed defaults in Phase 1. Per-workspace and per-channel auto-deletion in Phase 2. | §10.2 | Decided |
-| Tiptap extension set | MIT open-source Tiptap packages only. No paid Tiptap cloud. Comments and history built on Officebox's own Yjs storage. | §5.5 | Decided |
+| Tiptap extension set | MIT open-source Tiptap packages only. No paid Tiptap cloud. Comments in Officebox's database, history on Officebox's own Yjs storage. | §5.5 | Decided |
 | Revision history depth | Hourly for 7 days, daily for 90 days, named versions kept for the document's lifetime | §5.5 | Decided |
 | Board/issue component | dnd-kit with Officebox's own D1 data model. No embedded standalone tracker. | §5.6 | Decided |
-| Personal Inbox semantics | Ordering, grouping, states, snooze presets and automatic resolution as specified | §5.3 | Validate in Phase 2 usability testing |
-| Calendar integration | Outbound per-user ICS feed in Phase 2. Optional read-only Google/Microsoft in Phase 3 or later. No write-back. | §5.3 | Decided |
+| Personal Inbox semantics | Ordering, grouping, states, snooze presets and automatic resolution as specified | §5.3 | Validate in usability testing before the Inbox milestone |
+| Calendar | A first-class calendar in the first release, with ICS in (personal) and out. Two-way Google/Microsoft sync later. | §5.10 | Decided |
 | AI log visibility | Users see and delete their own history. Admins see metadata only, never content. | §11 | Decided |
 | Export format and restore | Versioned JSON Lines + Yjs + files archive in R2. "Restore from export" in a fresh installation. Restore tested every release. | §13; TDD §7.5 | Decided |
 | Native mobile apps | Reconsider after Phase 2 if mobile is more than 30% of sessions and PWA limits are a top-three pain point. Start with a PWA wrapper. | §9 | Decided |
@@ -816,19 +893,19 @@ Resolved in v1.1:
 - Beta access: free, opt-in (§1).
 - Upgrade mechanism: release-sync pull requests (§13).
 
-New questions should be added to this table with an owner and a decision deadline.
+Feature-level open questions now live in each spec's "Open questions" section. New product questions should be added to this table with an owner and a decision deadline.
 
 ## 18. Non-functional requirements
 
 | Area | Requirement |
 |---|---|
-| Accessibility | WCAG 2.2 AA for all core flows. Full keyboard operation, screen-reader labels and support for reduced motion. Huddle captions arrive with transcription (Phase 3). |
+| Accessibility | WCAG 2.2 AA for all core flows. Full keyboard operation, screen-reader labels and support for reduced motion. Call captions arrive with transcription (Phase 3). Single-key shortcuts can be turned off or remapped, and drag actions have keyboard and single-pointer alternatives. |
 | Browsers | The latest two major versions of Chrome, Edge, Firefox and Safari on desktop. Safari on iOS 16.4+ and Chrome on Android for the PWA. Web push on iOS requires installing to the home screen. Screen sharing needs a desktop browser. |
 | Languages | English at launch. All interface text is externalised for translation. Dates, times and numbers follow the user's locale. Right-to-left languages come later. |
-| Availability | Inherits Cloudflare's platform availability; Officebox offers no separate uptime SLA (support plans cover response times). Chat and documents keep working when optional services (AI, email, huddles) are unavailable. |
+| Availability | Inherits Cloudflare's platform availability; Officebox offers no separate uptime SLA (support plans cover response times). Chat and documents keep working when optional services (AI, email, calls) are unavailable. |
 | Performance | The targets in TDD §9.2. |
 | Security | OWASP ASVS Level 2 as the baseline for the web application (TDD §8). |
-| Limits (defaults) | Designed and tested for 100 members (soft limit 250); messages up to 40 KB; 20 attachments per message; files up to 2 GB; 25 huddle participants; one screen share per huddle; documents tested to 5 MB of content. |
+| Limits (defaults) | Designed and tested for 100 members (soft limit 250). Messages up to 40 KB, with 20 attachments per message and 3 link previews. Group DMs of 3–8 people; 100 pins per channel. Files up to 2 GB, with 100 versions per file. Calls of 25 participants, one screen share per call. Offline documents: 20, up to 100 MB. External calendar subscriptions: 50 per workspace. External invitation recipients: 50 per member per day. Documents tested to 5 MB of content. All limits and rate limits: [platform §8](specs/platform.md). |
 
 ## 19. Imports, integrations and APIs
 
@@ -865,21 +942,25 @@ New questions should be added to this table with an owner and a decision deadlin
 | Media | Cloudflare Realtime SFU (SFU + TURN) | Agreed |
 | File storage | R2 | Agreed |
 | AI | BYOK via AI Gateway | Agreed |
-| Authentication | Built-in local accounts initially | Agreed |
+| Authentication | Built-in local accounts: password, magic link and passkeys at launch; owners keep a password; TOTP after launch | Agreed |
 | First-run setup | Protected by a one-time setup token; disabled after use | Agreed |
-| Role model | Owner/admin/member workspace roles; channel and document resource roles; admins cannot read private content in the app | Baseline |
+| Role model | Owner/admin/member workspace roles; channel, drive and calendar roles; union inheritance; admins cannot read or join private content; only owners act on admins and owners | Agreed ([permissions](specs/permissions.md)) |
 | Retention and deletion | Kept until deleted; 30-day Trash; immediate message deletion; documented 30-day platform recovery window | Baseline |
 | Message storage | Channel Durable Object is the source of truth; guaranteed asynchronous copy to D1 for search, inbox and export | Agreed |
 | Onboarding | Invitation-based; manual links supported without SMTP | Agreed |
 | Email | External SMTP; no mail server | Agreed |
-| Notifications | Central service with multiple delivery adapters | Agreed |
+| Notifications | Central service with multiple delivery adapters; All/Mentions/Mute/Nothing; DND holds banners, email and rings; "Notify anyway"; no text in DM and private-channel emails unless opted in | Agreed ([notifications](specs/notifications.md)) |
 | Web push | Phase 2 | Agreed |
 | Tasks/projects | Phase 2 | Agreed |
 | Personal AI memory | Deferred pending separate privacy and retention design | Deferred |
 | Guest accounts | Guest role in Phase 2 with access to explicitly shared channels and documents only | Agreed |
 | Editor licensing | MIT Tiptap packages only; no paid Tiptap cloud dependency | Agreed |
 | Board UI | dnd-kit on Officebox's own data model | Agreed |
-| Calendar | Outbound ICS feed in Phase 2; optional read-only connections later | Agreed |
+| Calendar | First-class calendar in the first release: all calendar kinds, holidays for all countries, declared time off, outside invitations with limits, ICS in and out | Agreed ([calendar](specs/calendar.md)) |
+| Chat files | Belong to their message; "Save to folder" copies them into a drive; DM files stay in the DM | Agreed |
+| Document defaults | New items follow their container's access; My files private; channel folders editable by channel members | Agreed |
+| Calls | Ad-hoc, audio-first; channel calls never ping; DM calls ring; event and document calls; 25 participants | Agreed ([calls](specs/calls.md)) |
+| Feature names | Generic names for now; marketing names later | Agreed |
 | AI log visibility | Users: own history; admins: metadata only | Agreed |
 | Export and restore | Versioned open archive; Restore from export in a fresh installation | Agreed |
 | Support plans | Community, Standard and Priority plus one-off packages; per installation | Pricing to validate |
@@ -898,5 +979,8 @@ New questions should be added to this table with an owner and a decision deadlin
 ## Appendix B — Related documents
 
 - [Technical Design Document (TDD)](TDD.md): architecture, Durable Object design, D1 schema, Yjs sync, AI pipeline, deployment, upgrades and operations.
+- [Feature specs](specs/): [identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md); cross-cutting [permissions](specs/permissions.md), [notifications](specs/notifications.md) and [platform rules](specs/platform.md).
+- [Build plan](PLAN.md): milestones, slices and the definition of done.
+- [AGENTS.md](AGENTS.md): how we work, for people and coding agents.
 - Open-Source Component Evaluation Register: candidate projects, licences, maturity, integration model, data ownership and replacement strategy.
 - Architecture Decision Records (ADRs): detailed rationale for consequential technical choices.
