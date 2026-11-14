@@ -13,6 +13,22 @@ The product vision is clear and well argued. It has sensible principles, honest 
 
 Cloudflare limits and prices change often. Figures marked *(verify)* are ones I'm reasonably sure of but you should check against current Cloudflare docs before relying on them.
 
+## Status after PRD/TDD v1.1
+
+| Item | Status | Where |
+|---|---|---|
+| C1 Business model | **Resolved.** AGPL-3.0; every release free, including security fixes; revenue from paid support, priority fixes and assisted setup/migration; free beta. | PRD §1, §2, §4, Appendix A |
+| C2 Upgrades | **Resolved.** A release-sync GitHub Actions workflow opens a signed-release PR built from a three-way diff; merging deploys via Workers Builds; expand/contract migrations with `rollback_safe_to`; no credentials in the app. | PRD §13; TDD §6.2–6.7 |
+| C3 First-run setup | **Resolved.** One-time setup token (deploy secret or generated and logged); atomic claim; disabled after use. | PRD §6; TDD §6.8 |
+| C4 Message storage | **Resolved.** The DO event log is the source of truth; transactional outbox to an idempotent D1 copy; edits, deletes and reactions as events; `clientId` dedupe; reconciliation. | PRD §5.4; TDD §2.0, §2.2, §3.3 |
+| C5 Schema / roles / retention | **Resolved (baseline).** Role model and retention rules are defined as baselines for customer validation; full Phase 1 schema with indexes and permission resolution; purge pipeline. | PRD §10.1–10.2; TDD §2.1, §2.3 |
+
+The v1.1 changes also fixed these contradictions: "pay once", GitHub vs GitLab, where messages are stored, `memberships.workspace_id`, the missing `notifications` table, and the AI test in Phase 1.
+
+Some new design points depend on Deploy-button and D1 behaviour that needs checking. They are listed in TDD §10.
+
+The High and Medium items below are still open.
+
 ---
 
 ## Critical: resolve before any build work
