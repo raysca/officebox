@@ -7,6 +7,8 @@
 
 Decisions marked **(default)** were not discussed; change them on review.
 
+**Cross-cutting rules:** permissions follow [Permissions](permissions.md); notifications follow [Notifications & Attention](notifications.md); lifecycle, cascades, retention, export, admin settings, limits and timers follow [Platform Rules](platform.md). Those specs win on cross-cutting rules.
+
 ## 1. Summary
 
 Identity & Access covers:
@@ -111,7 +113,7 @@ An invite opened by someone already signed in as another member shows "You're si
   - single-use, valid for **15 minutes**, open on **any device**
   - sent only to active members with an email
   - the request page shows the same message whether or not the account exists, so it doesn't reveal which emails have accounts
-  - **opening the link shows a "Sign in as *email*" confirmation page**; only the POST from that page uses the token. Mail scanners and link prefetchers that open links with GET can't sign in or use it up (platform §10 Email links). The same applies to password-reset and recovery links.
+  - **opening the link shows a "Sign in as *email*" confirmation page**; only the POST from that page uses the token. Mail scanners and link prefetchers that open links with GET can't sign in or use it up (platform §10 Email links). The same applies to password-reset, recovery, invitation and email-change confirmation links.
 - **Passkeys:**
   - members can register several, each with a name and a "last used" time; they can rename and remove them
   - removing the last sign-in method is blocked: a member always keeps a password or at least one passkey
@@ -182,7 +184,7 @@ An invite opened by someone already signed in as another member shows "You're si
 - **Group managers** add and remove members of their group. Admins can manage any group.
 - **Uses:**
   - @group mentions (notify members who can see the conversation)
-  - permission grants on **documents, whiteboards, folders, files, drives and calendars**. Groups have **no grants on channels**; "invite this group" to a channel adds its current members individually (permissions §2 Principles).
+  - permission grants on **documents, whiteboards, folders, files, drives and calendars**. Groups have **no grants on channels**; "invite this group" to a channel adds its current members individually (permissions §3.3 Principals).
   - group calendars and group drives
   - "invite this group" shortcuts.
 - **Creating a group** also creates its **group calendar** and **group drive** (platform §13 Provisioning and backfill). Renaming the group renames both.
@@ -294,7 +296,7 @@ ALTER TABLE sessions ADD COLUMN device_label TEXT;         -- e.g. "Chrome on ma
 ALTER TABLE sessions ADD COLUMN approx_location TEXT;      -- from request.cf (city/country), if available; deleted with the session
 ```
 
-Settings keys: `default_channels`, `allowed_invite_domains`, `magic_link_enabled`, `min_password_length`.
+Settings keys (defined in platform §7 Admin settings): `default_channels`, `welcome_post_enabled`, `allowed_invite_domains`, `magic_link_enabled`, `min_password_length`.
 
 ## 6. API (summary)
 

@@ -20,6 +20,8 @@
 
 Decisions marked **(default)** were not discussed; change them on review.
 
+**Cross-cutting rules:** permissions follow [Permissions](permissions.md); notifications follow [Notifications & Attention](notifications.md); lifecycle, cascades, retention, export, admin settings, limits and timers follow [Platform Rules](platform.md). Those specs win on cross-cutting rules.
+
 ## 1. Summary
 
 Instant, audio-first calls you can start from any conversation, document or calendar event, with optional video, screen sharing and present mode. Media goes through the Cloudflare Realtime SFU. Signalling and call state go through Officebox (TDD §3.6). No recording.
@@ -49,7 +51,7 @@ Instant, audio-first calls you can start from any conversation, document or cale
 
 | Context | Milestone | Start from | Who can join | Notes |
 |---|---|---|---|---|
-| Channel | M4 | Channel header "Start call" | Anyone who can read the channel | One active call per channel. Banner in the header and sidebar. Not available in archived channels. |
+| Channel | M4 | Channel header "Start call" (anyone who can read the channel, including announcement channels) | Anyone who can read the channel | One active call per channel. Banner in the header and sidebar. Not available in archived channels. |
 | DM / group DM | M4 | DM header | DM participants | **Rings** the others |
 | Calendar event | M5b | Event "Join call" | **Invitees + anyone with details-level access to the event's calendar** ([Calendar](calendar.md) §4.5). Free/busy-only viewers can't. | Join window opens 10 minutes before start |
 | Document / whiteboard | M6 | Document header | Anyone with access to the document | Present mode is suggested |
@@ -66,7 +68,8 @@ Instant, audio-first calls you can start from any conversation, document or cale
 **Start and end records:**
 - **Channels and DMs:** start and end **system messages**. The end message shows duration and participants.
 - **Events:** recorded on the event (shown in the event detail).
-- **Documents:** recorded in the **document details panel → Activity** ([Documents](documents.md), section "Activity") **(default)**.
+- **Documents:** recorded in the **document details panel → Activity** ([Documents](documents.md) §6.1 Activity) **(default)**.
+- The channel `call_started` system message is posted by the HuddleRoom through a **typed-result RPC to the ChatChannel DO** ([Chat](chat.md) §4.6 System messages).
 
 ## 4. Ringing (DMs and group DMs)
 
@@ -166,8 +169,7 @@ As specified in **PRD §5.8** and **TDD §3.6 / §4.5**, and validated in the sp
   - in channel calls: **channel admins**
   - in document calls: **document owners**
   - in event calls: the **event organiser**.
-- **When the host leaves,** moderation passes to the moderators present: channel admins, document owners or the event organiser. If none are present, the call continues without a moderator.
-- **In DM and group-DM calls**, any participant may stop a screen share **(default)**.
+- **When the host leaves,** moderation passes to a moderator who is present: a channel admin, the document owner or the event organiser. Otherwise, in DM and group-DM calls, any participant may stop a screen share. Otherwise, moderation passes to the **earliest remaining participant** **(default)**. [Permissions](permissions.md) §4.5 says the same.
 - **Moderators can:**
   - mute a participant (the participant must unmute themselves; they can't be force-unmuted)
   - stop a screen share

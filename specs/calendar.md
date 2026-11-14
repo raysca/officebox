@@ -15,6 +15,8 @@
 
 **Related PRD section:** §5.3 (to be extended)
 
+**Cross-cutting rules:** permissions follow [Permissions](permissions.md); notifications follow [Notifications & Attention](notifications.md); lifecycle, cascades, retention, export, admin settings, limits and timers follow [Platform Rules](platform.md). Those specs win on cross-cutting rules.
+
 Decisions marked **(default)** were not discussed; change them on review. Calendar is **new scope** compared with PRD v1.3, which only planned an outbound ICS feed. The PRD and TDD will be updated to match this spec.
 
 ## 1. Summary
@@ -51,7 +53,7 @@ A team calendar built into the workspace:
 
 | Kind | Created | Default access | Notes |
 |---|---|---|---|
-| **Personal** | Automatically for each member | Owner edits. `general_access = freebusy`: every member sees busy blocks. | Holds the member's own events, invitations they've received, time off, focus time and working location |
+| **Personal** | Automatically for each member | Owner edits. `general_access = workspace_freebusy`: every member sees busy blocks. | Holds the member's own events, invitations they've received, time off, focus time and working location |
 | **Group** | Automatically for each group | Group members **edit**. **Every member views** (`general_access = workspace_view`). | Shows the group's events plus an overlay of members' time off |
 | **Channel** | Optional; added from channel settings | Channel members edit; follows channel visibility | Private channel calendars are visible to members only |
 | **Standalone** | Any member creates one (e.g. "On-call rota") | Creator is owner; shared with users, groups and channels as editor / viewer / free/busy; general access restricted / free/busy / workspace view / workspace edit | |
@@ -67,7 +69,7 @@ A team calendar built into the workspace:
   - *viewer*: see details
   - *freebusy*: busy blocks only.
 
-  They're resolved by the permission engine as a resource type ([Permissions](permissions.md) §4). `freebusy` is a stored grant role and a `general_access` value (§12).
+  They're resolved by the permission engine as a resource type ([Permissions](permissions.md) §4). `freebusy` is a stored grant role; the matching calendar-wide general access value is `workspace_freebusy` (§12; [Permissions](permissions.md) §9).
 - **Deletion:**
   - personal, workspace and group calendars can't be deleted directly; they follow their owner, group or workspace ([Platform](platform.md) §4)
   - channel calendars are removed with their channel
@@ -136,7 +138,7 @@ What a person sees for an event depends on their role on its calendar, the event
 | **Attendee** (any calendar role, including none) | Full details; RSVP, personal notes | Full details; RSVP, personal notes | Full details; RSVP, personal notes |
 | **Calendar owner / editor** (not organiser or attendee) | Full details, can edit | **Busy block only; can't open, edit, move or delete** | Full details, can edit |
 | **Calendar viewer** | Full details, read-only | Busy block only | Full details, read-only |
-| **Free/busy access** (grant or `general_access = freebusy`) | Busy block only (if `show_as = busy`) | Busy block only | **Full details**, read-only |
+| **Free/busy access** (grant or `general_access = workspace_freebusy`) | Busy block only (if `show_as = busy`) | Busy block only | **Full details**, read-only |
 | **No access to the calendar** | Not shown | Not shown | Not shown |
 
 - **An attendee always sees full details of an event they're invited to**, even on a calendar they can't otherwise view.
@@ -183,8 +185,8 @@ What a person sees for an event depends on their role on its calendar, the event
 - **Effects:**
   - The member's personal calendar shows it.
   - **Group calendars** show it for all of the member's groups, as dates only.
-  - Their status becomes **"Away until *next working day*"**: the first day after `end_date` that falls inside the member's working hours and isn't a public holiday in their region ([Notifications](notifications.md) §5). For example, time off ending Friday shows "Away until Mon 3 Dec".
-  - Calls don't ring them ([Calls](calls.md) §4).
+  - Their status becomes **"Away until *next working day*"**: the first day after `end_date` that is a working day in the member's working hours and isn't one of their public holidays ([Notifications](notifications.md) §5.5 Status precedence). For example, time off ending Friday shows "Away until Mon 3 Dec".
+  - Time off **acts as do-not-disturb for rings and email** ([Notifications](notifications.md) §5.3): calls don't ring them ([Calls](calls.md) §4), and no notification emails are sent during it.
   - Event invitations during time off warn the organiser.
   - "Find a time" treats them as unavailable.
 - **Automatic status changes:** the status switches on and off at the start and end of the time off by scheduled triggers ([Platform](platform.md) §11). Cancelling time off clears the automatic status immediately.
@@ -215,7 +217,7 @@ What a person sees for an event depends on their role on its calendar, the event
 ## 9. Reminders and notifications
 
 - **Default reminders:** timed events **10 minutes before**; all-day events **09:00 the day before** (the attendee's time zone); delivered **in-app**. **Email reminders** are opt-in per member.
-- Members change their defaults (stored in user preferences, [Notifications](notifications.md) §7), and add or remove reminders per event.
+- Members change their defaults (stored in `user_preferences.reminder_defaults`, [Notifications](notifications.md) §7), and add or remove reminders per event.
 - **Minute precision:**
   - The **ReminderScheduler** Durable Object, with its `scheduled_triggers` table, materialises upcoming reminder times for recurring events, exceptions and attendee time zones.
   - It keeps its alarm set to the next due trigger, catches up after downtime, and reschedules on edits, declines and attendee changes ([Platform](platform.md) §11).
@@ -281,9 +283,9 @@ CREATE TABLE calendars (
   owner_user_id TEXT REFERENCES users(id),       -- personal, standalone, external
   group_id TEXT REFERENCES groups(id),           -- group
   channel_id TEXT REFERENCES channels(id),       -- channel
-  general_access TEXT NOT NULL DEFAULT 'restricted'
-    CHECK (general_access IN ('restricted', 'freebusy', 'workspace_view', 'workspace_edit')),
-    -- personal: 'freebusy'; group/workspace: 'workspace_view'; standalone: chosen; external: 'restricted'
+  general_access TEXT NOT NULL DEFAULT 'restricted',
+    -- values: 'restricted' | 'workspace_freebusy' | 'workspace_view' | 'workspace_edit' (validated with Zod; platform §14)
+    -- personal: 'workspace_freebusy'; group/workspace: 'workspace_view'; standalone: chosen; external: 'restricted'
   created_at INTEGER NOT NULL,
   archived_at INTEGER,
   deleted_at INTEGER,
@@ -384,7 +386,8 @@ CREATE TABLE ics_subscriptions (
 );
 -- huddles.context_type gains 'event' (calls spec §9; schema reconciliation in platform §14).
 -- Reminder triggers live in the ReminderScheduler's scheduled_triggers table (platform §11).
--- settings: holiday_regions (JSON), external_invites ('on' | 'admins' | 'off'); reminder defaults live in user preferences (notifications §7).
+-- settings (platform §7): holiday_regions (JSON), external_invites ('on' | 'admins' | 'off'), external_invite_daily_cap, ics_subscription_limit;
+-- reminder defaults live in user_preferences.reminder_defaults (notifications §7).
 ```
 
 ### 12.1 Range queries and the "My calendars" overlay

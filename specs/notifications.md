@@ -44,7 +44,7 @@ Every notification is an `inbox_items` row (TDD §2.1) with an `event_type`. The
 | `here_mention` | `@here` | Channel members online when it was sent | In-app only **(default)** | `channel:seq:here:user` | As `mention` |
 | `dm` | DM or group DM message | Other participants | In-app; email | `channel:dm:user` · **one item per conversation**, updated with a count | The member reads the DM |
 | `thread_reply` | Reply in a followed thread | Thread followers, except the author | In-app; email **(default)** | `thread:root:user` · one item per thread with a count | The member reads the thread |
-| `missed_call` | Unanswered or suppressed DM ring | The callee | In-app; email **(default)** | `huddle:user` | The member opens the DM or calls back |
+| `missed_call` | Unanswered, declined-by-timeout or suppressed DM ring (also refused rings to members in DND or on time off) | The callee | In-app; email **(default)** | `huddle:user` | The member opens the DM or calls back |
 | `call_starting` | Event call at start time | Attendees who accepted or haven't answered | In-app only | `event:occurrence:start:user` | 15 minutes after start, or when they join |
 | `event_invite` | Invited to an event | The attendee | In-app; email | `event:invite:user` | The member RSVPs |
 | `event_update` | Time, location or call changed | Attendees who haven't declined | In-app; email if the time changed **(default)** | `event:update:user` (latest wins) | The member opens the event |
@@ -52,10 +52,10 @@ Every notification is an `inbox_items` row (TDD §2.1) with an `event_type`. The
 | `rsvp_response` | An attendee answers | The organiser | In-app, batched hourly **(default)** | `event:rsvp:organiser` (count) | The organiser opens the event |
 | `reminder` | Event reminder due | The attendee who set it | In-app; email if chosen | `event:occurrence:reminder:minutes:user` | The event starts, or the member dismisses it |
 | `doc_mention` | `@person` in a document or comment | The mentioned member, if they have access (otherwise the author is asked to share) | In-app; email | `doc:node-or-comment:user` | The member opens the document |
-| `comment` | New comment thread on a document | The document owner, plus followers of the document **(default)** | In-app; email | `doc:thread:user` | The member opens the thread |
+| `doc_comment` | New comment thread on a document | The document owner, plus followers of the document **(default)** | In-app; email | `doc:thread:user` | The member opens the thread |
 | `comment_reply` | Reply in a comment thread | People who commented in the thread | In-app; email | `doc:thread:user` (count) | The member opens the thread |
 | `access_request` | Request access to an object (permissions §7) | The object's owner and editors (or managers) | In-app; email | `object:requester` | Approved, declined, or expired |
-| `access_granted` | A request was approved | The requester | In-app; email | `object:requester` | The member opens the object |
+| `access_request_decided` | A request was approved or declined | The requester | In-app; email | `object:requester` | The member opens the object (approved) or dismisses it (declined) |
 | `share` | An object was shared with the member, or with a group or channel they belong to | Newly granted members (not whole-workspace general access) | In-app; email for direct shares only **(default)** | `object:share:user` | The member opens the object |
 | `poll_closed` | A poll closes (manually or on time) | The poll creator **(default)** | In-app only | `poll:closed` | The member opens the conversation |
 | `security_notice` | Recovery link used, email changed, role changed, password changed, passkey added, new sign-in from a new device **(default)** | The affected member | In-app **and email (always, to the old address for an email change)**, not affected by levels or DND | `security:kind:id` | Dismissed |
@@ -133,7 +133,7 @@ A member's displayed status and availability come from the highest-precedence ac
 
 - A **manual status message** (emoji and text, Identity §4.7) is shown alongside, unless time off or focus provides an automatic message, in which case the automatic message is shown first and the manual one second **(default)**.
 - **Automatic statuses clear themselves** when their source ends (time off ends or is cancelled, focus block ends). The scheduler, not the client, clears them. A manual status clears at its own expiry or when the member clears it.
-- **"Away until"** shows the **next working day after `end_date`**: the first day after the time-off range that is a working day in the member's working hours and isn't one of their public holidays. For example, time off Fri–Sun with Monday a bank holiday shows "away until Tue".
+- **"Away until"** shows the **next working day after `end_date`**: the first day after `end_date` that is a working day in the member's working hours and isn't one of their public holidays. For example, time off Fri–Sun with Monday a bank holiday shows "away until Tue".
 
 ### 5.6 Active
 

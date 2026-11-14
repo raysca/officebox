@@ -41,10 +41,10 @@ The rules every feature follows, so features behave consistently and no data is 
 
 | Feature | Disabled | Deleted |
 |---|---|---|
-| **Identity** | Sign-in refused. `session_epoch` bumped. All sockets closed with `4401`, including chat, documents, hub **and calls** (room registry kind `huddle`, so the member drops out of calls immediately). Shown under **Deactivated** in the directory. Handle kept. | Everything for *disabled*, then the [erase list](#31-personal-data-erase-list) runs. Handle released (held 30 days). Shown as "Former member". |
+| **Identity** | Sign-in refused. `session_epoch` bumped. All sockets closed with `4401`, including chat, documents, hub **and calls** (room registry kind `huddle`, so the member drops out of calls immediately: the HuddleRoom socket closes and their SFU tracks are closed). The same applies to anyone who **loses access to a call's context** (removed from the channel, document or event). Shown under **Deactivated** in the directory. Handle kept. | Everything for *disabled*, then the [erase list](#31-personal-data-erase-list) runs. Handle released (held 30 days). Shown as "Former member". |
 | **Chat** | DMs and group DMs are kept and marked **"deactivated"**. Sending to them is disabled **(default)**. Excluded from mention autocomplete and from `@here`. `@channel` and `@group` no longer notify them. Offline emails stop. If they were the **last channel admin**, the longest-standing remaining member is promoted (audited). | Messages stay, attributed to "Former member". Their `thread_follows`, `saved_items` and `sidebar_prefs` are erased. `@handle` text in plain-text copies and the search index is re-rendered as **"Former member"** **(default)**. |
-| **Calls** | Removed from any active call (above). Rings to them are **refused** ("*Name* is deactivated"). They can't host. A call they hosted passes host duties to the longest-present participant **(default)**. | As disabled. Huddle participant rows show "Former member". |
-| **Calendar** | They **stay organiser** of their events **(default)**. Their reminders and emails stop. Invitations to them are refused. Hidden from find-a-time. ICS-out feeds stop serving. ICS-in refreshes pause. | Future events they organised: **organiser transferred** to the first remaining editor of the event's calendar, or else the calendar owner **(default)**. Standalone calendars they owned are **transferred to an admin**. ICS-in subscriptions and ICS-out feeds are **revoked**. `time_off` is **erased** (it holds sensitive types). `event_notes` and `event_reminders` are deleted. Attendee rows show "Former member". |
+| **Calls** | Removed from any active call (above). Rings to them are **refused** ("*Name* is deactivated"). They can't host. Moderation of a call they hosted passes as set out in [Calls](calls.md) §6.7 (a present moderator; otherwise any participant in DM calls; otherwise the earliest remaining participant). | As disabled. Huddle participant rows show "Former member". |
+| **Calendar** | They **stay organiser** of their events **(default)**. Their reminders and emails stop. Invitations to them are refused. Hidden from find-a-time. **ICS-out feed tokens are revoked.** ICS-in refreshes pause. | Future events they organised: **organiser transferred** to the first remaining editor of the event's calendar, or else the calendar owner **(default)**. Standalone calendars they owned are **transferred to an admin**. ICS-in subscriptions and ICS-out feeds are **revoked**. `time_off` is **erased** (it holds sensitive types). `event_notes` and `event_reminders` are deleted. Attendee rows show "Former member". |
 | **Documents and files** | They **keep ownership** (PRD §6). Shares stay. Pending access requests to them are re-routed to other editors or managers. | **My files** (documents, whiteboards, files, folders) is **transferred to an admin**. So is ownership of individual items elsewhere. Drives they managed get an admin as manager if none remains. `stars`, `recent_items` and `access_requests` are erased. Comments stay as "Former member". |
 | **Notifications** | No new inbox items, emails or rings. Pending delayed emails are dropped when they fire. | `inbox_items`, `notification_preferences` and `user_preferences` are erased. |
 | **Search** | Their content stays searchable. Hidden from people search **(default)**. | Content stays (attributed to "Former member"). Removed from people search. `@handle` occurrences re-rendered (Chat row). |
@@ -158,7 +158,7 @@ This extends TDD §7.5.
 | Time off | Including type and note (the export is owner-only) |
 | Drives, folders, documents, whiteboards, files **with all versions** | `files/<file id>/<version>` |
 | Comment threads and comments | |
-| Polls and votes | **Votes as hashed keys only**, never member IDs |
+| Polls and votes | Anonymous polls export **votes as hashed `voter_key`s only**, never member IDs; `poll_secret` is excluded. Non-anonymous polls export voter IDs. |
 | Saved items, stars, sidebar prefs, user and notification preferences | |
 | In-call chat | From `huddle_messages` (document and event calls) **and** from channel threads (channel and DM calls, part of channel export) |
 | Huddle metadata, call rings | Within retention |
@@ -190,10 +190,10 @@ The single list of workspace settings. Feature specs reference this table instea
 | `screen_share` | `everyone` (`everyone` / `admins` / `off`) | **Owner** | `settings.screen_share` | PRD §5.8, Calls §6.6 |
 | `screen_share_max_height` | 1080 (720 / 1080) | **Owner** | `settings.screen_share_cap` | PRD §5.8, Calls §6.6 |
 | `holiday_regions` | regions of current members | Admin | `settings.holiday_regions` | Calendar §6 |
-| `external_invites` | `everyone` (`everyone` / `admins` / `off`) | Admin | `settings.external_invites` | Calendar §8 |
+| `external_invites` | `on` (`on` / `admins` / `off`) | Admin | `settings.external_invites` | Calendar §8 |
 | `external_invite_daily_cap` | 50 recipients per member per day | Admin | `settings.external_invite_cap` | Calendar §8, §8 here |
 | `ics_subscription_limit` | 50 per workspace | Admin | `settings.ics_limit` | Calendar §10 |
-| `offline_caching` | on | Admin | `settings.offline_caching` | Documents §4.7 |
+| `offline_documents_enabled` | on (members can also turn it off for themselves in `user_preferences.offline_cache`) | Admin | `settings.offline_documents` | Documents §4.7 |
 | `email_provider` | not configured | **Owner** | `settings.email` | TDD §7.6 |
 | `telemetry` | off | **Owner** | `settings.telemetry` | TDD §7.9 |
 | `storage_thresholds` | 70 / 85 / 95 / 98 % | **Owner** | `settings.storage` | TDD §7.7 |
@@ -216,7 +216,7 @@ Short-window limits use the Workers **Rate Limiting binding**. Daily quotas use 
 | Setup, recovery, invitation acceptance | 5 per minute per IP | TDD §8.1 |
 | Message sends | 10 per 10 seconds per user per conversation **(default)** | |
 | `@channel` / `@here` | 1 per 5 minutes per user per channel **(default)** | |
-| "Notify anyway" (break through DND) | 3 per hour per sender per recipient **(default)** | Notifications §5 |
+| "Notify anyway" (break through DND) | **Once per sender per recipient per 30 minutes** **(default)** | Notifications §5.2 |
 | Group DM creation | 20 per hour per user **(default)** | |
 | Poll creation | 10 per hour per user **(default)** | |
 | Rings | 5 rings to the same person per 10 minutes **(default)** | |
@@ -239,7 +239,8 @@ Short-window limits use the Workers **Rate Limiting binding**. Daily quotas use 
 | Link previews per message | 3 |
 | Group DM size | 8 |
 | Call participants | 25 |
-| Offline documents per device | 20 |
+| Drives per workspace | 500 **(default)** |
+| Offline documents per device | 20 documents, 100 MB total |
 | Message body | 40 KB |
 | Poll options | 2–10 |
 
@@ -289,12 +290,14 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 | Timer | Owner | Mechanism |
 |---|---|---|
 | Event reminders | **ReminderScheduler DO** (singleton) | `scheduled_triggers` (below) |
-| "Call starting now — join" | ReminderScheduler | Trigger kind `event_start` |
+| Event call starting (`call_starting` notification) | ReminderScheduler | Trigger kind `event_start` |
 | Focus-time DND start and end | ReminderScheduler | Kinds `focus_start` / `focus_end` → user preference update + hub event |
 | Time-off status start and end | ReminderScheduler | Kinds `timeoff_start` / `timeoff_end` → automatic status |
 | Status expiry | ReminderScheduler | Kind `status_expire` |
 | DND schedule (daily quiet hours) | ReminderScheduler | Kinds `dnd_start` / `dnd_end`, from the member's schedule, refilled daily |
-| **10-minute unread email** | **Queues, delayed message** | One message per recipient per conversation, sent with `delaySeconds` = the member's delay. Deduplicated by key `(user, conversation, window)`. When it fires, the consumer checks the read cursor, activity and DND, and sends only if still unread. |
+| **10-minute unread email** | **Queues, delayed message** | One message per recipient per conversation, sent with `delaySeconds` = the member's delay. Deduplicated by key `(user, conversation, window)`. When it fires, the consumer checks the read cursor, activity, DND and time off, and sends only if still unread. **Paused during DND and time off:** if the member is in DND or on time off when it fires, it's re-enqueued for the end of that period. |
+| DND-end held-notification summary | UserHub DO | When DND, focus or time off ends, the hub delivers "While you were away…" ([Notifications](notifications.md) §5.1) |
+| RSVP-response batch | Hourly cron | Groups `rsvp_response` notifications per organiser ([Notifications](notifications.md) §3) |
 | Poll auto-close | Channel DO | Alarm multiplexer timer `poll:<id>` |
 | Huddle end (30 s after empty) | HuddleRoom DO | Alarm timer `end_at` |
 | Screen hand-over deadline (5 s) | HuddleRoom DO | Alarm timer `handover_deadline` |
@@ -375,7 +378,8 @@ This replaces TDD §3.5's "at most three WebSockets per tab".
 | Table | Change | Final value | Source |
 |---|---|---|---|
 | `users.role` | Add value | `owner`, `admin`, `member`, `guest` (guest reserved; Phase 2) | Identity §2, PRD §10.1 |
-| `users` | Add columns | handle, avatar_key, timezone, working_hours, region, job_title, team, pronouns, phone, location, status_*, onboarded_at, tour_dismissed_at | Identity §5 |
+| `users` | Add columns | handle (denormalised copy of `handles`), avatar_key, timezone, working_hours, region, job_title, team, pronouns, phone, location, status_*, onboarded_at, tour_dismissed_at, `pending_security_notice` | Identity §5 |
+| `handles`, `passkeys`, `auth_tokens` | New tables | As Identity §5 (`handles` is authoritative) | Identity §5 |
 | `invitations.email` | Nullability | **NOT NULL** (copy-link invites always carry the email) | Identity §4.2 |
 | `invitations` | Add | `group_ids` | Identity §5 |
 | `groups`, `group_members` | Add | `groups.handle`; `group_members.role` (`manager`, `member`) | Identity §5 |
@@ -383,23 +387,32 @@ This replaces TDD §3.5's "at most three WebSockets per tab".
 | `channels.type` | Add value | `public`, `private`, `dm`, **`group_dm`**. `dm_key` is required for `dm` and `group_dm`. Converting a group DM to a private channel clears `dm_key` and sets a name. | Chat §3.1 |
 | `channels` | Add | `topic`, `description`, `posting_policy` | Chat §15 |
 | `channel_members` | Add | `can_post`, `hidden`, `email_delay` | Chat §15 |
-| `messages` (D1 copy) | Replace / add | `format` + `text` (replaces `body`), `kind` (`user`, `system`), `system_payload`, `reply_count`, `last_reply_at`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15 |
-| `follows` vs `thread_follows` | Merge | One table, `follows`, with `object_type = 'thread'` and `last_read_seq` | Chat §15 |
-| `resource_grants.resource_type` | Values | `document`, `whiteboard`, `folder`, `file`, `drive`, `calendar`, `project` | Permissions §4 |
-| `resource_grants.role` | Values | `owner`, `manager`, `editor`, `commenter`, `viewer`, `freebusy` | Permissions §3 |
+| `messages` (D1 copy) | Add | `kind` (`user` or a system kind), `format` (rich-text JSON; the existing `body` column holds the plain-text copy, `text`), `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15 |
+| `thread_follows` | New table | Thread follows and per-thread read state. The TDD `follows` table remains for other object types. | Chat §15 |
+| `saved_items`, `sidebar_prefs`, `link_previews`, `message_previews` | New tables | As Chat §15 (`saved_items.state`: `in_progress`, `done`) | Chat §15 |
+| `channel_members.notify_level` | Values | `default`, `all`, `mentions`, `mute`, `nothing` | Notifications §7 |
+| ChatChannel DO `events.actor_id` | Exception | For `poll.voted` on **anonymous** polls, the actor is the per-poll `voter_key`, never a user ID (TDD §2.2 change) | Chat §9 |
+| `resource_grants.resource_type` | Values | `document`, `whiteboard`, `folder`, `file`, `drive`, `calendar`, `project` | Permissions §9 |
+| `resource_grants.role` | Values | `owner`, `manager`, `editor`, `commenter`, `viewer`, `freebusy` | Permissions §9 |
+| `general_access` (documents, folders, files, drives, calendars) | Values | `restricted`, `workspace_freebusy` (calendars only), `workspace_view`, `workspace_comment`, `workspace_edit`. Personal calendars default to `workspace_freebusy`, group and workspace calendars to `workspace_view`. | Permissions §9 |
 | `folders.general_access` | Default | **`restricted`** (new items follow the container) | Permissions §5 |
-| `folders` | Add | `drive_id`, `channel_id` | Documents §8 |
+| `access_requests` | New table | Unique pending request per `(object_type, object_id, requester_id)`, with `expires_at` (30 days) | Permissions §9, Documents §9 |
+| `item_activity` | New table | Details-panel activity | Documents §9 |
+| `folders` | Add | `drive_id`, `channel_id` | Documents §9 |
 | `files` | Rules | Either **message-owned** (`parent_type = 'message'`, no folder, no versions, deleted with the message) or a **drive file** (`folder_id` set, versioned). "Save to folder" copies a message-owned file into a new drive file. | §2; Documents §6 |
-| `files` | Add | `drive_id`, `current_version`; new `file_versions` table | Documents §8 |
-| `documents` | Add | `folder_id`, `drive_id` | Documents §8 |
-| `huddles.context_type` | Values | `channel` (including DMs), `document`, `event` (`project` reserved) | Calls §9 |
-| `huddles` | Add | `started_message_id`, `kind`, `purge_after` | Calls §9 |
-| `huddle_messages` | FK | Keyed to the **context** (`context_type`, `context_id`), plus `huddle_id` as a nullable reference **without cascade** | §5 |
+| `files` | Add | `drive_id`, `current_version`, `copied_from_file_id` (Save to folder provenance); new `file_versions` table | Documents §9 |
+| `documents` | Add | `folder_id`, `drive_id`, `created_by` | Documents §9 |
+| `drives`, `stars`, `recent_items`, `comment_threads`, `comments` | New tables | As Documents §9 | Documents §9 |
+| `huddles.context_type` | Values | `channel` (including DMs), `document`, `event` (`project` reserved) | Calls §10 |
+| `huddles` | Add | `started_message_id`, `purge_after`, **`context_key`** (e.g. `channel:<id>`, `document:<id>`, `event:<id>`, `event:<id>:<occurrenceStart>`). The active-call unique index moves to `context_key WHERE ended_at IS NULL`. The call kind is **derived**, not stored. | Calls §3, §10 |
+| `huddle_messages` | New table | Keyed to the **context** (`context_type`, `context_id`, `context_key`), plus `huddle_id` as a nullable reference **without cascade**. Written through an outbox. | Calls §10, §5 here |
+| `call_rings` | New table | Missed-call records (UserHub holds live ring state) | Calls §10 |
 | `calendars.kind` | Values | `personal`, `group`, `channel`, `standalone`, `workspace`, `external` (holidays are generated, not stored) | Calendar §12 |
-| `events` | Add | `range_start`, `range_end` (UTC ms) for every event, so all-day and single events are found in range queries; `purge_after` | Calendar §12 |
+| Calendar tables | New tables | `calendars`, `events` (with `range_start`, `range_end` in UTC ms for every event, and `purge_after`), `event_exceptions`, `event_attendees`, `event_reminders`, `event_notes`, `time_off`, `ics_feeds`, `ics_subscriptions` | Calendar §12 |
 | `time_off` | Add | `purge_after` (not needed if no Trash; see §5) | Calendar §12 |
 | UserHub room registry | Add kind | `channel`, `doc`, **`huddle`** | §3 |
-| `user_preferences` | New table | Defined in Notifications §7 | Notifications §7 |
+| `user_preferences`, `notify_anyway_log` | New tables | Defined in Notifications §7 (`user_preferences.reminder_defaults`, `offline_cache`, `dnd_until`, `dnd_schedule`, ...) | Notifications §7 |
+| `scheduled_triggers` | New table (ReminderScheduler DO SQLite) | §11.1 | §11 |
 
 ## 15. Acceptance criteria
 

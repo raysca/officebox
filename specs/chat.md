@@ -7,6 +7,8 @@
 
 Decisions marked **(default)** were not discussed; change them on review.
 
+**Cross-cutting rules:** permissions follow [Permissions](permissions.md); notifications follow [Notifications & Attention](notifications.md); lifecycle, cascades, retention, export, admin settings, limits and timers follow [Platform Rules](platform.md). Those specs win on cross-cutting rules.
+
 ## 1. Summary
 
 Real-time team conversation:
@@ -312,6 +314,7 @@ ALTER TABLE messages ADD COLUMN reply_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE messages ADD COLUMN previews TEXT;          -- JSON array of url_hash
 ALTER TABLE messages ADD COLUMN forwarded_from TEXT;    -- JSON { channelId, messageId }
 ALTER TABLE messages ADD COLUMN also_in_channel INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN system_payload TEXT;   -- JSON payload for system messages (§4.6); NULL for user messages
 
 -- thread follows: replaces the TDD `follows` table for threads (follows remains for other object types)
 CREATE TABLE thread_follows (user_id TEXT NOT NULL, channel_id TEXT NOT NULL, root_message_id TEXT NOT NULL,

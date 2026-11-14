@@ -171,13 +171,13 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 
 | Context | Start | Join | Moderate (mute, stop a share, lower hands, remove) |
 |---|---|---|---|
-| Channel | Anyone who can read the channel (except announcement channels: posters and channel admins **(default)**) | Anyone who can read the channel | Host (the starter), channel admins |
+| Channel | Anyone who can read the channel, including announcement channels ([Chat](chat.md) owns this) | Anyone who can read the channel | Host (the starter), channel admins |
 | DM / group DM | A participant | Participants | Host |
 | Document / whiteboard | Commenter or above **(default)** | Anyone with access to the document | Host, document owner |
 | Calendar event | Organiser or attendee | Invitees, plus full-details viewers (§4.4) | Host, event organiser |
 
 - Archived channels can't host calls.
-- If the host leaves, moderation passes to channel admins, the document owner or the event organiser if present; otherwise to the earliest remaining participant **(default)**.
+- If the host leaves, moderation passes to a moderator who is present (channel admin, document owner or event organiser). Otherwise, in DM and group-DM calls, any participant may stop a screen share. Otherwise, moderation passes to the earliest remaining participant **(default)**. [Calls](calls.md) §6.7 says the same.
 - Losing access to the context removes the person from an active call: the call's socket closes and its SFU tracks are closed (platform §3 Member lifecycle).
 
 ### 4.6 Profiles, directory and groups
@@ -297,7 +297,7 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 - A request goes to approvers' inboxes (notifications §3 Notification events: `access_request`). Approvers grant a role up to their own, or decline.
 - **One open request per requester per object.** Repeats update the existing one.
 - Requests are rate-limited (platform §8 Rate limits and quotas) and **expire after 30 days (default)**.
-- The requester is notified of the outcome.
+- The requester is notified of the outcome (notifications §3 Notification events: `access_request_decided`).
 
 ## 8. Enforcement points
 
@@ -364,8 +364,8 @@ Guest role (Phase 2) · custom roles · deny rules · per-item narrowing below t
 ## 13. Open questions
 
 1. **Editors sharing:** can editors share and change general access, or only owners? The default above allows editors.
-2. **Calls in announcement channels:** posters and channel admins only, or anyone who can read?
-3. **Who receives host powers** when the host leaves a call with no channel admin, document owner or organiser present?
+
+Resolved in the reconciliation pass: calls in announcement channels can be started by anyone who can read the channel (Chat owns this), and host powers pass to a present moderator, otherwise any participant in DM calls, otherwise the earliest remaining participant (§4.5, Calls §6.7).
 
 **PRD and TDD changes needed** (to apply when the docs are updated):
 - PRD §10.1: private channel membership ("any member adds, channel admins remove"); document defaults now follow the container; group principals don't apply to channels; owner-only admin actions; time-off privacy.

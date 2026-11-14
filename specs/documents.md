@@ -8,6 +8,8 @@
 
 Decisions marked **(default)** were not discussed; change them on review.
 
+**Cross-cutting rules:** permissions follow [Permissions](permissions.md); notifications follow [Notifications & Attention](notifications.md); lifecycle, cascades, retention, export, admin settings, limits and timers follow [Platform Rules](platform.md). Those specs win on cross-cutting rules.
+
 ## 1. Summary
 
 Collaborative documents and whiteboards, and the files around them, organised in **My files** and **shared drives**:
@@ -184,7 +186,7 @@ Live, permission-checked embeds inserted with `/embed` or by pasting an Officebo
 - **Moderation:** the document **owner**, **editors** **(default)** and **admins** (on documents they can access) can delete any comment. A removed comment shows "Comment removed by *name*", and the removal is audited.
 - **Permissions:** commenters and above can comment; viewers can read comments.
 - **Realtime:** new, edited, resolved and removed comments fan out to viewers who have the document open, through hub activity (platform §12).
-- **Notifications** (notifications §3): `doc_comment` to the document owner and thread participants; `doc_mention` to anyone mentioned.
+- **Notifications** (notifications §3 Notification events): `doc_comment` to the document owner and the document's followers; `comment_reply` to people who commented in the thread; `doc_mention` to anyone mentioned.
 
 ### 4.5 Version history
 
@@ -360,7 +362,7 @@ CREATE TABLE item_activity (                         -- details-panel activity (
 CREATE INDEX item_activity_object ON item_activity(object_type, object_id, created_at);
 ```
 
-- `resource_grants` takes `resource_type` values `drive` and `folder`, and the role `manager`, as defined in permissions §3 and platform §14. These are part of the baseline CHECK sets, not added later.
+- `resource_grants` takes `resource_type` values `drive` and `folder`, and the role `manager`, as defined in permissions §3 and platform §14. These are part of the baseline value lists (validated with Zod, not CHECK constraints; platform §14), not added later.
 - The permission engine walks drive → folders → item and **unions** the grants (§3.4).
 - **Embeds** are editor nodes holding `{ type, id }`. They're rendered client-side through permission-checked API calls; no content is copied into the document.
 - Retention and purge of every table above follow platform §5. Export coverage (drives, folders, file versions, comments, activity) follows platform §6.
@@ -379,7 +381,7 @@ CREATE INDEX item_activity_object ON item_activity(object_type, object_id, creat
 | `POST /files/uploads` · `PUT /files/uploads/:id/parts/:n` · `POST /files/uploads/:id/complete` | Multipart upload into a folder |
 | `GET /files/:id` · `GET /files/:id/download?version=` | File details and download (Range supported) |
 | `POST /files/:id/versions` · `POST /files/:id/versions/:n/restore` | New version, restore a version |
-| `POST /chat-files/:id/save` | Save a chat attachment to a folder (independent copy) |
+| `POST /files/:id/save-to-folder` (`{ folderId }`) | Save a chat attachment to a folder (independent copy). Defined in [Chat](chat.md) §17 API; listed here for completeness. |
 | `GET /items/:type/:id/grants` · `PUT /items/:type/:id/grants` | Sharing (people, groups, channels; general access) |
 | `POST /items/:type/:id/access-requests` · `POST /access-requests/:id/approve` · `POST /access-requests/:id/decline` | Access requests |
 | `GET /documents/:id/comments` · `POST /documents/:id/comments` (new thread) | Comment threads |
