@@ -1,0 +1,192 @@
+# AGENTS.md — How we build Officebox
+
+These are the working rules for everyone writing code or docs in this repository, people and coding agents alike. Read this file first, then the documents it points to.
+
+## 1. What Officebox is
+
+A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar, documents and files in one deployment. It runs in the customer's own Cloudflare account and is open source under AGPL-3.0. There are no per-seat fees.
+
+## 2. Source documents
+
+| Document | Answers | Owner of truth for |
+|---|---|---|
+| [`PRD.md`](PRD.md) | **Why and what**: product promise, principles, scope, phases | Product direction and decisions (Appendix A) |
+| [`specs/*.md`](specs/) (feature specs) | **Exactly how a feature behaves**: decisions, rules, data, API, acceptance criteria | Feature behaviour and feature tables |
+| [`specs/permissions.md`](specs/permissions.md), [`specs/notifications.md`](specs/notifications.md), [`specs/platform.md`](specs/platform.md) (cross-cutting specs) | **Rules every feature follows**: access, notifications and attention, lifecycle, retention, export, settings, limits, timers, schema reconciliation | Cross-cutting rules |
+| [`TDD.md`](TDD.md) | **How it's built**: architecture, schemas, protocols, security, operations | Technical design |
+| [`PLAN.md`](PLAN.md) | **In what order**: milestones, slices, definition of done | Delivery sequence |
+| [`spikes/`](spikes/) | **What we proved**: throwaway prototypes and findings | Reference only, never imported |
+
+**Feature specs:**
+- [Identity & Access](specs/identity.md)
+- [Chat](specs/chat.md)
+- [Calls](specs/calls.md)
+- [Calendar](specs/calendar.md)
+- [Documents, Whiteboards & Files](specs/documents.md)
+
+**Cross-cutting specs** (every feature follows these):
+- [Permissions](specs/permissions.md)
+- [Notifications & Attention](specs/notifications.md)
+- [Platform Rules](specs/platform.md): lifecycle, cascades, retention, export, admin settings, limits, outbound fetching, email links, timers, connection budget, provisioning, schema
+
+**Precedence when documents disagree:**
+1. **Cross-cutting specs override feature specs** on cross-cutting rules (permissions, notifications, lifecycle, retention, export, settings, limits, timers).
+2. **Feature specs override the PRD** on feature detail.
+3. **Data models:** spec data-model sections are authoritative for **feature tables**; the TDD is authoritative for **core tables**. The two are reconciled in platform §14 Schema reconciliation.
+4. The **TDD governs implementation** (architecture, protocols, operations) wherever no spec says otherwise.
+
+Don't silently pick one. Flag the conflict in your PR and fix the losing document in the same PR.
+
+## 3. Workflow
+
+### 3.1 Specifying a feature
+
+1. **Grill first.** Before writing a spec, interview the product owner in short rounds of focused, multiple-choice questions. Cover scope, rules, permissions, edge cases, notifications and what's deferred. Recommend an option when there's a sensible default.
+2. **Write `specs/<feature>.md`** with this structure: Summary · Decisions (table) · behaviour sections · Data model · API · Acceptance criteria · Later · Open questions.
+3. **Mark assumptions.** Anything not explicitly decided is tagged **(default)** so a reviewer can change it.
+4. **Status:** `Draft for review` → `Approved` (product owner signs off) → `Implemented` (all acceptance criteria pass). Update the status line as it changes.
+5. **Changing an approved spec** needs a PR that updates the Decisions table and says why. If the change alters direction, the PRD and TDD are updated too.
+
+### 3.2 Building a slice
+
+1. **Pick the next slice** from `PLAN.md` (for example M3a). One slice per branch and PR, kept small enough to review in one sitting.
+2. **Read** the slice's spec sections and the TDD sections it references. Check `spikes/` for proven patterns and the findings listed in the spike README.
+3. **Write a short plan** in the PR description before coding: the spec items covered, the files and modules touched, schema changes, and the tests you'll add.
+4. **Build vertically:** migration → Durable Object or service → API → UI → tests → docs, all in the same PR.
+5. **Verify** every item in the definition of done (§6). Run the checks locally.
+6. **Get an independent review, then fix** (§3.3). This happens before opening the PR.
+7. **Open the PR** with the template headings: Summary, Spec coverage (with links), Screenshots (UI), Tests, Migrations, **Independent review**, Follow-ups. Wait for green CI and the product owner's review before merging (squash merge).
+
+### 3.3 Independent review
+
+When implementation is finished and your own checks pass, have a **separate, independent agent** review the change before you open the PR. An author reviewing their own work misses what they assumed.
+
+1. **Start a fresh agent.**
+   - It has no access to your conversation or reasoning: a new agent, not a fork or continuation of your session.
+   - If your tool can choose a different model for the reviewer, do.
+2. **Give it the material, not your conclusions:**
+   - the diff (or branch name)
+   - the slice's spec sections and the TDD sections it references
+   - this file.
+
+   Don't tell it what you think is fine or where the risks are; let it find them.
+3. **Ask it to review for:**
+   - **correctness bugs**, including edge cases and concurrency
+   - **spec coverage**: every acceptance criterion the slice claims, and behaviour that contradicts the spec
+   - **security and permissions**: every access goes through the permission engine; denied cases are tested; no secrets in client code or logs
+   - **conventions** in §4: typed results, concrete Durable Object RPC types, expand/contract migrations, Zod validation
+   - **tests**: missing cases, especially denied paths, and timing-sensitive tests that could be flaky
+   - **accessibility** of new UI.
+
+   It returns findings ranked by severity, each with a file and line and a concrete failure scenario.
+4. **Apply fixes.**
+   - Address every finding. Fix it, or decline it with a reason; don't ignore any.
+   - Re-run all checks after fixing.
+   - If the fixes were substantial (new logic, not just small corrections), run another independent review on the updated diff.
+5. **Record it in the PR's *Independent review* section:**
+   - the findings
+   - what was fixed
+   - what was declined and why.
+
+   Unresolved disagreements are flagged there for the product owner to decide.
+
+The independent review doesn't replace CI or the product owner's review. It runs before both.
+
+### 3.4 Branches and commits
+
+- `main` is always deployable through the Deploy to Cloudflare button.
+- Branch names: `<type>/<milestone>-<short-name>`, for example `feat/m3a-channels` or `fix/m1-invite-expiry`.
+- Commit messages are imperative and describe the change ("Add channel archive"), with a body explaining *why* when it isn't obvious.
+- Never force-push a branch someone else is using. Never commit secrets, `.dev.vars` or generated reports.
+
+## 4. Codebase conventions
+
+The structure is set out in `PLAN.md` §2: `apps/worker`, `apps/web`, `packages/shared`, `e2e`.
+
+### 4.1 General
+
+- **TypeScript strict** everywhere. No `any` without a comment explaining why.
+- **Validation:** every API body and every WebSocket message is validated with a **Zod schema from `packages/shared`**. Clients and the Worker share the same types.
+- **IDs** are ULIDs. **Timestamps** are UTC epoch milliseconds. **Calendar dates** are ISO `YYYY-MM-DD` together with an IANA time zone.
+- **Errors:** expected outcomes (not found, forbidden, conflict, validation) are **typed results** (`Result<T, E>`), not exceptions. Only real failures throw. **Never throw expected denials across Durable Object RPC**: the runtime logs them as uncaught exceptions (spike finding).
+- **Durable Object RPC types** must be concrete. No `unknown` or `any` fields in return values (spike finding).
+- **Permissions:** every read and write of user content goes through the **permission engine**. No ad-hoc access checks in routes.
+- **Audit:** administrative and destructive actions write to `audit_log`.
+
+### 4.2 Worker and data
+
+- **HTTP:** Hono routes per feature in `apps/worker/src/features/<feature>/`, with shared middleware from `core/`.
+- **Durable Objects:**
+  - extend the core DO base class (schema version plus lazy migration, alarm multiplexer, attachment helpers, auto-response keepalive)
+  - one alarm per object, shared through named timers
+  - follow the hibernation rules in TDD §3.2: no heavy constructor work, and no timers that keep the object awake.
+- **D1 migrations** follow **expand/contract** (TDD §6.5). Each file holds one logical change and is safe to re-run, named `NNNN_<feature>_<change>.sql`. Never edit a migration that has been merged.
+- **Messages and other derived data:** the Durable Object is the source of truth, and the D1 copy goes through the **outbox** helper (TDD §3.3).
+- **Secrets** stay in Worker secrets, never in D1, client code or logs.
+
+### 4.3 Web app
+
+- React, TanStack Router and TanStack Query, styled with **Tailwind only**. No component library until the design system exists; build small accessible components ourselves.
+- **Accessibility is not optional:** keyboard operable, labelled controls, visible focus, sufficient contrast, reduced-motion support. axe runs in end-to-end tests.
+- The realtime client lives in `apps/web/src/lib/realtime`. Features subscribe through it, never by opening raw WebSockets.
+
+### 4.4 Dependencies
+
+Before adding a dependency, check all of these and note them in the PR:
+- **Licence** is compatible with AGPL-3.0 (MIT, BSD, Apache-2.0 and ISC are fine; copyleft or "source-available" licences need product-owner approval).
+- It is actively maintained.
+- It works in the Workers runtime (for server code).
+- It has a reasonable bundle size.
+- The version is pinned.
+
+Prefer the platform (WebCrypto, Workers APIs) over a library when the code is small.
+
+## 5. Testing
+
+| Layer | Tool | Expectation |
+|---|---|---|
+| Unit | Vitest | Pure logic: permissions, recurrence, parsers, reducers |
+| Worker integration | Vitest + `@cloudflare/vitest-plugin` (Workers runtime, Miniflare) | Every route and Durable Object behaviour, including denied cases |
+| End-to-end | Playwright | At least one test per user-facing flow; axe checks |
+| Media | `npm run test:media` (real Realtime SFU) | Before merging changes that affect calls |
+
+Known testing behaviour, learned in the spike:
+- **Storage is shared between tests in a file.** Create unique IDs per test (users, channels, documents) instead of fixed fixtures.
+- Use `evictDurableObject()` to test hibernation and cold starts, and `runDurableObjectAlarm()` for alarms.
+- Install with `npm install --legacy-peer-deps`. npm 10.9 crashes resolving this project's peer dependencies.
+- Headless Chromium can capture a fake screen (`--use-fake-ui-for-media-stream`, `--auto-select-desktop-capture-source`), so screen-sharing flows are testable.
+- Tests that depend on timing must be stable across three consecutive runs before merging.
+
+## 6. Definition of done (every PR)
+
+- [ ] Behaviour matches the spec. Each acceptance criterion covered by the PR is ticked in the PR description.
+- [ ] Permission checks go through the engine, with tests for both allowed and denied cases.
+- [ ] Unit, integration and end-to-end tests are added. CI is green.
+- [ ] Migrations follow expand/contract; Durable Object schemas are versioned.
+- [ ] Accessibility checks pass for new UI.
+- [ ] Audit entries exist for admin and destructive actions.
+- [ ] No secrets in client code or logs; expected failures are typed results.
+- [ ] An independent agent reviewed the change (§3.3). Every finding is fixed or declined with a reason, recorded in the PR.
+- [ ] Docs are updated: the spec status and decisions if behaviour changed, the TDD if design changed, and user-facing help or admin notes.
+- [ ] `main` still deploys from the Deploy button.
+
+## 7. Commands
+
+Available once M0 lands; until then, run commands inside `spikes/realtime/`.
+
+```sh
+npm install --legacy-peer-deps   # install
+npm run dev                      # Worker + web app locally (wrangler dev + Vite)
+npm run typecheck                # all workspaces
+npm run lint
+npm test                         # unit + Worker integration
+npm run e2e                      # Playwright end-to-end
+npm run test:media               # real-media run (needs Realtime credentials)
+```
+
+## 8. Working with the product owner
+
+- **Ask, don't assume, on product decisions.** If something isn't in the spec, ask, or mark your choice **(default)** and call it out in the PR.
+- **Recommend.** When asking, propose the option you'd choose and say why.
+- **Report honestly.** Say what you verified and how, and what you didn't. A failing test or a skipped step is stated plainly.
+- **Feature names are generic for now** ("Chat", "Calls", "Calendar", "Documents"). Marketing names come later; don't invent them in code or UI copy.
