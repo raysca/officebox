@@ -11,7 +11,7 @@ The product vision is clear and well argued. It has sensible principles, honest 
 
 **Verdict:** this is a strong direction document, but it is not ready to build from. Five issues are structural and could change the architecture or the business model, so resolve them first: C1 to C5 below. Most other findings are gaps that can be filled in place.
 
-Cloudflare limits and prices change often. Figures marked *(verify)* are ones I'm reasonably sure of but you should check against current Cloudflare docs before relying on them.
+Cloudflare limits and prices change often. Figures originally marked *(verify)* were checked against Cloudflare documentation on 14 November 2026. Corrections are noted inline, and the checked facts are listed in the TDD appendix.
 
 ## Status after PRD/TDD v1.1
 
@@ -27,7 +27,26 @@ The v1.1 changes also fixed these contradictions: "pay once", GitHub vs GitLab, 
 
 Some new design points depend on Deploy-button and D1 behaviour that needs checking. They are listed in TDD §10.
 
-The High and Medium items below are still open.
+The High and Medium items below were open at v1.1.
+
+## Status after PRD/TDD v1.2: open questions decided
+
+Every open question in PRD §17 and TDD §10 now has a recommended decision, recorded in those sections. Deciding them also resolved or reduced several review items:
+
+| Item | Status | Where |
+|---|---|---|
+| H1 Connection layout and fan-out | **Resolved.** UserHub hub socket plus WorkspacePresence; batched fan-out to online users only | TDD §3.5 |
+| H2 Cost model | **Reduced.** Auto-response keepalives and paused awareness in hidden tabs; the load test is still required | TDD §3.5, §10 |
+| H3 WebSocket auth and revocation | **Partly resolved.** `closeConnections` revokes open sockets. Still open: JWT in the query string vs. cookie or one-time ticket. | TDD §3.5 |
+| H4 Full-text search | **Resolved.** FTS5 design, document text projection, export workaround | TDD §2.4 |
+| H5 Vectorize permissions | **Resolved.** Scope-only metadata, D1 final check, FTS top-up | TDD §5.2–5.3 |
+| H6 Backup and restore | **Mostly resolved.** Export format v1, Restore from export, per-object consistency and maintenance mode. Cross-store point-in-time restore remains a documented limitation. | PRD §13; TDD §7.5 |
+| M1 Yjs storage | **Resolved.** Size and count compaction, 4 MB chunks, assets in R2 | TDD §4.3 |
+| M2 Revision history | **Resolved.** Hourly and daily versions in R2; restore as a new change | PRD §5.5; TDD §4.3 |
+| M3 Editor licences | **Partly resolved.** MIT Tiptap packages only. Still open: the whiteboard component choice. | PRD §5.5 |
+| M6 SMTP from Workers | **Resolved.** HTTP API drivers preferred; STARTTLS SMTP; retry policy | TDD §7.6 |
+
+Still open: H2 (load test), H3 (token transport), H7, H8 and the remaining Medium items.
 
 ---
 
@@ -130,7 +149,7 @@ The PRD rightly says retention and deletion rules must be settled before the sch
 
 - Typing indicators, Yjs awareness heartbeats (sent about every 15 s by default) and app-level pings all **wake the DO**. A document left open in a background tab never hibernates.
 - Use `setWebSocketAutoResponse` for ping/pong. Throttle or suspend awareness in hidden tabs. Typing TTL expiry also needs alarms or wake-ups.
-- Incoming WebSocket messages count as billable DO requests, at a 20:1 ratio *(verify)*. Keystroke-level Yjs updates add up.
+- Incoming WebSocket messages count as billable DO requests, at a 20:1 ratio (confirmed). Workers Paid includes 1 million DO requests per month. Keystroke-level Yjs updates add up.
 - The "$5/month for 25 people" claim has no supporting model. Several services bill separately or have their own allowances:
   - Workers AI neurons for embeddings
   - Vectorize stored and queried dimensions
@@ -155,7 +174,7 @@ The PRD rightly says retention and deletion rules must be settled before the sch
 *PRD §15 Phase 1, §16; TDD has no section*
 
 - Document text lives as Yjs binary inside DOs. Nothing extracts plain text into a searchable index or explains how titles and content flow back to D1.
-- D1 supports FTS5. However, `wrangler d1 export` does not support databases with virtual tables *(verify)*, which affects the export plan (C5 / M4).
+- D1 supports FTS5. However, `wrangler d1 export` does not support databases with virtual tables (confirmed), which affects the export plan (C5 / M4).
 - Filtering results by permission at query time (joins against ACLs) isn't designed.
 
 **Recommendation:** add a search section covering the indexing pipeline (debounced extraction from DocRoom), FTS schema, permission filtering and how export or rebuild works.
@@ -163,8 +182,8 @@ The PRD rightly says retention and deletion rules must be settled before the sch
 ### H5. Vectorize permission filtering won't work as written
 *TDD §5.2–5.3*
 
-- Metadata such as `allowed_user_ids` and `allowed_roles` is a list. Vectorize filters support `$eq/$ne/$in/$nin/range` on indexed scalar fields, with about 10 metadata indexes and about 10 KiB of metadata per vector *(verify)*. "Array contains user" isn't really supported.
-- If filtering happens after the vector query, a user with narrow access can get **zero results**. topK is capped at about 20 when returning metadata *(verify)*.
+- Metadata such as `allowed_user_ids` and `allowed_roles` is a list. Vectorize filters support `$eq/$ne/$in/$nin/range` on indexed scalar fields, with 10 metadata indexes and 10 KiB of metadata per vector (confirmed). Filter JSON must be under 2,048 bytes. "Array contains user" isn't really supported.
+- If filtering happens after the vector query, a user with narrow access can get **zero results**. topK is capped at 50 when returning metadata, 100 without (corrected from about 20).
 - Every permission change means rewriting vectors.
 - Changing the embedding model (the PRD allows "different model choices… for embeddings") means a **full reindex**, because index dimensions are fixed when the index is created.
 - `workspace_id` metadata adds nothing in a single-tenant install.
@@ -212,7 +231,7 @@ Some of these are later-phase or optional, but the "one-click, zero-ops" message
 
 | # | Area | Issue | Recommendation |
 |---|---|---|---|
-| M1 | Yjs storage (TDD §2.2, §4.3) | The 2 MB value limit in DO SQLite is real. "Rejects or chunks" is undecided. Whiteboards with embedded images will hit it. Compacting every 50 updates means compacting every ~50 keystrokes, which wastes CPU. | Chunk snapshots across rows. Keep binary assets in R2 and only references in Yjs. Compact on size or time thresholds. |
+| M1 | Yjs storage (TDD §2.2, §4.3) | DO SQLite rows, strings and BLOBs are limited to 8 MB (corrected from 2 MB). "Rejects or chunks" is undecided. Whiteboards with embedded images will hit it. Compacting every 50 updates means compacting every ~50 keystrokes, which wastes CPU. | Chunk snapshots across rows. Keep binary assets in R2 and only references in Yjs. Compact on size or time thresholds. |
 | M2 | Revision history (PRD §5.5, TDD §4.3) | Truncating the update log destroys history. Yjs version snapshots need `gc: false` or retained snapshots, which affects storage. | Specify the revision model (named versions vs. periodic snapshots) and retention. |
 | M3 | Editor and whiteboard licences (TDD §4.2, PRD §12) | Some Tiptap features (comments, version history and others) are tied to Tiptap's paid platform. Check which are MIT. Excalidraw has no official Yjs binding (only community `y-excalidraw`). tldraw needs a commercial licence key in production. | Finish the component evaluation register before committing. The PRD gives the "commenter" role but specifies no document comments feature. |
 | M4 | Storage monitoring (PRD §13, TDD §9.1) | A Worker can't easily read R2 bucket size or total DO storage from bindings; this needs the GraphQL Analytics API and an API token. R2 has no real exhaustion limit (it's a cost issue). The hard limits are **D1's 10 GB** and per-DO storage. The validation test checks "upload rejection before D1/DO exhaustion", but uploads go to R2. | Redefine thresholds for each store. Estimate D1 growth: 100 users × 100 msgs/day ≈ 2 GB/yr before FTS overhead, so 10 GB is reached in a few years. Plan archiving or splitting. |

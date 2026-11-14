@@ -1,9 +1,18 @@
 # Officebox — Technical Design Document (TDD)
 
 **Status:** Draft for engineering review  
-**Version:** 1.1  
+**Version:** 1.2  
 **Date:** 14 November 2026  
-**Companion to:** [Officebox PRD v1.1](PRD.md)  
+**Companion to:** [Officebox PRD v1.2](PRD.md)  
+**Changes in 1.2:** Every open technical question now has a decision (§10). Platform facts checked against Cloudflare documentation (Appendix). New or redesigned:
+- full-text search (§2.4)
+- connection layout, fan-out and socket revocation (§3.5), with the UserHub and WorkspacePresence objects replacing InboxFanout
+- compaction and revisions (§4.3)
+- Vectorize permission filtering (§5.2–5.3)
+- export and restore (§7.5)
+- email delivery (§7.6).
+
+The Durable Object value limit is corrected to 8 MB.  
 **Changes in 1.1:** Storage ownership and message write path (§2.0, §3.3). Complete Phase 1 schema with permission resolution (§2.1). Deletion, retention and purge (§2.3). Release-sync upgrades, migrations and rollback (§6). First-run setup (§6.8). See [REVIEW.md](REVIEW.md) items C1–C5.
 
 ## 1. Architecture overview
@@ -44,9 +53,12 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 │                     │ │  • inbox_items     │ │                               │
 │  • BoardRoom DO     │ │  • audit_log       │ │                               │
 │    (Yjs whiteboard) │ │  • messages (copy) │ │                               │
-│                     │ │                    │ │                               │
-│  • InboxFanout DO   │ │                    │ │                               │
+│                     │ │  • search (FTS5)   │ │                               │
+│  • UserHub DO       │ │                    │ │                               │
 │    (per-user)       │ │                    │ │                               │
+│                     │ │                    │ │                               │
+│  • Presence DO      │ │                    │ │                               │
+│    (singleton)      │ │                    │ │                               │
 └─────────────────────┘ └────────────────────┘ └───────────────────────────────┘
             │                     │                          │
             └─────────────────────┴──────────────────────────┘
@@ -67,13 +79,15 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 | ChatChannel DO | Source of truth for channel messages: event log, ordering, outbox to D1, fan-out, presence, typing, history replay | Durable Object + SQLite |
 | DocRoom DO | Authoritative Y.Doc per document, sync, awareness, snapshots | Durable Object + SQLite |
 | BoardRoom DO | Authoritative Y.Doc per whiteboard | Durable Object + SQLite |
-| InboxFanout DO | Per-user notification fan-out and unread aggregation | Durable Object |
+| UserHub DO | Per-user hub socket: inbox events, unread changes, presence, revocation | Durable Object |
+| WorkspacePresence DO | Workspace-wide online status (single instance) | Durable Object + SQLite |
+| Workflows | Export and restore jobs | Cloudflare Workflows |
 | D1 | Identity, roles, groups, permissions, object metadata, searchable message copy, inbox, audit | D1 |
 | R2 | Files, attachments, exports | R2 |
 | Vectorize | Embeddings for permission-aware retrieval | Vectorize |
 | Realtime SFU | Audio/video huddles, TURN | Cloudflare Realtime |
 | AI Gateway | BYOK provider proxy, fallback, rate limiting | AI Gateway |
-| Queues | Message projection to D1, purge jobs, email, AI indexing (each with a dead-letter queue) | Queues |
+| Queues | Message and search projection to D1, purge jobs, email, AI indexing (each with a dead-letter queue) | Queues |
 | Cron Triggers | Daily purge, retention, reconciliation and release check | Workers Cron Triggers |
 
 ### 1.2 Why Durable Objects for both chat and Yjs
@@ -109,7 +123,7 @@ Conventions:
 
 - IDs are ULIDs stored as `TEXT`. Timestamps are Unix epoch milliseconds stored as `INTEGER`.
 - Soft-deletable objects carry `deleted_at` and `purge_after` (§2.3). Normal queries filter `deleted_at IS NULL`.
-- Foreign keys are declared wherever both ends live in D1; D1 enforces them *(verify current default)*. Polymorphic references (`resource_grants`, `object_links`, `inbox_items`, `files.parent_*`) can't use foreign keys. The purge pipeline (§2.3) keeps them consistent.
+- Foreign keys are declared wherever both ends live in D1; D1 enforces them by default. Polymorphic references (`resource_grants`, `object_links`, `inbox_items`, `files.parent_*`) can't use foreign keys. The purge pipeline (§2.3) keeps them consistent.
 - The schema implements the role model and retention rules in PRD §10.1 and §10.2.
 
 ```sql
@@ -503,9 +517,28 @@ CREATE TABLE updates (
 );
 
 CREATE TABLE snapshots (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id INTEGER NOT NULL,
+  chunk INTEGER NOT NULL DEFAULT 0,  -- snapshots over 4 MB are split across rows
   state_blob BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (id, chunk)
+);
+
+-- Revision history index; version state is stored in R2
+CREATE TABLE versions (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('hourly', 'daily', 'named')),
+  name TEXT,
+  r2_key TEXT NOT NULL,
+  created_by TEXT,
   created_at INTEGER NOT NULL
+);
+
+-- Outbox for the search text projection (same pattern as ChatChannel)
+CREATE TABLE outbox (
+  id INTEGER PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL
 );
 
 CREATE TABLE meta (
@@ -514,19 +547,20 @@ CREATE TABLE meta (
 );
 ```
 
-Updates append to a log; every N updates (configurable, default 50) the log folds into a snapshot to bound storage and load time. A snapshot or update must stay under 2 MB (Durable Object storage limit); the DO rejects or chunks oversized payloads.
+Compaction, chunking and revision history are described in §4.3. A single SQLite row, string or BLOB can be up to 8 MB. Snapshots are split into 4 MB chunks so even large whiteboards fit with headroom. Binary assets such as images live in R2 and are referenced from the Yjs document, never embedded in it.
 
-**InboxFanout DO** — one per user:
+**UserHub DO** — one per user (`idFromName(user_id)`). It holds the user's hub WebSockets and delivers inbox events, unread changes, presence changes and revocations (§3.5). It has no tables beyond `meta` (`schema_version`): inbox items are durable in D1, and a reconnecting client reloads its state over REST.
+
+**WorkspacePresence DO** — a single instance (`idFromName("presence")`):
 
 ```sql
-CREATE TABLE pending (
-  id TEXT PRIMARY KEY,
-  payload TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+CREATE TABLE online (
+  user_id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,          -- online, away, dnd
+  since INTEGER NOT NULL,
+  heartbeat_at INTEGER NOT NULL
 );
 ```
-
-Used for low-latency fan-out of inbox events to connected clients. Durable record lives in D1.
 
 ### 2.3 Deletion, retention and purge
 
@@ -568,6 +602,51 @@ Messages keep `sender_id`. Clients render deleted senders as "Former member". **
 
 **Platform recovery windows.** D1 Time Travel and Durable Object point-in-time recovery keep up to 30 days of history. Officebox recommends an R2 lifecycle rule that expires noncurrent object versions after 30 days. Purged data is therefore unrecoverable no more than about 30 days after purge, as stated in PRD §10.2.
 
+### 2.4 Full-text search
+
+Phase 1 search uses D1's FTS5 support over messages and documents.
+
+```sql
+-- Plain-text projection of document/whiteboard content (written by DocRoom via its outbox)
+CREATE TABLE document_text (
+  document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  source_update_id INTEGER NOT NULL,  -- guards idempotent, order-independent upserts
+  updated_at INTEGER NOT NULL
+);
+
+CREATE VIRTUAL TABLE search_index USING fts5(
+  title,
+  body,
+  object_type UNINDEXED,   -- message, document, whiteboard, file
+  object_id UNINDEXED,
+  scope_id UNINDEXED,      -- channel ID for messages; document or folder ID otherwise
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+```
+
+**Indexing.**
+
+- Messages: the message projection consumer (§3.3) inserts, replaces or deletes rows in `search_index` in the same D1 batch as the `messages` upsert.
+- Documents and whiteboards: once updates have been quiet for 5 seconds (and at most once every 60 seconds), the DO extracts the title and plain text and queues it through its outbox to the `search-projection` Queue. The consumer upserts `document_text` and `search_index` together.
+- File names are indexed when uploaded. File contents are not indexed in Phase 1.
+
+**Querying.**
+
+1. A CTE builds the requesting user's accessible scopes, following the §2.1 rules:
+   - public channels
+   - channels from `channel_members`
+   - documents and folders reachable through `resource_grants`, group membership or `general_access`.
+2. The FTS `MATCH` results are joined to those scopes and ranked by `bm25()`, with `snippet()` for highlights.
+3. Results for deleted or trashed objects never appear, because deletion removes their rows from `search_index`.
+
+**Export and storage.**
+
+- `wrangler d1 export` doesn't support databases that contain virtual tables. So the Officebox export (§7.5) uses its own JSON Lines format, leaves out `search_index`, and rebuilds it on restore.
+- The admin guide documents the raw-dump workaround: drop the FTS table, export, then recreate it and use **Rebuild search index**. D1 Time Travel is unaffected.
+- FTS roughly doubles the storage used by indexed text. It counts towards D1's 10 GB limit, and storage monitoring includes it.
+
 
 ## 3. Application realtime design (Durable Objects)
 
@@ -598,7 +677,7 @@ The ChatChannel DO is the source of truth. D1 receives a guaranteed, idempotent 
 | `message.delete` | `messageId` | The author or a channel admin |
 | `reaction.add` / `reaction.remove` | `messageId`, `emoji` | Channel members |
 
-Limits: body up to 40 KB, which stays far below the 2 MB DO value limit; up to 20 attachments per message.
+Limits: body up to 40 KB, which stays far below the 8 MB DO row limit; up to 20 attachments per message.
 
 **Write path:**
 
@@ -639,6 +718,41 @@ Presence is ephemeral and stored in DO memory and connection attachments, not in
 
 Presence is never the source of truth for durable data.
 
+### 3.5 Connection topology, fan-out and revocation
+
+**At most three WebSockets per tab:**
+
+1. **Hub socket** (always open) to the user's UserHub DO. It carries inbox and notification events, unread changes for *all* channels, workspace presence and revocation commands.
+2. **Channel socket** to the ChatChannel DO of the channel currently on screen. Switching channels closes the previous one.
+3. **Document socket** to the DocRoom or BoardRoom DO of the document currently open.
+
+Tabs of the same browser elect a leader with `BroadcastChannel` and share one hub socket.
+
+**Unread state.** On connect, the client loads unread and mention counts over REST. The unread count is the number of D1 `messages` with `seq > channel_members.last_read_seq` that the user didn't send. The mention count comes from unread `inbox_items`. After that, counts are kept current by hub events.
+
+**Fan-out.** After applying a batch, the message projection consumer (§3.3, step 5):
+
+1. Finds the highest new `seq` for each affected channel.
+2. Gets the set of online users from WorkspacePresence: one RPC per batch, cached in the consumer for 5 seconds.
+3. Sends **one** `activity` RPC per online member of the affected channels, carrying every affected channel and any new inbox items for that user. However many messages a batch holds, each UserHub receives at most one call per batch, and offline users cost nothing.
+4. Notifies offline recipients of mentions and DMs through their notification preferences (email in Phase 1, web push in Phase 2). They see the inbox items on their next load.
+
+**Workspace presence.**
+
+- A UserHub calls `online(userId)` on WorkspacePresence when its first socket connects and `offline(userId)` when its last socket closes.
+- While sockets are open, a UserHub alarm sends a heartbeat every 5 minutes. Entries with no heartbeat for 12 minutes expire.
+- Presence changes are broadcast to online UserHubs. Changes are infrequent: connects, disconnects and status changes.
+- Per-channel presence (who is viewing or typing) stays in ChatChannel DO memory (§3.4).
+
+**Keepalive.** Every DO sets `setWebSocketAutoResponse` for application ping/pong. Keepalives then neither wake the object nor add billed duration. Clients pause document awareness updates while their tab is hidden, so idle open documents can hibernate.
+
+**Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel or document, the Worker calls `closeConnections(userId, reason, scope)`:
+
+- on the user's UserHub, and
+- on every affected ChatChannel, DocRoom or BoardRoom DO.
+
+Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
+
 ## 4. Collaborative editing design (Yjs on Durable Objects)
 
 ### 4.1 Server architecture
@@ -665,12 +779,24 @@ The React client uses:
 
 The client sends a JWT in the WebSocket URL. The DO validates it via the authorize hook (implemented in the Worker before forwarding) and assigns a role.
 
-### 4.3 Persistence and compaction
+### 4.3 Persistence, compaction and revisions
 
-- Updates append to updates table in DO SQLite.
-- Every SYNC_COMPACT_EVERY updates (default 50), the DO merges the log into a single snapshot in snapshots and truncates the update log.
-- On cold start, the DO loads the latest snapshot and replays any subsequent updates.
-- Snapshots are also copied to R2 for export and disaster recovery (via an alarm or Queues job).
+- Updates are appended to the `updates` table in DO SQLite.
+- **Compaction** runs at whichever comes first:
+  - 500 updates since the last snapshot
+  - 1 MB of uncompacted updates
+  - the last client disconnecting, so the object compacts before it hibernates.
+
+  Compaction writes `Y.encodeStateAsUpdate(doc)` as a new snapshot, split into 4 MB chunks when needed, and then deletes the updates it folded in. Keystroke-level updates therefore never trigger constant compaction.
+- **Cold start:** the DO loads the latest snapshot, joining any chunks, and replays later updates.
+- **Recovery copy:** after compaction, the latest snapshot is copied to R2 at `docs/<id>/latest.ystate`, at most every 15 minutes.
+- **Revision history** (PRD §5.5):
+  - While a document is being edited, the DO writes a full-state version to R2 at most once an hour (`docs/<id>/versions/<ulid>.ystate`) and records it in `versions`. Named versions are written on request.
+  - The daily Cron Trigger thins versions: hourly versions for 7 days, one per day for 90 days, named versions for the document's lifetime.
+  - Versions are full states, so Yjs garbage collection stays enabled.
+  - To view a version, the client loads it into a temporary read-only `Y.Doc`.
+  - To restore one, the client writes that content into the live document as a new change. Collaborators converge normally and history is kept.
+- **Search projection:** see §2.4.
 
 ### 4.4 Permissions
 
@@ -695,16 +821,19 @@ Link previews and AI retrieval always re-check permissions in the Worker/D1; the
 
 1. On document save or message creation, the Worker enqueues an embedding_jobs record in D1 and a message on a Queue.
 2. A queue consumer Worker loads the content (from D1 or DO), chunks it, generates embeddings via Workers AI, and upserts vectors into Vectorize.
-3. Each vector carries metadata for permission filtering: workspace_id, object_type, object_id, allowed_roles, allowed_user_ids, channel_id.
-4. On document deletion or permission change, the Worker enqueues an invalidation job that removes or re-scopes vectors.
+3. Each vector carries only scope metadata: `object_type`, `object_id`, `scope_id` (the channel ID for messages, the document or folder ID otherwise) and `chunk`. Only `object_type` and `scope_id` are metadata indexes, using 2 of the 10 allowed. **Vectors hold no user or role lists.** Permission changes therefore never require rewriting vectors. Only deleting or moving an object does.
+4. On deletion, or when a message moves out of a channel, the Worker queues an invalidation job that deletes the object's vectors.
+5. Changing the embedding model requires a new index, because index dimensions are fixed at creation, followed by a full re-index. This is delivered as a release migration that builds the new index before switching to it.
 
 ### 5.3 Retrieval flow
 
 1. User asks a question.
 2. Worker generates a query embedding via Workers AI.
-3. Vectorize query returns candidate vectors with metadata.
-4. Worker filters candidates by the requesting user's permissions (roles, channel membership, explicit grants) before passing content to the model.
-5. The model receives only permitted snippets; the response cites source objects the user can access.
+3. The Worker computes the user's accessible scopes, using the same CTE as search (§2.4).
+4. If the scope list fits within Vectorize's 2,048-byte filter limit (about 60 IDs), the query uses `scope_id $in [...]`. Otherwise the query runs unfiltered with `topK = 50` and metadata returned.
+5. Every candidate is then checked against D1 permissions, whichever query path was used. D1 is the authority.
+6. If fewer permitted results remain than needed, they are topped up with permitted FTS keyword matches from §2.4 (hybrid retrieval). Users with narrow access still get useful answers.
+7. The model receives only permitted snippets; the response cites source objects the user can access.
 
 Design rule: permission filtering happens before model invocation, not after. No vector is passed to the model unless the requesting user is authorised to see its source.
 
@@ -720,12 +849,13 @@ Upgrades are delivered as **release-sync pull requests** in the customer's own r
 
 The repository includes a `wrangler.jsonc` with:
 
-- Durable Object namespaces (ChatChannel, DocRoom, BoardRoom, InboxFanout) as SQLite-backed classes.
+- Durable Object namespaces (ChatChannel, DocRoom, BoardRoom, UserHub, WorkspacePresence) as SQLite-backed classes.
+- Workflows (export and restore).
 - D1 database.
 - R2 bucket.
 - Vectorize index.
 - Workers AI binding.
-- Queues and their dead-letter queues: `message-projection`, `purge`, `email`, `indexing`.
+- Queues and their dead-letter queues: `message-projection`, `search-projection`, `purge`, `email`, `indexing`.
 - Rate Limiting binding (setup, login and invitation endpoints).
 - Cron Triggers (daily maintenance: purge, retention, reconciliation, release check).
 - Observability (Workers Logs) enabled. This is needed for generated setup tokens (§6.8).
@@ -737,7 +867,7 @@ The Deploy to Cloudflare button copies the repository into the customer's GitHub
 node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangler deploy
 ```
 
-`SETUP_TOKEN` is declared as an optional secret, so the deploy flow offers to set it *(verify how the Deploy flow prompts for secrets)*. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist.
+`SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist.
 
 ### 6.2 Upstream releases and channels
 
@@ -784,7 +914,7 @@ Steps:
    ```text
    git diff vOLD vNEW | git apply --3way
    ```
-   This works whether or not the customer copy shares git history with upstream *(verify what history the Deploy button preserves)*. Then update `.officebox/version`.
+   Cloudflare doesn't document whether the customer's copy keeps upstream git history, so the design doesn't rely on it: a diff between tags works either way. Then update `.officebox/version`.
 5. Merge `wrangler.jsonc` with `scripts/merge-wrangler.mjs`. It takes the upstream structure but keeps local resource IDs, names and customer-added bindings.
 6. Open a PR titled "Upgrade Officebox to vX.Y.Z (channel)". The body carries release notes, the migration list, `rollback_safe_to` and any security flag.
    - **Conflicts:** the PR opens as a draft labelled `officebox-conflict`. It lists the conflicted files and links to resolution guidance. Conflict markers make the build fail, so a conflicted release can't deploy.
@@ -809,7 +939,7 @@ Migrations run **before** the new code goes live, and can be partly applied if a
 
 - **Allowed in any release:** new tables, new nullable or defaulted columns, new indexes, and backfills that older code tolerates.
 - **Contract steps** (drop or rename columns, tighter constraints) ship only once no supported rollback target depends on the old shape. `rollback_safe_to` advances at that point and the release notes say so.
-- Each migration file is written to be safe to re-run, using `IF NOT EXISTS` and guarded backfills.
+- Cloudflare doesn't document whether each migration file runs in a single transaction, so **migrations are treated as possibly partly applied**. Each file holds one logical change and is safe to re-run, using `IF NOT EXISTS` and guarded backfills. Applied files are tracked in D1's `d1_migrations` table.
 - Upstream CI runs the previous release's integration tests against the new schema, to enforce the rule.
 
 **Durable Object schemas** follow the same rule:
@@ -911,14 +1041,80 @@ Officebox uses Cloudflare's observability and optional external alerting (email/
 - D1: Time Travel restores to any minute in the last 30 days. Officebox documents how to use it and warns when a restore point is needed.
 - R2: lifecycle rules and object versioning; Officebox documents recommended configuration.
 - DO SQLite: snapshots are copied to R2 for export; the export is the portable recovery path.
-- Application export: a Worker endpoint produces a database-consistent export (D1 dump + R2 manifest + DO snapshots) for portability.
+- Application export: see §7.5.
+
+### 7.5 Export and restore
+
+Implements PRD §13. Exports and restores run as **Cloudflare Workflows**: durable, retried, multi-step jobs that are not bound by request time limits.
+
+```sql
+CREATE TABLE exports (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('export', 'restore')),
+  state TEXT NOT NULL CHECK (state IN ('running', 'complete', 'failed')),
+  include_files INTEGER NOT NULL DEFAULT 1,
+  manifest_r2_key TEXT,
+  error TEXT,
+  requested_by TEXT REFERENCES users(id),
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+```
+
+**Export format v1.** Written under `exports/<id>/` in the installation's R2 bucket:
+
+| Path | Content |
+|---|---|
+| `manifest.json` | Format version, Officebox version, D1 schema version, creation time, row/object counts, SHA-256 for every part, each channel's exported `seq`, each document's state vector |
+| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `mfa_factors`, setup fields and job tables. |
+| `channels/<id>/messages.jsonl` | Current message state from the ChatChannel DO, including tombstones |
+| `docs/<id>/state.ystate` | Native Yjs state |
+| `docs/<id>/content.md` or `content.json` | Readable rendering (Markdown for documents, JSON for whiteboards) |
+| `docs/<id>/versions/` | Retained versions |
+| `files/<file id>` | File bytes, if `include_files` is set. Otherwise the manifest lists keys and checksums only. |
+
+**Rules:**
+
+- **Secrets are never exported:** SMTP credentials, AI keys and the setup token stay out. MFA secrets are encrypted with an installation-specific key, so they are left out and users re-enrol after a restore. Password hashes are included, so passwords keep working.
+- **Download:** owners download a single `.tar` streamed by the Worker. The command-line tool (`officebox export pull`) fetches parts with resume support.
+- **Consistency:** each object is internally consistent. **Maintenance mode** makes the workspace read-only for a fully consistent export. It closes every socket through the UserHubs, reconnects them read-only, and makes the Worker reject writes.
+- **Scheduled exports** (optional; weekly by default when enabled) keep the latest 4. Exports count towards R2 storage.
+
+**Restore:**
+
+1. The first-run setup page of a fresh installation offers **Restore from export**, which still requires the setup token (§6.8).
+2. The archive is uploaded through the Worker with R2 multipart upload. Very large archives can instead be placed in the bucket with Wrangler, and `officebox-restore` then starts the Workflow.
+3. The Restore Workflow checks the manifest and checksums. It accepts exports from the same Officebox version or older, and maps older logical schemas forward.
+4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`.
+5. It completes setup. All sessions are invalid and users with MFA must re-enrol.
+
+**Testing:** CI exports a fixture installation, restores it into a fresh one and compares them, on every release.
+
+### 7.6 Email delivery
+
+Email sits behind an adapter interface with two kinds of driver:
+
+1. **HTTP API providers** (recommended): Resend, Postmark, Amazon SES, Mailgun or SendGrid, called with `fetch`. The API key is a Worker secret. This is the simplest and most reliable option from Workers.
+2. **Generic SMTP:** a TCP socket via `connect()`, using STARTTLS on port 587 (`secureTransport: "starttls"`, then `startTls()`) or implicit TLS on port 465, with AUTH PLAIN or LOGIN, through a maintained Workers-compatible SMTP library. Cloudflare blocks outbound port 25, so direct delivery to recipient mail servers isn't possible.
+
+Cloudflare Email Workers are not used for invitations. Their sending binding is aimed at verified destination addresses rather than arbitrary recipients *(verify against current Cloudflare email offerings before ruling out)*.
+
+**Delivery:**
+
+- Messages are sent through the `email` Queue.
+- The consumer retries transient failures (network errors, HTTP 429 or 5xx, SMTP 4xx) up to 8 times with exponential delay via `message.retry({ delaySeconds })`: 1 minute, doubling, capped at 2 hours.
+- Permanent failures (HTTP 4xx other than 429, SMTP 5xx) are not retried. They are recorded with the provider's error.
+- Messages that exhaust their retries go to the dead-letter queue. Admin health shows failures and DLQ depth.
+- Each email carries an idempotency key (the job ID), passed to providers that support one.
+- **Send test email** in the admin settings checks the configuration.
+- Invitation links can always be copied manually, so onboarding never depends on email.
 
 ## 8. Security model
 
 - Authentication: local accounts; passwords hashed with a memory-hard KDF; session JWTs short-lived and rotated.
 - Authorisation: the role model in PRD §10.1, resolved as described in §2.1. Owners and admins get management rights but no implicit read access to private content. All checks occur in the Worker before DO access.
 - First-run setup: protected by a one-time setup token with atomic claim; permanently disabled after use (§6.8).
-- Session revocation: incrementing `users.session_epoch` invalidates all of a user's sessions on their next refresh. (Closing already-open WebSockets is tracked in REVIEW.md H3.)
+- Session and access revocation: incrementing `users.session_epoch` invalidates refresh. `closeConnections` closes open WebSockets on the UserHub and the affected channel and document DOs within seconds (§3.5).
 - Upgrades: no Cloudflare or GitHub credentials are held by the running application. Release tags are signature-verified against a pinned key before a sync PR is opened (§6.4).
 - Secrets: provider keys in AI Gateway Secrets Store; SMTP credentials as Worker secrets; no provider keys in D1 or browser code.
 - AI: retrieval permission-filtered; prompt-injection treated as untrusted input; tool calls permission-checked server-side; mutating actions require confirmation.
@@ -943,7 +1139,11 @@ Officebox uses Cloudflare's observability and optional external alerting (email/
 - Upgrade test: the release-sync workflow opens a correct PR from a fresh customer copy (with signature verification), including a `wrangler.jsonc` merge that keeps resource IDs. Merging deploys. A conflicted release opens as a draft and can't deploy. Stable → beta works.
 - Rollback test: rolling back one version after a release with migrations works without a database restore (expand/contract). The previous release's integration tests pass against the new schema.
 - Storage test: upload rejection triggers before D1/DO storage exhaustion; admin warning appears.
-- Backup test: export produces a restorable manifest; missing export configuration warns but does not block startup.
+- Export/restore test: export a fixture installation, restore into a fresh installation from first-run setup, and compare row counts, checksums, channel `seq` positions and document content. Missing export configuration warns but does not block startup.
+- Search test: results match permitted messages and documents only. Deleting or trashing removes results. **Rebuild search index** reproduces the index.
+- Revocation test: disabling a user, or removing them from a private channel or document, closes their open sockets within 5 seconds.
+- Fan-out test: a 100-message burst in a busy channel produces at most one UserHub call per online member per consumer batch, and offline members get none.
+- Compaction test: a long editing session compacts on the size and count thresholds. A document with a snapshot over 4 MB loads correctly from chunks. Hourly versions appear and restore correctly.
 
 ### 9.2 Performance targets
 
@@ -954,19 +1154,30 @@ Officebox uses Cloudflare's observability and optional external alerting (email/
 
 ## 10. Open technical questions
 
-- Vectorize metadata filtering limits and whether a secondary D1 index is needed for permission checks at scale.
-- Whether InboxFanout DO per user is necessary in Phase 1 or can be a D1 polling model.
-- Snapshot compaction tuning (frequency, size thresholds).
-- Export format and restore tooling.
-- SMTP relay provider matrix and queue retry policy.
-- Verify Deploy to Cloudflare behaviour that the upgrade design depends on: how optional secrets are prompted for, whether resource IDs are written back into `wrangler.jsonc`, and what git history the copy keeps.
-- Whether D1 applies each migration file in a single transaction. The design assumes migrations may be partly applied (§6.5).
-- Event log horizon and outbox batching tuning (§2.2, §3.3).
-- Search text projection for documents (extraction from Yjs into D1) and FTS export compatibility (REVIEW.md H4).
+Every question open at v1.1 now has a decision:
+
+| Question | Decision | Where |
+|---|---|---|
+| Vectorize filtering and a secondary index | Scope-only metadata (no user lists); `$in` filter when the scope list fits, otherwise unfiltered `topK = 50`; D1 permission check is always final; FTS top-up | §5.2–5.3 |
+| InboxFanout DO vs. D1 polling | Neither: a per-user **UserHub** DO with a single hub socket, plus a single **WorkspacePresence** DO; batched fan-out to online users only | §2.2, §3.5 |
+| Snapshot compaction tuning | Compact at 500 updates, 1 MB or last disconnect; 4 MB chunks; hourly and daily versions in R2 | §4.3 |
+| Export format and restore tooling | Export format v1 (JSON Lines + Yjs + files) produced by Workflows; Restore from export in first-run setup; CLI for large archives | §7.5 |
+| SMTP provider matrix and retry policy | HTTP API providers preferred; STARTTLS SMTP on port 587 or 465; 8 retries with exponential backoff capped at 2 h; DLQ | §7.6 |
+| Deploy to Cloudflare behaviour | Checked: secrets come from `.dev.vars.example`; resource IDs are written back into `wrangler.jsonc`; git history not documented, so the design doesn't depend on it | §6.1, §6.4 |
+| D1 migration transactions | Not documented, so migrations are treated as possibly partly applied: one change per file, safe to re-run, expand/contract | §6.5 |
+| Event log horizon and outbox batching | Defaults: 30-day horizon, 250 ms batching delay, 100 events per batch | §2.2, §3.3 |
+| Search text projection and FTS export | DocRoom extracts plain text through an outbox to `document_text` and FTS5; the export excludes FTS and restore rebuilds it | §2.4 |
 
 Resolved in v1.1:
 - Message storage split: the DO is the source of truth, with an outbox to a D1 copy (§2.0, §3.3).
 - Upgrade mechanism: release-sync GitHub Actions PR plus Workers Builds; no deploy Worker (§6).
+
+**Still to confirm by measurement, not decision:** the Phase 1 load test (REVIEW.md H2) should confirm or adjust these numeric defaults:
+- compaction thresholds
+- outbox batching
+- fan-out cache time
+- heartbeat interval
+- the Durable Object request budget for a 25-person team, against the 1 million requests per month included in Workers Paid.
 
 ---
 
@@ -984,3 +1195,14 @@ Resolved in v1.1:
 | Deploy to Cloudflare | Clones repo, provisions resources, builds and deploys |
 | Workers Builds retention | 90-day build/log retention; versions persist for rollback |
 | Worker rollback | Roll back to a previous version via dashboard or Wrangler |
+
+### Platform facts checked against Cloudflare documentation (14 November 2026)
+
+| Fact | Value |
+|---|---|
+| Deploy to Cloudflare | Source repo must be public. Supports GitHub and GitLab (not self-hosted). Auto-provisions KV, D1, R2, Hyperdrive, Vectorize, Secrets Store secrets, Durable Objects, Workers AI and Queues. Writes new resource IDs back into the Wrangler config. Prompts for secrets from `.dev.vars.example`. Git history kept: not documented. |
+| D1 | Supports FTS5. `wrangler d1 export` doesn't support databases with virtual tables. Foreign keys enforced by default. Migrations tracked in `d1_migrations`. Per-file transaction behaviour: not documented. |
+| Durable Objects limits | 10 GB per SQLite-backed object. Up to 8 MB per row, string or BLOB. |
+| Durable Objects pricing (Workers Paid) | 1M requests/month included, then $0.15 per million (WebSocket messages, RPC and alarms count; incoming WebSocket messages at a 20:1 ratio). 400,000 GB-s duration included. 5 GB-month SQLite storage included. `setWebSocketAutoResponse` adds no billed duration. |
+| Vectorize | topK up to 50 with values or metadata, 100 without. 10 metadata indexes per index. 10 KiB metadata per vector. Filter operators `$eq $ne $in $nin $lt $lte $gt $gte`. Filter JSON under 2,048 bytes. |
+| Workers TCP sockets | Outbound port 25 blocked. STARTTLS supported. |

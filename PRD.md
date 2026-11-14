@@ -1,8 +1,9 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.1  
+**Version:** 1.2  
 **Date:** 14 November 2026  
+**Changes in 1.2:** All open product questions now have a recommended decision (§17). New or expanded: Personal Inbox rules (§5.3), editor and revision history (§5.5), board component (§5.6), support plans (§1), AI log visibility (§11), export and restore (§13), native app criteria (§9).  
 **Changes in 1.1:** Licence and business model defined (open source, paid support). Upgrade delivery via release-sync pull requests. Secure first-run setup. Baseline role model. Baseline retention and deletion rules. Message source of truth. See [REVIEW.md](REVIEW.md) items C1–C5.
 
 ## 1. Product summary
@@ -16,7 +17,14 @@ The headline proposition: **an open-source workspace suite for your whole team, 
 - **Licence:** Officebox is open source under the **GNU AGPL-3.0**. Customers can run, modify and self-host it freely. The AGPL requires anyone offering a modified Officebox as a network service to others to publish their changes, which discourages closed hosted forks.
 - **All releases are free.** Every feature release, bug fix and security fix is published to everyone through the stable and beta channels. Beta access is free and opt-in. Security fixes are never withheld or paywalled.
 - **Revenue comes from services, not code access:**
-  - Paid support plans with response-time commitments.
+  - Paid support plans with response-time commitments. All plans are priced per installation, never per seat. The starting hypotheses below are to be validated with design partners:
+
+    | Plan | Includes | Starting price hypothesis |
+    |---|---|---|
+    | Community | GitHub Discussions and issues, public documentation, security advisories | Free |
+    | Standard | Private support channel, 2-business-day response, upgrade and restore assistance | ~$49/month per installation |
+    | Priority | 1-business-day response, a quarterly allowance of priority fixes, a named contact | ~$199/month per installation |
+    | One-off services | Assisted setup, migration from Slack, Notion or Google Workspace, recovery assistance | Fixed-price packages from ~$499 |
   - Priority fixes: paid prioritisation of bugs and small features the customer needs. The fix itself is released to everyone.
   - Assisted setup, migration from other tools, and upgrade or restore assistance.
 - **Contributions:** external contributions are accepted under a Developer Certificate of Origin (DCO). Any future dual-licensing would need a Contributor Licence Agreement, which is not planned.
@@ -149,7 +157,32 @@ The Inbox distinguishes:
 
 Users can acknowledge, dismiss, snooze, complete or follow items. Dismissing an inbox notification does not delete the underlying message, issue or document.
 
-The first release uses Officebox-native sources: mentions, direct messages, assignments, review requests, due dates and project/document activity. Calendar aggregation and automatic commitment extraction are added when the required integrations and semantics are defined.
+The first release uses Officebox-native sources: mentions, direct messages, assignments, review requests, due dates and project/document activity. Automatic commitment extraction arrives with AI in Phase 3.
+
+**Inbox rules:**
+
+- **Ordering in Today:**
+  1. Action items due today or overdue.
+  2. Direct messages and mentions.
+  3. Review requests.
+  4. Other action items.
+  5. Followed activity.
+
+  Within each group, newest first. Users can pin an item to the top.
+- **Grouping:** several events on the same object (for example, five replies in one thread) collapse into one item showing the latest event and a count.
+- **States and actions:**
+  - *Read* (acknowledge) marks an item as seen and keeps it in the inbox.
+  - *Done* (complete) removes an action item from the active views.
+  - *Dismiss* removes a notification without completing anything.
+  - *Snooze* hides an item until a chosen time (later today, tomorrow morning, next week, or a custom time), then it returns as unread.
+  - *Follow* or *unfollow* controls whether future activity on that object appears.
+- **Automatic resolution:** items resolve themselves when the underlying work is done. Replying in a thread resolves the mention that prompted the reply. Opening a DM marks it read. Closing or reassigning an issue resolves its assignment item. Completing a review resolves the review request.
+- **Retention:** resolved items are purged after 90 days (§10.2).
+
+**Calendar:**
+
+- *Phase 2:* each user gets a private, revocable ICS feed URL of their Officebox schedule items (due dates, milestones, scheduled huddles). It can be subscribed to from Google Calendar, Outlook or Apple Calendar. This is outbound only, with no OAuth and no third-party data stored.
+- *Phase 3 or later:* read-only, per-user Google and Microsoft calendar connections that show meetings in Today and Upcoming, if design partners ask for them. Write-back to external calendars is out of scope.
 
 ### 5.4 Chat and communication
 
@@ -180,13 +213,20 @@ Initial document capabilities:
 - Rendered editing with common formatting, headings, lists, links and images.
 - Autosave and clear save state.
 - Document title, ownership and access controls.
-- Revision history (initial depth validated during implementation).
+- Revision history. Automatic versions are kept hourly for 7 days and daily for 90 days. Named versions are kept for the document's lifetime. Users can view, compare and restore any version, and restoring creates a new version.
+- Comments on documents, available to users with commenter access or higher (Phase 2).
 - Searchable title and content.
 - Links to originating conversations, projects and related issues.
 
 Whiteboards are a first-class collaborative surface, built on the same Yjs collaboration model. Documents and whiteboards are both persisted as CRDT state in Durable Object SQLite, with periodic snapshots.
 
-Officebox does not build a rich-text editing engine from scratch. The editor is Tiptap; collaborative state is Yjs. A stock Yjs client can connect to the Durable Object sync endpoint using the standard Yjs protocol (y-websocket).
+Officebox does not build a rich-text editing engine from scratch. The editor is Tiptap; collaborative state is Yjs. Officebox uses only the MIT-licensed open-source Tiptap packages:
+- the core
+- StarterKit
+- Collaboration and the collaboration caret
+- Link, Image, Table, Task list, Mention and Placeholder.
+
+It does not depend on Tiptap's paid cloud features. Comments and version history are built on Officebox's own Yjs storage, so they stay in the customer's account and remain compatible with the AGPL. A stock Yjs client can connect to the Durable Object sync endpoint using the standard Yjs protocol (y-websocket).
 
 ### 5.6 Projects, boards, issues and tasks
 
@@ -203,6 +243,8 @@ Expected capabilities:
 - Basic filtering and search.
 
 Officebox evaluates mature open-source React board components before building custom UI, and avoids components that create a disconnected application, separate identity model or competing source of truth.
+
+**Recommendation:** build the board UI with a permissively licensed drag-and-drop toolkit (dnd-kit, MIT) on Officebox's own project and issue data in D1. Do not embed a standalone tracker such as Plane or Focalboard. Those bring their own data model, identity and deployment footprint, which the integration principles rule out.
 
 ### 5.7 Files
 
@@ -337,7 +379,11 @@ Initial direction:
 - Browser notifications and Web Push on supported platforms.
 - No mandatory native desktop or mobile application.
 
-Native desktop, iOS and Android applications are deferred until customer demand justifies the additional build and maintenance burden. A future native client reuses the same backend, identity, workspace object model and notification services.
+Native desktop, iOS and Android applications are deferred until customer demand justifies the additional build and maintenance burden. Native work is reconsidered after Phase 2 only if design-partner data shows both of these:
+- more than 30% of active sessions come from mobile, and
+- users report PWA limitations, such as unreliable push on iOS or missing background behaviour, as a top-three pain point.
+
+The first native step would be a thin wrapper around the PWA, not a separate client. A future native client reuses the same backend, identity, workspace object model and notification services.
 
 ## 10. Workspace model and permissions
 
@@ -364,7 +410,9 @@ All object relationships, previews, inbox aggregations, search results and AI re
 | Admin | Invite, disable and remove members; reset member MFA; manage groups; configure email, notifications and storage thresholds; archive or delete any channel or object; view the audit log. |
 | Member | Use the workspace; create public and private channels, documents, whiteboards and files; share what they own. |
 
-Guest and external-collaborator accounts are out of scope for the first release.
+Guest and external-collaborator accounts are out of scope for the first release. A **guest** role is planned for Phase 2. Guests can see only the channels and documents explicitly shared with them. They never see the member directory, public channels or workspace-wide search, and they can't create channels or invite others. The `users.role` column reserves this value, so adding guests needs no schema redesign.
+
+The baseline role model is validated through interviews with at least five design-partner teams before Phase 1 exits.
 
 **Groups.** Admins create named groups (for example, teams or departments). A group can be granted access anywhere a user can.
 
@@ -398,7 +446,7 @@ Defaults:
 
 ### 10.2 Retention and deletion (baseline)
 
-These rules are the baseline for the Phase 1 schema. Configurable retention policies, for example auto-deleting messages after N days, may be added later. The schema supports them from the start.
+These rules are the baseline for the Phase 1 schema. Phase 1 uses the fixed defaults below. **Configurable retention policies** arrive in Phase 2: owners can set per-workspace and per-channel auto-deletion of messages and files after N days. The schema supports them from the start, through `purge_after` and the purge pipeline.
 
 | Data | Default retention | On deletion |
 |---|---|---|
@@ -436,6 +484,11 @@ Different model choices may be configured for assistant responses, summarisation
 - Mutating or sensitive actions require confirmation where appropriate.
 - Important AI actions and tool invocations are auditable.
 - AI interaction and audit retention is defined and configurable.
+- **Visibility of AI logs:**
+  - Each user can see and delete their own assistant conversation history.
+  - Owners and admins can see *metadata* for every AI interaction: who, when, which model, which tools ran, which workspace objects were read or changed, and the outcome.
+  - Owners and admins **cannot** see prompt or response content, which follows the same rule as private content (§10.1).
+  - Tool actions that changed data are also recorded in the audit log.
 - AI outages do not disable core collaboration.
 
 The initial AI release includes a permission-aware team assistant. Personal assistant memory is deferred.
@@ -511,7 +564,21 @@ All persistent application data lives in the customer's Cloudflare account:
 - R2: files and attachments.
 - Vectorize: embeddings for AI retrieval.
 
-D1 Time Travel provides point-in-time recovery to any minute within the last 30 days. R2 provides object versioning and lifecycle policies. Officebox provides an application-level export for portability and supplementary recovery, using database-consistent methods and including file data and metadata.
+D1 Time Travel provides point-in-time recovery to any minute within the last 30 days. R2 provides object versioning and lifecycle policies. Officebox provides an application-level export for portability and supplementary recovery, including file data and metadata.
+
+**Export and restore:**
+
+- **Format:** owners can produce an **Officebox export**, a versioned archive written to the installation's R2 bucket. It contains:
+  - a manifest (format version, Officebox version, counts, checksums)
+  - one JSON Lines file per table
+  - channel messages
+  - document and whiteboard state, both in native Yjs form and as readable Markdown or JSON
+  - all files.
+
+  The format is documented and stable across versions, so other tools can read it.
+- **Running exports:** an export can be started on demand or on a schedule (for example, weekly). Each export is internally consistent per object, recording each channel's message position and each document's state. It is not one instant across the whole workspace. For a fully consistent export, the owner can put the workspace in read-only maintenance mode while the export runs.
+- **Restore:** a fresh Officebox installation offers **Restore from export** as an alternative to first-run setup. It imports everything into the new installation, which is also how a workspace moves to a different Cloudflare account. A command-line restore tool covers very large exports.
+- **Testing:** restore is tested on every release.
 
 Data ownership is the customer's. They can export, delete or migrate their data at any time. Deletion follows the rules in §10.2, including Cloudflare's recovery windows of up to 30 days. Officebox does not hold customer data outside the customer's Cloudflare account.
 
@@ -584,7 +651,7 @@ Phases describe product capability, not a requirement to postpone foundational a
 - Optional meeting transcription and summaries, subject to consent and retention controls.
 - Further Personal Inbox intelligence, such as suggested follow-ups and extracted commitments, with user review and clear provenance.
 
-The exact sequencing should be validated against user research, component evaluations and implementation capacity. Calendar aggregation depends on a deliberate calendar integration decision; it is not assumed to exist in Phase 1.
+The exact sequencing should be validated against user research, component evaluations and implementation capacity. Calendar support is an outbound ICS feed in Phase 2 and optional read-only calendar connections in Phase 3 or later (§5.3).
 
 ## 16. Product success criteria
 
@@ -622,16 +689,21 @@ Cost success criterion: a team of 25 can operate within the Workers Paid plan at
 
 ## 17. Open product questions
 
-- Validation of the baseline role model (§10.1) with early customers, including whether guest accounts are needed sooner.
-- Whether configurable workspace-wide retention policies (auto-delete after N days) are needed in Phase 1 or later.
-- Final Tiptap extension set and editor UX after evaluation.
-- Exact board/issue component or engine selection.
-- Detailed Personal Inbox prioritisation, snooze and acknowledgement semantics.
-- Calendar integration scope and provider strategy.
-- AI interaction log administrator visibility.
-- Application export format and restore tooling.
-- Whether native mobile apps are justified by actual usage.
-- Support plan tiers and pricing.
+Every question open at v1.1 now has a recommended decision, recorded here and in the sections listed. Decisions marked *Validate* are the working baseline but must be confirmed with design partners before the stated milestone.
+
+| Question | Recommendation | Where | Status |
+|---|---|---|---|
+| Role model, and whether guests are needed sooner | Keep the §10.1 baseline. Guest role in Phase 2. Validate with at least five design-partner teams. | §10.1 | Validate before Phase 1 exit |
+| Configurable retention policies | Fixed defaults in Phase 1. Per-workspace and per-channel auto-deletion in Phase 2. | §10.2 | Decided |
+| Tiptap extension set | MIT open-source Tiptap packages only. No paid Tiptap cloud. Comments and history built on Officebox's own Yjs storage. | §5.5 | Decided |
+| Revision history depth | Hourly for 7 days, daily for 90 days, named versions kept for the document's lifetime | §5.5 | Decided |
+| Board/issue component | dnd-kit with Officebox's own D1 data model. No embedded standalone tracker. | §5.6 | Decided |
+| Personal Inbox semantics | Ordering, grouping, states, snooze presets and automatic resolution as specified | §5.3 | Validate in Phase 2 usability testing |
+| Calendar integration | Outbound per-user ICS feed in Phase 2. Optional read-only Google/Microsoft in Phase 3 or later. No write-back. | §5.3 | Decided |
+| AI log visibility | Users see and delete their own history. Admins see metadata only, never content. | §11 | Decided |
+| Export format and restore | Versioned JSON Lines + Yjs + files archive in R2. "Restore from export" in a fresh installation. Restore tested every release. | §13; TDD §7.5 | Decided |
+| Native mobile apps | Reconsider after Phase 2 if mobile is more than 30% of sessions and PWA limits are a top-three pain point. Start with a PWA wrapper. | §9 | Decided |
+| Support plans and pricing | Community (free), Standard (~$49/month), Priority (~$199/month), one-off packages; all per installation | §1 | Validate pricing with design partners |
 
 Resolved in v1.1:
 - Role model and default permissions: baseline in §10.1.
@@ -639,7 +711,7 @@ Resolved in v1.1:
 - Beta access: free, opt-in (§1).
 - Upgrade mechanism: release-sync pull requests (§13).
 
-The baseline rules are now the input to the Phase 1 schema. Changing them after the schema freezes requires a migration plan.
+New questions should be added to this table with an owner and a decision deadline.
 
 ---
 
@@ -673,6 +745,13 @@ The baseline rules are now the input to the Phase 1 schema. Changing them after 
 | Web push | Phase 2 | Agreed |
 | Tasks/projects | Phase 2 | Agreed |
 | Personal AI memory | Deferred pending separate privacy and retention design | Deferred |
+| Guest accounts | Guest role in Phase 2 with access to explicitly shared channels and documents only | Agreed |
+| Editor licensing | MIT Tiptap packages only; no paid Tiptap cloud dependency | Agreed |
+| Board UI | dnd-kit on Officebox's own data model | Agreed |
+| Calendar | Outbound ICS feed in Phase 2; optional read-only connections later | Agreed |
+| AI log visibility | Users: own history; admins: metadata only | Agreed |
+| Export and restore | Versioned open archive; Restore from export in a fresh installation | Agreed |
+| Support plans | Community, Standard and Priority plus one-off packages; per installation | Pricing to validate |
 | Backup responsibility | Customer owns Cloudflare account; Officebox provides export and D1 Time Travel guidance | Agreed |
 | Deployment | Deploy to Cloudflare button; supported resources provisioned automatically; post-deploy checklist for the rest | Agreed |
 | Upgrade model | Stable and beta channels; release-sync GitHub Actions pull request; merge to upgrade; rollback-compatible migrations | Agreed |
