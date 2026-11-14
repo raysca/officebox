@@ -1,7 +1,7 @@
 # Spec: Calendar
 
 **Status:** Draft for review
-**Revision:** Revised after independent review (14 Nov 2026)
+**Revision:** Revised after independent review, and again after the second review (14 Nov 2026)
 **Feature name:** Calendar (marketing name to be decided later)
 **Milestone:** M5, in slices M5a–M5c (§15) ([PLAN](../PLAN.md))
 
@@ -73,7 +73,9 @@ A team calendar built into the workspace:
 - **Deletion:**
   - personal, workspace and group calendars can't be deleted directly; they follow their owner, group or workspace ([Platform](platform.md) §4)
   - channel calendars are removed with their channel
-  - standalone and external calendars can be deleted by their owner (Trash for 30 days, [Platform](platform.md) §5).
+  - standalone and external calendars can be deleted by their owner (Trash for 30 days; restorable by the owner, the person who deleted it, or an admin; [Platform](platform.md) §5)
+  - **when a group or channel calendar is purged** (decision), each event **moves to its organiser's personal calendar**, so attendees keep it. Events whose organiser has been deleted are deleted instead, and attendees get `event_cancel` ([Platform](platform.md) §4).
+- **Deleted organiser:** events on a deleted member's personal calendar that have other attendees move to the **first remaining attendee's** personal calendar (earliest to accept, otherwise earliest invited), who becomes organiser **(default)**. Events with no other attendees are deleted. Events they organised on shared calendars get the calendar's first remaining editor (or owner) as organiser ([Platform](platform.md) §3).
 
 ## 4. Events
 
@@ -88,7 +90,7 @@ A team calendar built into the workspace:
 | Recurrence | RFC 5545 RRULE, plus exceptions (§4.3) |
 | Attendees | Members, groups (expanded when the invitation is sent, **(default)**) and external emails (§8). Each can be marked **optional**. |
 | Location | Free text |
-| Call | "Add call": an Officebox call in the event's context ([Calls](calls.md) §3) |
+| Call | "Add call": an Officebox call in the event's context ([Calls](calls.md) §3). The **organiser, attendees and anyone with details-level access** to the event can start or join it; free/busy-only viewers can't. |
 | Description | Rich text, with links to documents, channels and messages |
 | Visibility | `default` (follows the calendar), `private` (busy block for everyone except organiser and attendees), `public` (details visible even on free/busy calendars) |
 | Show as | `busy` (default) or `free` |
@@ -143,7 +145,8 @@ What a person sees for an event depends on their role on its calendar, the event
 
 - **An attendee always sees full details of an event they're invited to**, even on a calendar they can't otherwise view.
 - **Busy blocks** show only the time range, no title or location. `show_as = free` events don't appear as blocks.
-- **Deletion of a private event** by a calendar editor isn't possible. The calendar's owner can only remove it by deleting the calendar.
+- **Deletion of a private event** by a calendar editor isn't possible.
+- **Orphaned private events** (decision): when a private event's organiser is **disabled or deleted**, an **owner or admin** can delete it **without seeing its details** (the delete action is offered on the busy block, and audited). This is how such an event is removed from a group or personal calendar, which can't be deleted directly.
 
 ## 5. Special event types
 
@@ -211,7 +214,8 @@ What a person sees for an event depends on their role on its calendar, the event
   - Officebox has no mail server (PRD §7), so replies by email aren't read. The invitation says "Respond using the links below".
 - **Updates and cancellations** send ICS updates (`SEQUENCE` incremented) and `METHOD:CANCEL`.
 - **Editing one occurrence:** external attendees get an **updated full-series ICS** containing the series plus `RECURRENCE-ID` overrides for changed or cancelled occurrences **(default)**.
-- **Calls:** external attendees can't join Officebox calls until guest access exists ([Calls](calls.md) §11). The organiser can paste an external meeting link in the location field.
+- **Calls:** external attendees can't join Officebox calls until guest access exists ([Calls](calls.md) §2, §13). The organiser can paste an external meeting link in the location field.
+- **Opt-out:** every external invitation has an opt-out link. It opens a confirmation page, and only the POST from that page records the opt-out (`ics_opt_outs`, [Platform](platform.md) §10, §15). Inviting an opted-out address returns a typed result telling the organiser.
 - External attendee emails are visible only to the organiser, the event's attendees, and editors who can see the event's details.
 
 ## 9. Reminders and notifications
@@ -276,8 +280,9 @@ What a person sees for an event depends on their role on its calendar, the event
 ```sql
 CREATE TABLE calendars (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('personal', 'group', 'channel', 'standalone', 'workspace', 'external', 'holiday')),
-    -- 'holiday' is reserved: the holiday calendar is virtual and no rows are stored for it
+  kind TEXT NOT NULL,
+    -- 'personal' | 'group' | 'channel' | 'standalone' | 'workspace' | 'external'
+    -- Zod-validated; CHECK omitted in migrations (platform §14). Holidays are virtual, so there is no 'holiday' kind.
   name TEXT NOT NULL,
   color TEXT NOT NULL,
   owner_user_id TEXT REFERENCES users(id),       -- personal, standalone, external
@@ -297,7 +302,7 @@ CREATE TABLE calendars (
 CREATE TABLE events (
   id TEXT PRIMARY KEY,
   calendar_id TEXT NOT NULL REFERENCES calendars(id),
-  type TEXT NOT NULL DEFAULT 'event' CHECK (type IN ('event', 'focus', 'working_location', 'deadline', 'holiday')),
+  type TEXT NOT NULL DEFAULT 'event',   -- 'event' | 'focus' | 'working_location' | 'deadline' | 'holiday' (company holiday); Zod-validated, CHECK omitted (platform §14)
   title TEXT NOT NULL,
   description TEXT,                              -- rich text JSON
   location TEXT,
@@ -362,10 +367,10 @@ CREATE TABLE time_off (
   start_date TEXT NOT NULL, end_date TEXT NOT NULL,      -- inclusive dates in the member's zone
   start_half TEXT CHECK (start_half IN ('am', 'pm')),    -- NULL = full day
   end_half TEXT CHECK (end_half IN ('am', 'pm')),        -- single-day half day: same value as start_half
-  kind TEXT NOT NULL CHECK (kind IN ('vacation', 'sick', 'personal', 'other')),   -- member-only
+  kind TEXT NOT NULL,                                    -- 'vacation' | 'sick' | 'personal' | 'other'; member-only; Zod-validated
   note TEXT,                                             -- member-only
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-  deleted_at INTEGER, purge_after INTEGER
+  deleted_at INTEGER                                     -- audit only: no Trash; hard-deleted 30 days later (platform §5)
 );
 
 CREATE TABLE ics_feeds (
@@ -384,8 +389,9 @@ CREATE TABLE ics_subscriptions (
   last_fetched_at INTEGER,
   last_error TEXT
 );
--- huddles.context_type gains 'event' (calls spec §9; schema reconciliation in platform §14).
--- Reminder triggers live in the ReminderScheduler's scheduled_triggers table (platform §11).
+-- huddles.context_type gains 'event' (calls spec §10; schema reconciliation in platform §14).
+-- Reminder triggers live in the ReminderScheduler's scheduled_triggers table, with effects delivered through its outbox (platform §11.1).
+-- External invitation opt-outs: ics_opt_outs (platform §15).
 -- settings (platform §7): holiday_regions (JSON), external_invites ('on' | 'admins' | 'off'), external_invite_daily_cap, ics_subscription_limit;
 -- reminder defaults live in user_preferences.reminder_defaults (notifications §7).
 ```
@@ -465,6 +471,11 @@ Criteria tagged **(manual)** need a real external client and are run before rele
   - the organiser sees the responses, with optional attendees marked.
 - **Visibility matrix:** for each row of §4.5, the API returns exactly the fields listed. A calendar editor gets a busy block for a private event, and their edit, move and delete requests are refused.
 - **Group view:** any member can view any group's calendar; the "who's in" strip shows time off as dates only and working locations.
+- **Calendar purge:** purging a group calendar moves each event to its organiser's personal calendar, and attendees still see it; an event whose organiser was deleted is deleted, and attendees receive `event_cancel`.
+- **Deleted organiser:** deleting a member moves their personal-calendar events that have other attendees to the first remaining attendee, who becomes organiser.
+- **Orphaned private events:** after a private event's organiser is disabled, an admin can delete it from the busy block without the API returning its title or details; a non-admin editor can't.
+- **Event calls:** an attendee and a details-level viewer can start the event's call; a free/busy-only viewer gets 403.
+- **External opt-out:** a GET on the opt-out link changes nothing; after the POST, inviting that address is refused with a typed result.
 - **External attendees:**
   - automated ICS conformance tests check `METHOD:REQUEST`, `METHOD:CANCEL`, `SEQUENCE` increments and `RECURRENCE-ID` overrides against RFC 5545
   - the 51st external recipient in a day for one member is refused; external invitations disabled by an admin are refused

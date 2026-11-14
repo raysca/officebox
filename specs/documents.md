@@ -1,7 +1,7 @@
 # Spec: Documents, Whiteboards & Files
 
 **Status:** Draft for review
-**Revision:** Revised after independent review (14 Nov 2026)
+**Revision:** Revised after independent review, and again after the second review (14 Nov 2026)
 **Feature name:** Documents (marketing name to be decided later)
 **Milestone:** M6 ([PLAN](../PLAN.md)), in slices M6a–M6c (§12). Chat attachments ship with Chat (M3b) and are message-owned, not drive files.
 **Related:** PRD §5.5, §5.7, §10.1; TDD §2.4, §4, §8.3; [Permissions](permissions.md), [Notifications](notifications.md), [Platform](platform.md), [Chat](chat.md), [Calls](calls.md) (present mode)
@@ -47,13 +47,13 @@ Collaborative documents and whiteboards, and the files around them, organised in
 
 | Drive | Created | Owner | Default access |
 |---|---|---|---|
-| **My files** | Automatically per member (platform §13) | The member | Private (restricted) |
-| **Group drive** | Automatically per group (platform §13) | The group (managed by group managers and admins) | Group members edit. **Listed by name to all members**; contents are not visible to non-members unless shared. |
+| **My files** | Automatically per member from M6a, backfilled for existing members (platform §13) | The member | Private (restricted) |
+| **Group drive** | Automatically per group from M6a, backfilled (platform §13) | The group (managed by group managers and admins; an admin granting **themselves** access needs an owner, permissions §6) | Group members edit. **Listed by name to all members**; contents are not visible to non-members unless shared. |
 | **Shared drive** | Any member creates one | The drive itself; creator is the first drive manager | Shared with users, groups and channels as manager / editor / commenter / viewer. Restricted by default. |
-| **Channels drive** | One, at setup (platform §13) | The workspace | Contains one folder per channel (§3.3); has no access of its own beyond listing |
+| **Channels drive** | Created with M6a, or at setup once M6a has shipped (platform §13) | The workspace; **admins manage it** (permissions §4.3) | Contains one folder per channel (§3.3). Members get access only through channel membership of each folder. |
 
 - **Shared drives belong to the team, not a person.** Content stays when people leave.
-- **Leavers:** a **disabled** member keeps ownership of their My files (PRD §6). When a member is **deleted**, their My files content transfers to an admin, who can move it into a shared drive (platform §3).
+- **Leavers:** a **disabled** member keeps ownership of their My files (PRD §6). When a member is **deleted**, their My files content transfers to an admin, **who can then read it** (stated in the privacy statement, permissions §6), and who can move it into a shared drive (platform §3).
 - **Deleting drives:**
   - A drive's managers can delete a shared drive, which moves it and its contents to Trash for 30 days (§3.5).
   - Group drives are deleted only with their group, in the same way (platform §4).
@@ -109,21 +109,15 @@ Collaborative documents and whiteboards, and the files around them, organised in
   - **Approvers** are owners and editors, plus drive managers for drive items.
   - The no-access screen **doesn't show the title** when the viewer can't see the containing space.
   - Requests are unique per requester and item, and expire (§9).
-- **Admins** can see that items exist and manage drives, but don't read content they haven't been given access to (permissions §6).
-- **Access changes on open sessions:** when a role is downgraded or removed through any route (item, folder, drive or general access), the Worker re-checks access and closes or re-scopes affected DocRoom sockets (platform §12). A downgraded editor's open document switches to read-only within seconds.
+- **Admins** can see that items exist and manage drives, but don't read content they haven't been given access to. Granting **themselves** access to a drive or folder, or adding themselves to a group, needs an **owner** and is audited (decision; permissions §6).
+- **Access changes on open sessions:** when a role is downgraded or removed through any route (item, folder, drive or general access), the Worker re-checks access and closes or re-scopes affected DocRoom sockets (platform §12). The Worker calls `updateAccess(userId, role | null)` on the DocRoom, which sends `{ type: "access.changed", role }` and closes the socket with `4403` when the role is null. A downgraded editor's open document switches to read-only **within 5 seconds**.
 
 ### 3.5 Trash and restore
 
 - Deleting an item or folder moves it to Trash for **30 days**, after which it's purged (platform §5).
-- **Who can restore:**
-
-  | Container | Who can restore |
-  |---|---|
-  | My files | The owner (or an admin, after transfer) |
-  | Shared drive | Drive managers, or the person who deleted the item |
-  | Group drive | Group managers |
-  | Channel folder | Channel admins, or the person who deleted the item |
-  | Any | Workspace admins, for items in containers they manage |
+- **Who can restore (canonical rule, platform §5):** the item's **owner**, the **person who deleted it**, **drive managers** of its drive, and **admins**.
+  - For group drives the drive managers are the group managers; for the Channels drive they are the admins.
+  - Restoring doesn't reveal content to an admin who couldn't already read it: the item returns to its folder with its previous access.
 
 - Restoring returns an item to its original folder if it still exists, otherwise to the drive root.
 - Deleting a drive puts the whole drive in Trash. Restoring the drive restores items deleted with it; items deleted before the drive keep their own Trash timers.
@@ -135,7 +129,7 @@ Collaborative documents and whiteboards, and the files around them, organised in
 - **Tiptap + Yjs**, using only the MIT packages (PRD §5.5).
 - **Text and structure:** headings, paragraphs, bold, italic, underline, strikethrough, highlight, links, inline code, bulleted, numbered and **task lists**, quotes, dividers.
 - **Tables:** add and remove rows and columns, a header row, cell alignment.
-- **Media:** images (upload or paste, resizable, captions, **alt text**) and file attachments (cards).
+- **Media:** images (upload or paste, resizable, captions, **alt text**) and file attachments (cards). These are **document-owned files** (§6).
 - **Slash commands:** `/` opens a block menu (heading, list, table, callout, toggle, code, image, file, whiteboard, embed, divider, mention, date), filtered as you type.
 - **Callouts:** info, tip, warning and danger styles with an emoji icon.
 - **Toggles:** collapsible sections.
@@ -152,9 +146,10 @@ Collaborative documents and whiteboards, and the files around them, organised in
 ### 4.2 Collaboration
 
 - Live co-editing through the DocRoom DO (TDD §4). Edits converge, and presence shows collaborators' **avatars, cursors and selections** in their colours.
-- **Viewers and commenters** can't edit; the server enforces this (TDD §4.4). Role changes while a document is open take effect within seconds (§3.4).
+- **Viewers and commenters** can't edit; the server enforces this (TDD §4.4). Role changes while a document is open take effect within 5 seconds (§3.4).
 - Autosave is continuous, with a clear save state: "Saved", "Saving…", "Offline — changes will sync", or "Read-only — your access changed".
 - **Present mode:** follow-the-presenter (Calls §6.6; TDD §4.5).
+- **Document calls:** **anyone who can open the document, including viewers**, can start or join its call (decision; Calls §3).
 
 ### 4.3 Officebox embeds
 
@@ -183,7 +178,7 @@ Live, permission-checked embeds inserted with `/embed` or by pasting an Officebo
   - replies, @mentions (which reach the inbox), emoji reactions
   - edit and delete your own comments
   - **resolve and reopen**; resolved threads are hidden, with a "Show resolved" toggle.
-- **Moderation:** the document **owner**, **editors** **(default)** and **admins** (on documents they can access) can delete any comment. A removed comment shows "Comment removed by *name*", and the removal is audited.
+- **Moderation (decision):** the document **owner**, **editors** and **admins** (on documents they can access) can delete any comment. A removed comment shows "Comment removed by *name*", and the removal is audited.
 - **Permissions:** commenters and above can comment; viewers can read comments.
 - **Realtime:** new, edited, resolved and removed comments fan out to viewers who have the document open, through hub activity (platform §12).
 - **Notifications** (notifications §3 Notification events): `doc_comment` to the document owner and the document's followers; `comment_reply` to people who commented in the thread; `doc_mention` to anyone mentioned.
@@ -232,7 +227,10 @@ Live, permission-checked embeds inserted with `/embed` or by pasting an Officebo
 
 ## 6. Files
 
-This section covers **drive files** only. Chat attachments are message-owned (Chat §10). They become drive files only through **Save to folder**, which makes an independent copy.
+There are three kinds of file (platform §14):
+- **Drive files:** live in a folder, are versioned, and are covered by this section.
+- **Message-owned files:** chat attachments (Chat §10). They become drive files only through **Save to folder**, which makes an independent copy.
+- **Document-owned files:** images and file cards inserted into a document (`parent_type = 'document'`). They have no folder and no versions, **inherit the document's access**, appear only inside the document, and are **deleted with it** (with the document's Trash and purge).
 
 - **Upload:** drag-and-drop files and folders, the upload button, or paste. Uploads stream through the Worker into R2, multipart above 50 MB; the default limit is 2 GB per file (TDD §8.3; quotas in platform §8).
 - **Previews:**
@@ -276,8 +274,9 @@ Activity is visible to anyone who can view the item. It is kept for the life of 
 ```sql
 CREATE TABLE drives (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('personal', 'group', 'shared', 'channels')),
+  kind TEXT NOT NULL,                               -- 'personal' | 'group' | 'shared' | 'channels'; Zod-validated, CHECK omitted (platform §14)
   name TEXT NOT NULL,
+  general_access TEXT NOT NULL DEFAULT 'restricted', -- 'restricted' | 'workspace_view' | 'workspace_comment' | 'workspace_edit' (permissions §9)
   owner_user_id TEXT REFERENCES users(id),          -- personal
   group_id TEXT REFERENCES groups(id),              -- group
   created_by TEXT REFERENCES users(id),
@@ -294,10 +293,11 @@ ALTER TABLE documents ADD COLUMN folder_id TEXT REFERENCES folders(id);
 ALTER TABLE documents ADD COLUMN drive_id TEXT REFERENCES drives(id);
 ALTER TABLE documents ADD COLUMN created_by TEXT REFERENCES users(id);     -- for the channel-deletion move
 
--- files: two kinds, kept apart
+-- files: three kinds, kept apart (platform §14)
 --   drive files:     folder_id + drive_id set, parent_type NULL, versioned
 --   message files:   parent_type = 'message', folder_id NULL, never versioned (Chat §10)
--- The baseline CHECK (NOT (folder_id IS NOT NULL AND parent_type IS NOT NULL)) stays and now matches this model.
+--   document files:  parent_type = 'document', folder_id NULL, never versioned; inherit the document's access; deleted with it
+-- The baseline CHECK (NOT (folder_id IS NOT NULL AND parent_type IS NOT NULL)) stays and matches this model.
 ALTER TABLE files ADD COLUMN drive_id TEXT REFERENCES drives(id);
 ALTER TABLE files ADD COLUMN current_version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE files ADD COLUMN copied_from_file_id TEXT;                     -- "Save to folder" provenance
@@ -317,10 +317,10 @@ CREATE TABLE recent_items (user_id TEXT, object_type TEXT, object_id TEXT, opene
 
 CREATE TABLE access_requests (
   id TEXT PRIMARY KEY,
-  object_type TEXT NOT NULL, object_id TEXT NOT NULL,
+  object_type TEXT NOT NULL, object_id TEXT NOT NULL,   -- document | whiteboard | folder | file | drive | calendar | event (permissions §7)
   requester_id TEXT NOT NULL REFERENCES users(id),
   message TEXT,
-  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'approved', 'declined', 'expired', 'cancelled')),
+  state TEXT NOT NULL DEFAULT 'pending',            -- 'pending' | 'approved' | 'declined' | 'expired' | 'cancelled'; Zod-validated
   granted_role TEXT,
   decided_by TEXT REFERENCES users(id),
   created_at INTEGER NOT NULL,
@@ -353,7 +353,7 @@ CREATE TABLE comments (
 CREATE TABLE item_activity (                         -- details-panel activity (§6.1)
   id TEXT PRIMARY KEY,
   object_type TEXT NOT NULL, object_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('edit', 'comment', 'share', 'version', 'call')),
+  kind TEXT NOT NULL,                                -- 'edit' | 'comment' | 'share' | 'version' | 'call'; Zod-validated, CHECK omitted
   actor_id TEXT REFERENCES users(id),
   day TEXT,                                          -- YYYY-MM-DD, for grouping edits
   detail TEXT,                                       -- JSON
@@ -409,7 +409,9 @@ Realtime: document content goes through the DocRoom/BoardRoom sockets (TDD §4).
   - an item can't be restricted below its folder
   - sharing an item more widely works
   - moving an item to a more restricted folder shows the list of people who lose access, and after confirming they can no longer open it (explicit grants remain).
-- **Group drives:** a non-member sees the group drive's name but gets the no-access state when opening it. Group members can edit inside.
+- **Group drives:** a non-member sees the group drive's name but gets the no-access state when opening it. Group members can edit inside. An admin who isn't a group member can't grant themselves access without an owner's approval.
+- **Document-owned files:** an image pasted into a document is readable by exactly the people who can read the document, and is purged with it.
+- **Document calls:** a viewer of a document can start its call.
 - **Channel folders:**
   - **Save to folder** on a chat attachment creates an independent drive file; deleting the original message doesn't delete the copy
   - DMs have no folder
@@ -428,7 +430,7 @@ Realtime: document content goes through the DocRoom/BoardRoom sockets (TDD §4).
   - a mention creates a `doc_mention` inbox item
   - resolve and reopen work
   - after a version restore, a thread whose quote exists in the restored text is re-anchored, and one whose quote doesn't is listed under "Detached comments"
-  - the document owner can remove another member's comment, and the removal appears in the audit log.
+  - the document owner and an editor can each remove another member's comment, a commenter can't, and the removal appears in the audit log.
 - **Access requests:** requesting access to a document creates one pending request visible to its owner and editors; a second request from the same person is refused while one is pending; approving grants the chosen role; requests expire after 30 days.
 - **Versions:** restoring a version makes it the current content and adds a new history entry; compare highlights an inserted and a removed sentence.
 - **Offline (conflict scenario):** devices A and B open the same document. A goes offline and edits paragraph 1 while B edits paragraph 2. When A reconnects, both edits are present on both devices.
@@ -438,7 +440,7 @@ Realtime: document content goes through the DocRoom/BoardRoom sockets (TDD §4).
 - **Trash:**
   - a deleted item restores to its original folder within 30 days and is purged after
   - deleting a shared drive and restoring it within 30 days brings back its contents
-  - only the people listed in §3.5 can restore.
+  - only the item's owner, the person who deleted it, the drive's managers and admins can restore; anyone else gets 403.
 - **Exports and import:**
   - Markdown export of a document with two images produces a zip with the `.md` file and both images, linked relatively
   - PDF export (print stylesheet) produces one page per printed A4 or Letter page, with no app chrome, and every heading and table visible
@@ -470,6 +472,7 @@ Resolved in this revision:
 - Whiteboard comments: page-level only.
 - Offline cache: 20 documents with a 100 MB cap.
 
+- Comment moderation by editors: yes (decision).
+
 Still open:
-1. **Comment moderation by editors:** should editors (not just owners and admins) be able to remove others' comments? (The default above is yes.)
-2. **Compare versions:** keep it in M6b if the custom diff fits, or move it to Later now?
+1. **Compare versions:** keep it in M6b if the custom diff fits, or move it to Later now?
