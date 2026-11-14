@@ -1,8 +1,18 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.2  
+**Version:** 1.3  
 **Date:** 14 November 2026  
+**Changes in 1.3:** Screen sharing and present mode (§5.8). Remaining review items addressed:
+- persona-to-role mapping (§3)
+- SSO through Cloudflare Access and owner recovery (§6)
+- file limits and previews (§5.7)
+- data location, custom domain, usage panel, telemetry and support bundle privacy (§13)
+- storage protective mode (§13)
+- measurable success metrics (§16)
+- non-functional requirements (§18)
+- imports, integrations and APIs (§19).
+
 **Changes in 1.2:** All open product questions now have a recommended decision (§17). New or expanded: Personal Inbox rules (§5.3), editor and revision history (§5.5), board component (§5.6), support plans (§1), AI log visibility (§11), export and restore (§13), native app criteria (§9).  
 **Changes in 1.1:** Licence and business model defined (open source, paid support). Upgrade delivery via release-sync pull requests. Secure first-run setup. Baseline role model. Baseline retention and deletion rules. Message source of truth. See [REVIEW.md](REVIEW.md) items C1–C5.
 
@@ -69,6 +79,16 @@ A small startup or team (5–100 people) that wants an integrated collaboration 
 - Team lead: coordinates channels, projects, documents and priorities.
 - Knowledge worker: creates and searches documents, uses the AI assistant.
 - Founder/operator: needs a clear view of commitments, blockers and progress without paying per seat.
+
+How personas map to the roles in §10.1:
+
+| Persona | Typical workspace role | Typical resource roles |
+|---|---|---|
+| Workspace administrator | Owner or admin | — |
+| Founder/operator | Owner | Member of key channels; viewer or editor on plans |
+| Team lead | Member (sometimes admin) | Channel admin; document owner or editor; project lead (Phase 2) |
+| Team member / knowledge worker | Member | Channel member; document editor or commenter |
+| Contractor or client | Guest (Phase 2) | Only explicitly shared channels and documents |
 
 ### Problems to solve
 
@@ -137,6 +157,8 @@ It should answer:
 2. What do I need to do?
 3. What is coming up?
 4. What has changed in work I'm involved in?
+
+The Personal Inbox ships in Phase 2. Phase 1 provides basic in-app notifications, which become the Inbox's first sources.
 
 Initial conceptual views:
 
@@ -256,6 +278,10 @@ Initial capabilities:
 - Download links and previews where practical.
 - Links to messages, documents, projects and issues.
 - Versioning phased in as requirements become clear.
+- Files up to 2 GB by default (configurable by owners).
+- Images, PDFs, audio and video preview in the browser. Other types, including HTML and SVG, download instead of opening, for safety.
+- Owners can block chosen file types.
+- Files are not scanned for malware (§14).
 
 ### 5.8 Realtime collaboration and huddles
 
@@ -266,19 +292,56 @@ Realtime is fundamental to Officebox. The architecture uses two distinct realtim
 
 Media (huddles) uses Cloudflare Realtime SFU:
 
-- Instant audio-first huddles from conversations, documents and projects.
-- Optional video.
-- Screen sharing as a subsequent capability.
-- Join and leave without calendar ceremony.
-- Clear indication of the context in which a session started.
-- TURN is provided by Cloudflare Realtime and shares the SFU free tier: first 1,000 GB of egress per month is free, then $0.05/GB. For small-team audio huddles this is effectively free.
+- **Instant huddles:** audio-first huddles start from conversations, documents and projects. Starting one notifies the context's members, and anyone with access to that context can join.
+- **Video:** optional, and off by default.
+- **Screen sharing and present mode:** see below.
+- **No scheduling:** join and leave without calendar ceremony.
+- **Visible context:** each huddle shows the context it started in and links back to it, and the context shows who is in the huddle. When a huddle ends, a short summary (duration, participants) is posted to the context.
+- **Size:** up to 25 participants per huddle by default.
+- **Controls:** mute, camera, share screen, raise hand and leave. The person who started the huddle, and channel admins for channel huddles, can mute participants and stop a share.
+- **Encryption:** media is encrypted in transit. It passes through Cloudflare's SFU and is not end-to-end encrypted, and Officebox says so plainly.
+- **TURN:** provided by Cloudflare Realtime, sharing the SFU free tier: the first 1,000 GB of egress per month is free, then $0.05/GB. For small-team audio huddles this is effectively free.
+
+#### Screen sharing
+
+Users can share their screen in any huddle, or start a huddle by sharing straight from a channel, DM, document or project.
+
+- **What can be shared:** an entire screen, a single application window or a single browser tab, through the browser's standard picker. Tab audio can be included where the browser supports it (Chromium-based browsers). Full system audio is not promised.
+- **One presenter at a time,** which keeps attention focused and bandwidth predictable. Another participant can ask to take over, and the presenter accepts with one click. The huddle starter or a channel admin can hand over directly.
+- **Viewing:**
+  - the share becomes the main view, with participant tiles alongside
+  - viewers can go full screen or pop the share into its own window (picture-in-picture where supported)
+  - viewers can zoom and pan to read small text.
+- **Clarity first:**
+  - shares are tuned for readable text by default: up to 1080p at a low frame rate
+  - presenters can switch to *motion* for video or animation: a higher frame rate with adaptive resolution
+  - viewers on slow connections automatically get a lower-quality version without affecting anyone else.
+- **Presenter safety:**
+  - a persistent "You are sharing" bar with a Stop button
+  - Officebox notifications are suppressed on the presenter's device while sharing
+  - a reminder appears when sharing an entire screen.
+- **Devices:** sharing needs a desktop browser (Chrome, Edge, Firefox or Safari). Mobile browsers and the installed PWA can view shares but not share, because mobile browsers don't offer screen capture.
+- **Administration:** owners choose who may share (everyone by default, admins and channel admins only, or nobody). They can also cap share resolution at 720p or 1080p to limit bandwidth.
+- **Not included:** remote control of another person's screen, annotation on shared screens, and recording (§14).
+
+#### Present mode for documents and whiteboards
+
+When the thing being shown is an Officebox document or whiteboard, users can **present** it instead of sharing their screen:
+
+- Followers' views track the presenter's position, zoom and selection in real time, at full quality and with no video bandwidth.
+- Any follower can break away to look around, then rejoin with one click.
+- Present mode works inside a huddle or on its own. For example, a user can walk a colleague through a spec while talking on a call elsewhere.
+
+#### Media usage
+
+Screen sharing and video use the most bandwidth. As a guide, a 30-minute 1080p share watched by 8 people uses about 3–4 GB of SFU egress, so the free allowance covers a few hundred such sessions a month. The usage panel (§13) shows huddle bandwidth.
 
 Delivery sequence:
 
 1. Application realtime (Durable Objects) and core chat presence.
 2. Collaborative documents and whiteboards (Durable Objects + Yjs).
 3. Audio huddles (Realtime SFU).
-4. Video and screen sharing.
+4. Video, screen sharing and present mode.
 5. Optional AI transcription, summaries and action items, with consent and retention controls.
 
 Recording is not an initial requirement.
@@ -294,7 +357,7 @@ The assistant helps users:
 - Answer questions grounded in workspace knowledge.
 - Understand related workspace context.
 
-The first AI release is a permission-aware team workspace assistant. A separate personal assistant with private memory is deferred until its ownership, isolation, retention and retrieval rules are separately specified.
+The first AI release (Phase 3) is a permission-aware team workspace assistant. A separate personal assistant with private memory is deferred until its ownership, isolation, retention and retrieval rules are separately specified.
 
 AI actions that modify data or affect external systems require confirmation and permission checks. Sensitive actions are auditable.
 
@@ -323,6 +386,13 @@ Planned security capabilities:
 - Login activity visibility.
 
 OIDC/SSO and passkeys are future considerations, not MVP dependencies.
+
+Further identity capabilities:
+
+- **SSO through Cloudflare Access (Phase 2):** customers can put their workspace behind Cloudflare Access, which is free for small teams. Officebox then signs members in with the company's identity provider, such as Google Workspace, Microsoft Entra, Okta or GitHub. This gives single sign-on and identity-provider MFA without Officebox implementing OIDC. Only existing or invited members can sign in this way. Owners can turn off local passwords for members.
+- **Owner recovery:** if every owner is locked out (password and MFA lost, and no email configured), someone with access to the Cloudflare account can set a one-time recovery secret. The secret allows resetting one owner's password and MFA. Recovery is audited, and a banner shows until the secret is removed.
+- **Disabled members:** their content stays. Their documents stay theirs until an admin transfers ownership, and their open issue assignments are flagged for reassignment.
+- **Device data:** signing out clears cached workspace data from the device. Revoking a session clears it the next time that device connects.
 
 ## 7. Email
 
@@ -364,6 +434,7 @@ Potential notification events:
 - Document sharing and review requests.
 - Task/issue assignments.
 - Due dates and project milestones.
+- A huddle starting in a channel, document or project the user follows.
 - Important security or system events.
 
 The first release includes basic in-app notifications. PWA installation and web push are Phase 2.
@@ -459,6 +530,7 @@ These rules are the baseline for the Phase 1 schema. Phase 1 uses the fixed defa
 | User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, password, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents passes to an admin. |
 | Audit log | 365 days, configurable | Purged automatically. It never stores message or document content. |
 | AI interaction logs (Phase 3) | 30 days, configurable | Purged automatically. |
+| Huddle history | 365 days | Metadata only (context, participants, times). No audio, video or screen content is ever recorded. |
 | Search and AI indexes | Same as the source object | Updated or removed whenever the source is edited, deleted or has its access changed. |
 
 **Platform recovery windows.** Cloudflare keeps point-in-time recovery data for up to 30 days: D1 Time Travel, Durable Object point-in-time recovery, and R2 noncurrent versions if the customer enables versioning. So purged data can remain recoverable by the account owner for up to 30 days after purge. Officebox documents this rather than promising instant permanent erasure.
@@ -491,7 +563,7 @@ Different model choices may be configured for assistant responses, summarisation
   - Tool actions that changed data are also recorded in the audit log.
 - AI outages do not disable core collaboration.
 
-The initial AI release includes a permission-aware team assistant. Personal assistant memory is deferred.
+The initial AI release (Phase 3) includes a permission-aware team assistant. Personal assistant memory is deferred.
 
 ## 12. Open-source reuse and integration strategy
 
@@ -514,6 +586,10 @@ Officebox avoids components that create competing sources of truth or force user
 The primary deployment mechanism is the Deploy to Cloudflare button. It copies the repository into the customer's GitHub account, configures the project, provisions the supported Cloudflare resources (Durable Objects, D1, R2, Vectorize, Queues) and deploys the application. D1 migrations run as part of the deploy script. GitHub is the supported host in the first release, because upgrades rely on GitHub Actions; GitLab support is a later consideration.
 
 During deployment the customer can set a setup token secret. If they skip it, the application generates a one-time token and writes it to the Worker's logs, which only the Cloudflare account can see. The first visit to the workspace asks for this token before the owner account can be created.
+
+**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs and push subscriptions are tied to the domain, so changing it later signs everyone out and push must be re-enabled.
+
+**Data location.** D1 keeps its primary copy in one location, chosen at deployment with a location hint. Durable Objects are created near their first user. Performance targets assume members are in the same broad region as the data; members elsewhere see higher latency. An **EU data-residency option** (Phase 2) keeps D1, R2 and Durable Objects in Cloudflare's EU jurisdiction wherever each service supports it.
 
 Some capabilities need a short manual step after deployment. The admin UI shows these as a post-deploy checklist:
 - allowing GitHub Actions to open pull requests, needed for upgrades
@@ -546,11 +622,14 @@ A safe, understandable upgrade path is a product requirement:
 
 The administrator experience includes:
 
-- Health and readiness status for the Worker, Durable Objects, D1, R2, Vectorize and Realtime SFU.
+- Health and readiness status for the Worker, Durable Objects, D1, R2, Vectorize and (once configured) Realtime SFU.
 - Disk/storage visibility (R2 usage, D1 storage).
+- **Usage and cost panel:** month-to-date usage against the Workers Paid allowances, with projected overage. With an optional read-only Cloudflare analytics token it shows Cloudflare's own figures. Without one, it uses Officebox's own counters. Owners are prompted to set Cloudflare billing notifications, because Cloudflare has no hard spending cap.
+- **Post-deploy checklist** status (see One-click deployment).
 - Application version and upgrade status.
 - Backup and data export status.
-- Diagnostic information and a support bundle.
+- Diagnostic information and a support bundle. The owner reviews the bundle before sharing it, and sends it only by attaching it to a support request. It contains versions, configuration, counts and error summaries. It never contains message, document or file content, email addresses or secrets.
+- **Optional telemetry,** off by default. If enabled, a weekly anonymous report sends Officebox the version, channel, a member-count range, enabled features and error counts. It never sends content, names or emails. Owners can view the exact payload before turning it on.
 - Clear guidance for moving or restoring an installation.
 
 Officebox does not claim that a backup exists or is healthy unless it has reliable evidence.
@@ -586,7 +665,14 @@ Missing backup or export configuration does not block startup. Demos, evaluation
 
 ### Storage exhaustion
 
-Officebox monitors D1 storage, R2 usage and Durable Object storage. It warns administrators at configurable thresholds, rejects new uploads before storage exhaustion threatens integrity, and provides clear recovery guidance. It does not silently discard durable messages or documents to free space.
+Officebox monitors each store against its real limit and never silently discards messages or documents to free space.
+
+- **D1 (10 GB hard limit per database):**
+  - Admins are warned at 70% and 85%.
+  - At 95%, **protective mode** pauses creating new channels, documents, files and invitations. Messaging continues, because messages are stored in their channels first.
+  - Admins are guided to free space. The most effective step is shortening how long the *searchable copy* of old messages is kept: older messages stay in their channels and exports but drop out of search. Emptying Trash, retention policies and archiving also help.
+- **Durable Objects (10 GB per channel or document):** admins are warned if any single channel or document approaches the limit. This is very unlikely for small teams.
+- **R2 (no hard limit; a cost question):** owners can set a storage budget. Admins are warned when it is exceeded, and new uploads can be blocked above a hard budget the owner sets.
 
 ## 14. Explicitly out of scope initially
 
@@ -600,6 +686,8 @@ Officebox monitors D1 storage, R2 usage and Durable Object storage. It warns adm
 - Kubernetes-based deployment (Cloudflare-native only).
 - Native desktop and native mobile apps at launch.
 - Enterprise-scale compliance and administration features before customer need is demonstrated.
+- Recording huddles, remote control of shared screens, and annotation on shared screens.
+- Malware scanning of uploaded files.
 - A separate personal AI memory system in the first AI release.
 
 ## 15. Phased delivery
@@ -615,7 +703,7 @@ Phases describe product capability, not a requirement to postpone foundational a
 - Member invitations and basic administration.
 - React application shell and responsive experience.
 - Channels and direct messages.
-- Durable message history in D1 and Durable Object SQLite.
+- Durable message history in channel Durable Objects, with a D1 copy for search.
 - Basic permission-filtered full-text search across messages and documents.
 - Shared documents using Tiptap + Yjs in Durable Objects.
 - Whiteboards using Yjs in Durable Objects.
@@ -624,14 +712,20 @@ Phases describe product capability, not a requirement to postpone foundational a
 - Basic in-app notifications via Durable Objects.
 - SMTP configuration for transactional email.
 - Application realtime via Durable Object WebSockets with hibernation.
-- Health checks and diagnostics.
+- Health checks, diagnostics, storage protective mode, post-deploy checklist and usage panel.
+- Owner recovery procedure.
+- Markdown document import.
 - Stable and beta channels with release-sync upgrade pull requests, update awareness in the admin UI, and rollback.
 - Application export/migration foundation.
 
 ### Phase 2 — Connected collaboration and work management
 
 - Audio huddles via Cloudflare Realtime SFU.
-- Video and screen sharing.
+- Video, screen sharing and present mode (§5.8).
+- Guest role; SSO through Cloudflare Access; configurable retention policies.
+- Imports from Slack, Notion and Google Docs; webhooks and the public REST API (§19).
+- Document comments; personal calendar (ICS) feed.
+- EU data-residency option.
 - PWA installation and web push.
 - Projects, boards, issues and lightweight tasks.
 - Personal Inbox with Today, Upcoming, Inbox, Assigned to me and Following views, using Officebox-native event sources.
@@ -670,6 +764,17 @@ The initial product should be judged by whether a small organisation can:
 - Understand its storage, backup and data ownership responsibilities.
 - Upgrade and roll back the installation using the stable or beta channel.
 
+**Measurable targets** (measured with design partners):
+
+| Metric | Target |
+|---|---|
+| Time from Deploy button to first message, without help | Median under 15 minutes |
+| Invitation activation | 80% of invited members active within 7 days |
+| Ongoing use | At least 70% of members active weekly after 4 weeks |
+| Reliability | No acknowledged message or saved document edit ever lost |
+| Support load | At most 1 support request per installation per month after onboarding |
+| Cost | Median Cloudflare bill at or below $6/month for teams of up to 25 |
+
 Before Phase 1 exit, validate at minimum:
 
 - Search returns relevant authorised messages/documents and excludes inaccessible objects.
@@ -680,12 +785,12 @@ Before Phase 1 exit, validate at minimum:
 - No acknowledged message is lost when the D1 copy is delayed or fails. Edits and deletions reach every connected client, the D1 copy and search.
 - Deleting a message, document, file or user removes the content as described in §10.2, including from search indexes.
 - A member without access cannot read a private channel, DM or restricted document through any route: the API, WebSocket, search, previews or links.
-- Storage warnings and upload rejection behave safely under low-storage conditions.
+- Storage warnings and protective mode behave safely as D1 approaches its limit, and trimming the searchable message copy frees space without losing messages.
 - Durable Object WebSocket hibernation keeps idle channels connected without accruing billable duration.
 - Durable Object Yjs sync supports a stock Yjs client and persists document state across object eviction.
 - Missing backup/export configuration produces an administrator warning but does not block evaluation startup.
 
-Cost success criterion: a team of 25 can operate within the Workers Paid plan at $5/month plus minimal R2/Realtime usage, with no per-seat charge. This is a target to be confirmed by load testing before it is used in marketing.
+Cost success criterion: a team of 25 can operate within the Workers Paid plan at $5/month plus minimal R2/Realtime usage, with no per-seat charge. This is a target to be confirmed by load testing before it is used in marketing. The pre-test estimate is in TDD Appendix B.
 
 ## 17. Open product questions
 
@@ -712,6 +817,32 @@ Resolved in v1.1:
 - Upgrade mechanism: release-sync pull requests (§13).
 
 New questions should be added to this table with an owner and a decision deadline.
+
+## 18. Non-functional requirements
+
+| Area | Requirement |
+|---|---|
+| Accessibility | WCAG 2.2 AA for all core flows. Full keyboard operation, screen-reader labels and support for reduced motion. Huddle captions arrive with transcription (Phase 3). |
+| Browsers | The latest two major versions of Chrome, Edge, Firefox and Safari on desktop. Safari on iOS 16.4+ and Chrome on Android for the PWA. Web push on iOS requires installing to the home screen. Screen sharing needs a desktop browser. |
+| Languages | English at launch. All interface text is externalised for translation. Dates, times and numbers follow the user's locale. Right-to-left languages come later. |
+| Availability | Inherits Cloudflare's platform availability; Officebox offers no separate uptime SLA (support plans cover response times). Chat and documents keep working when optional services (AI, email, huddles) are unavailable. |
+| Performance | The targets in TDD §9.2. |
+| Security | OWASP ASVS Level 2 as the baseline for the web application (TDD §8). |
+| Limits (defaults) | Designed and tested for 100 members (soft limit 250); messages up to 40 KB; 20 attachments per message; files up to 2 GB; 25 huddle participants; one screen share per huddle; documents tested to 5 MB of content. |
+
+## 19. Imports, integrations and APIs
+
+- **Phase 1:**
+  - Import Markdown and HTML files as documents.
+  - Full export (§13).
+- **Phase 2:**
+  - Import a Slack workspace export: channels, threads, reactions, files, and the DMs included in the export. Users are matched by email.
+  - Import Notion and Google Docs exports as documents.
+  - Incoming webhooks to post into channels.
+  - Outgoing webhooks for selected events.
+  - A documented REST API (OpenAPI) with personal access tokens that carry the user's own permissions.
+- **Later:** bot users and an app framework, once API usage is understood.
+- Assisted migration is also available as a paid service (§1).
 
 ---
 
@@ -752,6 +883,11 @@ New questions should be added to this table with an owner and a decision deadlin
 | AI log visibility | Users: own history; admins: metadata only | Agreed |
 | Export and restore | Versioned open archive; Restore from export in a fresh installation | Agreed |
 | Support plans | Community, Standard and Priority plus one-off packages; per installation | Pricing to validate |
+| Screen sharing | Screen, window or tab; one presenter at a time with take-over; text-first quality; desktop sharing, view anywhere; admin policy and resolution cap | Agreed |
+| Present mode | Follow-the-presenter for documents and whiteboards, with no video | Agreed |
+| SSO | Through Cloudflare Access in Phase 2; native OIDC later if needed | Agreed |
+| Imports and API | Markdown import in Phase 1; Slack, Notion and Google Docs imports, webhooks and REST API in Phase 2 | Agreed |
+| Non-functional baseline | WCAG 2.2 AA; latest two browser versions; OWASP ASVS L2 | Agreed |
 | Backup responsibility | Customer owns Cloudflare account; Officebox provides export and D1 Time Travel guidance | Agreed |
 | Deployment | Deploy to Cloudflare button; supported resources provisioned automatically; post-deploy checklist for the rest | Agreed |
 | Upgrade model | Stable and beta channels; release-sync GitHub Actions pull request; merge to upgrade; rollback-compatible migrations | Agreed |

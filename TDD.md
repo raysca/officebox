@@ -1,9 +1,18 @@
 # Officebox — Technical Design Document (TDD)
 
 **Status:** Draft for engineering review  
-**Version:** 1.2  
+**Version:** 1.3  
 **Date:** 14 November 2026  
-**Companion to:** [Officebox PRD v1.2](PRD.md)  
+**Companion to:** [Officebox PRD v1.3](PRD.md)  
+**Changes in 1.3:**
+- Huddles with screen sharing (HuddleRoom DO, §3.6) and present mode (§4.5).
+- Cookie and ticket authentication for WebSockets (§3.1).
+- Post-deploy checklist (§6.1).
+- Storage protective mode, scheduled jobs, and the usage panel with telemetry (§7.7–7.9).
+- Expanded security model (§8).
+- Phase 2 validation (§9.3).
+- Cost model (Appendix B).
+
 **Changes in 1.2:** Every open technical question now has a decision (§10). Platform facts checked against Cloudflare documentation (Appendix). New or redesigned:
 - full-text search (§2.4)
 - connection layout, fan-out and socket revocation (§3.5), with the UserHub and WorkspacePresence objects replacing InboxFanout
@@ -36,8 +45,8 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 │  • REST API (auth, members, objects, inbox, search, admin)                    │
 │  • WebSocket upgrade routing to Durable Objects                               │
 │  • AI Gateway proxy and Vectorize retrieval                                   │
-│  • R2 presigned upload/download                                               │
-│  • SMTP relay dispatch via Queues                                             │
+│  • R2 streamed upload/download (binding)                                      │
+│  • Email dispatch via Queues                                                  │
 │  • Static asset serving for the React app                                     │
 └───────────┬─────────────────────┬──────────────────────────┬──────────────────┘
             │                     │                          │
@@ -59,6 +68,9 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 │                     │ │                    │ │                               │
 │  • Presence DO      │ │                    │ │                               │
 │    (singleton)      │ │                    │ │                               │
+│                     │ │                    │ │                               │
+│  • HuddleRoom DO    │ │                    │ │                               │
+│    (per huddle)     │ │                    │ │                               │
 └─────────────────────┘ └────────────────────┘ └───────────────────────────────┘
             │                     │                          │
             └─────────────────────┴──────────────────────────┘
@@ -75,7 +87,7 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 | Component | Responsibility | Cloudflare primitive |
 |---|---|---|
 | React shell | UI, routing, optimistic updates, PWA | Workers Assets |
-| Worker API | Auth, domain logic, permissions, search, AI orchestration, R2 signing, SMTP dispatch | Workers |
+| Worker API | Auth, domain logic, permissions, search, AI orchestration, R2 streaming, email dispatch, huddle signalling via the SFU API | Workers |
 | ChatChannel DO | Source of truth for channel messages: event log, ordering, outbox to D1, fan-out, presence, typing, history replay | Durable Object + SQLite |
 | DocRoom DO | Authoritative Y.Doc per document, sync, awareness, snapshots | Durable Object + SQLite |
 | BoardRoom DO | Authoritative Y.Doc per whiteboard | Durable Object + SQLite |
@@ -85,7 +97,8 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 | D1 | Identity, roles, groups, permissions, object metadata, searchable message copy, inbox, audit | D1 |
 | R2 | Files, attachments, exports | R2 |
 | Vectorize | Embeddings for permission-aware retrieval | Vectorize |
-| Realtime SFU | Audio/video huddles, TURN | Cloudflare Realtime |
+| HuddleRoom DO | Huddle roster, track registry, single-presenter control, host actions | Durable Object |
+| Realtime SFU | Audio, video and screen-share media; TURN | Cloudflare Realtime |
 | AI Gateway | BYOK provider proxy, fallback, rate limiting | AI Gateway |
 | Queues | Message and search projection to D1, purge jobs, email, AI indexing (each with a dead-letter queue) | Queues |
 | Cron Triggers | Daily purge, retention, reconciliation and release check | Workers Cron Triggers |
@@ -180,6 +193,14 @@ CREATE TABLE sessions (
   revoked_at INTEGER
 );
 CREATE INDEX sessions_user ON sessions(user_id);
+
+CREATE TABLE ws_tickets (            -- one-time WebSocket connect tickets (§3.1)
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  target TEXT NOT NULL,              -- e.g. docs:<id>
+  expires_at INTEGER NOT NULL,       -- 30 seconds after issue
+  used_at INTEGER
+);
 
 CREATE TABLE mfa_factors (           -- Phase 2 (TOTP); table created in Phase 1
   id TEXT PRIMARY KEY,
@@ -598,7 +619,8 @@ Messages keep `sender_id`. Clients render deleted senders as "Former member". **
 - deletes `audit_log` rows older than the configured retention (default 365 days)
 - deletes resolved `inbox_items` past `purge_after`
 - trims each active ChatChannel DO's event log to its horizon
-- deletes expired invitations and sessions.
+- deletes expired invitations, sessions and WebSocket tickets
+- deletes `huddles` rows past `purge_after` (365 days; metadata only).
 
 **Platform recovery windows.** D1 Time Travel and Durable Object point-in-time recovery keep up to 30 days of history. Officebox recommends an R2 lifecycle rule that expires noncurrent object versions after 30 days. Purged data is therefore unrecoverable no more than about 30 days after purge, as stated in PRD §10.2.
 
@@ -650,13 +672,22 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 
 ## 3. Application realtime design (Durable Objects)
 
-### 3.1 Connection lifecycle
+### 3.1 Connection lifecycle and authentication
 
-1. The client authenticates via the Worker (POST /auth/session) and receives a short-lived JWT.
-2. The client opens a WebSocket to /ws/channels/:channelId or /ws/docs/:documentId, passing the JWT as a query parameter (browsers cannot set headers on WebSocket upgrades).
-3. The Worker validates the JWT and permission, then forwards the request to the appropriate Durable Object.
-4. The DO accepts the WebSocket using ctx.acceptWebSocket(server) and attaches serialized state (user ID, permissions, connection ID) via serializeAttachment.
-5. On hibernation wake, the constructor runs and state is restored from the attachment.
+1. The client signs in with `POST /auth/session`. The Worker sets two cookies, both `HttpOnly`, `Secure` and `SameSite=Lax`:
+   - `ob_session`: a short-lived (15-minute) signed access token carrying user ID, session ID and `session_epoch`.
+   - `ob_refresh`: a 30-day rotating refresh token, scoped to `/auth/refresh` and stored hashed in `sessions`.
+
+   JavaScript can't read either token, and neither ever appears in a URL.
+2. The client opens WebSockets to `/ws/hub`, `/ws/channels/:id`, `/ws/docs/:id` or `/ws/huddles/:id`. Browsers send same-origin cookies with the upgrade request.
+3. The Worker validates the cookie and checks the `Origin` header against the installation's origin, which blocks cross-site WebSocket hijacking. It then resolves the user's role for the target and forwards the request to the Durable Object.
+4. The DO accepts the socket with `ctx.acceptWebSocket(server)` and stores the user ID, session ID, role and connection ID with `serializeAttachment`.
+5. Sockets deliberately outlive the 15-minute token. Revocation closes them (§3.5), not token expiry. The client refreshes the access cookie in the background so reconnects succeed.
+6. **Clients that can't send cookies** (a stock Yjs client, future native apps) use a one-time connect ticket:
+   - The client calls `POST /auth/ws-ticket` while authenticated.
+   - The ticket is single-use, valid for 30 seconds and bound to one target. It is passed as `?ticket=` and stored hashed in `ws_tickets`.
+   - A logged URL therefore never leaks a reusable credential.
+7. When the DO wakes from hibernation, the constructor runs and state is restored from the attachments.
 
 ### 3.2 Hibernation
 
@@ -753,6 +784,86 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 
 Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
 
+
+### 3.6 Huddles: audio, video and screen sharing (Phase 2)
+
+Media runs on **Cloudflare Realtime SFU**. Signalling and huddle state run in a **HuddleRoom DO**, one per active huddle (`idFromName(huddle_id)`). The Realtime app ID and secret and the TURN key are Worker secrets, set up from the post-deploy checklist (§6.1). Clients never see them.
+
+**D1 tables:**
+
+```sql
+CREATE TABLE huddles (
+  id TEXT PRIMARY KEY,
+  context_type TEXT NOT NULL CHECK (context_type IN ('channel', 'document', 'project')),
+  context_id TEXT NOT NULL,
+  started_by TEXT REFERENCES users(id),
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  peak_participants INTEGER NOT NULL DEFAULT 1,
+  had_screen_share INTEGER NOT NULL DEFAULT 0,
+  purge_after INTEGER                  -- started_at + 365 days
+);
+CREATE INDEX huddles_context ON huddles(context_type, context_id, started_at);
+-- At most one active huddle per context
+CREATE UNIQUE INDEX huddles_active ON huddles(context_type, context_id) WHERE ended_at IS NULL;
+
+CREATE TABLE huddle_participants (
+  huddle_id TEXT NOT NULL REFERENCES huddles(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  joined_at INTEGER NOT NULL,
+  left_at INTEGER,
+  PRIMARY KEY (huddle_id, user_id, joined_at)
+);
+```
+
+Huddle records hold metadata only. No media is ever recorded.
+
+**HuddleRoom DO state** is kept in memory and mirrored to SQLite `meta`, so it survives eviction. It holds:
+
+- the host (the person who started the huddle)
+- for each participant: user ID, SFU session ID, published tracks (`audio`, `video`, `screen`, `screen-audio`), mute state and raised hand
+- the current presenter
+- pending take-over requests.
+
+**Join flow:**
+
+1. The client calls `POST /huddles` to start a huddle from a context, or `POST /huddles/:id/join` to join one. The Worker checks access to the context. When starting, it inserts the `huddles` row. The partial unique index means a concurrent start for the same context joins the existing huddle instead of creating a second.
+2. The client opens `/ws/huddles/:id` to the HuddleRoom DO, authenticated as in §3.1.
+3. The client creates one `RTCPeerConnection`. Its ICE servers are Cloudflare's STUN plus short-lived TURN credentials minted by the Worker.
+4. **Publishing:** the client adds its local tracks and sends an SDP offer to `POST /huddles/:id/tracks/publish`. Using the app secret, the Worker creates the participant's SFU session on first use and adds the tracks. It returns the SDP answer and tells the DO which track names the participant now publishes.
+5. **Subscribing:** the DO broadcasts roster and track changes. To receive a track, the client calls `POST /huddles/:id/tracks/subscribe` with the publisher's participant ID and track name. The Worker first asks the DO to confirm that the requester is a participant and that the publisher and track belong to *this* huddle. Only then does it ask the SFU to forward the remote track. A client can never pull tracks from sessions outside its huddle.
+6. Renegotiation and closing tracks go through the same Worker routes to the SFU's renegotiate and close-track operations. Endpoint names follow the Realtime SFU API; confirm them at implementation.
+7. When the last participant leaves, the DO waits 30 seconds (alarm), then ends the huddle. It closes the SFU sessions, sets `ended_at`, and posts a summary event (duration, participants) into the context.
+
+**Screen sharing:**
+
+- **Capture:** `getDisplayMedia()` with video constrained to the admin cap (1920×1080 or 1280×720) and up to 15 fps. Audio is requested so browsers that support tab audio can include it. The share is published as track `screen`, plus `screen-audio` if audio was granted, on the participant's **existing** peer connection.
+- **Encoding:** `contentHint = "detail"` by default, so the encoder favours sharpness and may drop to a few frames per second on static content. *Motion* mode sets `contentHint = "motion"` and allows up to 30 fps.
+- **Simulcast:** the presenter publishes two or three spatial layers (for example full, half and quarter resolution) through `sendEncodings`. Each viewer's client requests the layer that suits its viewport and network, so a slow viewer doesn't degrade others. Confirm the SFU's layer-selection controls at implementation. If simulcast isn't available, a single layer at the admin cap is sent.
+- **Single presenter:** the HuddleRoom DO is the authority.
+  - `screen.start` is granted only when nobody is presenting. Otherwise it becomes a take-over request sent to the presenter and the host.
+  - On acceptance or a host hand-over, the DO tells the current presenter to stop. If they haven't stopped within 5 seconds, the DO closes their `screen` tracks through the Worker, then grants the new presenter.
+- **Host controls:** the host, and channel admins for channel huddles, can stop another participant's share or mute their audio. The DO enforces this, the Worker closes the track at the SFU, and the action is audited.
+- **Policy:** the workspace sharing policy (`installation.settings.screen_share`: `everyone`, `admins` or `off`) and the resolution cap are enforced by the DO before it grants a share, and the client applies the cap to `getDisplayMedia`.
+- **Presenter client:**
+  - sets presence status `presenting`, so the UserHub suppresses notification toasts on the presenter's devices
+  - shows a persistent Stop bar
+  - listens for the track's `ended` event (the browser's own "Stop sharing" button) to release the presenter slot.
+- **Viewer client:** the share takes the main stage. Fullscreen and Picture-in-Picture (where supported) are available, and zoom and pan are handled client-side.
+- **Mobile:** clients that lack `getDisplayMedia` hide the share control. Viewing works everywhere.
+
+**Bandwidth planning.** SFU egress is roughly bitrate × viewers × duration. Planning figures per received stream:
+
+| Stream | Bitrate |
+|---|---|
+| Audio | ~50 kbps |
+| Video | 0.5–1.5 Mbps |
+| 1080p detail screen share | 1–2.5 Mbps per viewer |
+
+Example: a 30-minute share to 8 viewers at 2 Mbps is about 3.6 GB. The usage panel (§7.9) reports SFU egress against the 1,000 GB monthly free allowance.
+
+**Security.** Media is encrypted in transit with DTLS-SRTP between each client and the SFU, and is decrypted at the SFU for forwarding. It is not end-to-end encrypted, and the PRD says so. The app secret never leaves the Worker.
+
 ## 4. Collaborative editing design (Yjs on Durable Objects)
 
 ### 4.1 Server architecture
@@ -773,11 +884,11 @@ Each document or whiteboard is a DocRoom Durable Object. The DO:
 The React client uses:
 
 - Tiptap with the Collaboration extension for documents.
-- A Yjs-based whiteboard component (e.g. Excalidraw with Yjs binding) for whiteboards.
+- Excalidraw (MIT) for whiteboards, with an Officebox-maintained Yjs binding based on the community `y-excalidraw` approach. tldraw was rejected because it needs a commercial licence key in production.
 - y-websocket provider pointed at /ws/docs/:id.
 - IndexedDB persistence for offline support and reconnection.
 
-The client sends a JWT in the WebSocket URL. The DO validates it via the authorize hook (implemented in the Worker before forwarding) and assigns a role.
+The browser's session cookie authenticates the WebSocket upgrade. The Worker validates it and the `Origin`, resolves the document role and forwards the connection to the DO with that role (§3.1). Stock Yjs clients use a one-time ticket instead.
 
 ### 4.3 Persistence, compaction and revisions
 
@@ -807,6 +918,17 @@ Permissions are resolved by the Worker before the WebSocket reaches the DO. The 
 - No access: connection is rejected.
 
 Link previews and AI retrieval always re-check permissions in the Worker/D1; the DO is not the authority for cross-object access.
+
+
+### 4.5 Present mode
+
+Present mode uses no media:
+
+- The presenter's client publishes a `presenting` field in its Yjs awareness state: `{ active, scrollAnchor, viewport, zoom, selection }`. `scrollAnchor` is a Yjs relative position, so it stays correct while others edit. The field is updated at most every 100 ms while it changes.
+- Followers' clients apply it to their own view. A follower who scrolls or clicks breaks away and sees **Rejoin presenter**.
+- The DocRoom or BoardRoom DO allows one presenter per document. A second claim is rejected with "Currently presenting: *name*". The claim is cleared when the presenter disconnects.
+- Viewers with the viewer role can follow.
+- Present mode keeps the DO active the same way normal editing does.
 
 ## 5. AI design (BYOK, permission-aware RAG)
 
@@ -867,7 +989,23 @@ The Deploy to Cloudflare button copies the repository into the customer's GitHub
 node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangler deploy
 ```
 
-`SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist.
+`SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist:
+
+| Item | How | Needed for |
+|---|---|---|
+| Durable Objects, D1, R2, Vectorize, Queues, Workers AI | Automatic (Deploy button) | Everything |
+| Setup token | Prompted at deploy, or generated (§6.8) | First-run setup |
+| Allow GitHub Actions to create pull requests | Manual repository setting | Upgrades |
+| Make the repository private | Recommended | Keeps scheduled release-sync running |
+| Custom domain | Manual; recommended before inviting the team | Stable sign-in, PWA and push |
+| Email provider API key or SMTP credentials | Manual (Worker secrets) | Email invitations, resets and notifications |
+| Realtime SFU app and TURN key | Manual (Worker secrets) | Huddles and screen sharing (Phase 2) |
+| AI Gateway and provider keys | Manual | AI (Phase 3) |
+| Read-only analytics API token | Optional (Worker secret) | Usage panel with Cloudflare's own figures |
+| Cloudflare billing notifications | Recommended (dashboard) | Cost alerts |
+| R2 lifecycle rule for noncurrent versions | Recommended | Retention guarantee (§2.3) |
+
+The admin UI checks each item it can detect and shows its status. R2 is reached only through the binding, so no R2 S3 credentials are needed (§8.3).
 
 ### 6.2 Upstream releases and channels
 
@@ -947,6 +1085,7 @@ Migrations run **before** the new code goes live, and can be partly applied if a
 - Each DO stores `schema_version` in `meta`.
 - It migrates lazily on first wake, inside `blockConcurrencyWhile`, so thousands of objects never need a coordinated migration.
 - Older code must tolerate a newer, expanded DO schema.
+- A DO schema migration runs in a transaction. If it fails, the object refuses connections with a "migration failed" error, reports it to admin health and leaves its data untouched. The fix ships as a patch release.
 
 **Durable Object class migrations** (`new_sqlite_classes` and so on) only ever *add* classes within a rollback window. Renames and deletions follow the contract rule.
 
@@ -1009,7 +1148,8 @@ A /health endpoint checks:
 - R2 bucket access.
 - Vectorize index presence.
 - AI Gateway configuration (if configured).
-- Realtime SFU credentials (if configured).
+- Realtime SFU and TURN credentials (Phase 2, if configured).
+- Storage levels and protective-mode state (§7.7), and post-deploy checklist status (§6.1).
 - Message-projection lag (oldest outbox entry, DLQ depth) and failed purge jobs.
 - Installed version, latest release on the channel, applied migrations vs. running code (§6.5–6.7).
 
@@ -1019,11 +1159,13 @@ The admin can download a support bundle containing:
 
 - Worker version and deployment ID.
 - Binding configuration (without secrets).
-- Recent audit log entries.
+- Recent audit log entries: action types, timestamps and pseudonymous actor IDs only.
 - D1 storage usage.
 - R2 usage summary.
 - Durable Object error counts (last 24h).
 - Queue backlog.
+
+The owner reviews the bundle before sharing it. It never contains message, document or file content, email addresses or secrets. Officebox support receives it only when the owner attaches it to a support request.
 
 ### 7.3 Alerts
 
@@ -1035,6 +1177,7 @@ Officebox uses Cloudflare's observability and optional external alerting (email/
 - R2 write failures.
 - Queue backlog growth.
 - Storage approaching limits.
+- Billing: owners are prompted to set Cloudflare billing notifications (§7.9).
 
 ### 7.4 Backup and recovery guidance
 
@@ -1109,18 +1252,138 @@ Cloudflare Email Workers are not used for invitations. Their sending binding is 
 - **Send test email** in the admin settings checks the configuration.
 - Invitation links can always be copied manually, so onboarding never depends on email.
 
+
+### 7.7 Storage monitoring and protective mode
+
+```sql
+CREATE TABLE object_sizes (          -- reported by DOs after compaction or daily trimming
+  object_type TEXT NOT NULL,         -- channel, document, whiteboard
+  object_id TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  reported_at INTEGER NOT NULL,
+  PRIMARY KEY (object_type, object_id)
+);
+```
+
+| Store | How it's measured | Thresholds and actions |
+|---|---|---|
+| D1 (10 GB hard limit) | Database size from D1 query result metadata, sampled hourly *(confirm the metadata field at implementation)* | Warn at 70% and 85%. At 95%, **protective mode** (below). At 98%, D1 copying pauses and DO outboxes hold events safely until space is freed. |
+| Durable Objects (10 GB each) | `ctx.storage.sql.databaseSize`, reported into `object_sizes` | Warn when any object passes 5 GB |
+| R2 (no hard limit) | Calculated from D1: `files.size_bytes`, plus export and snapshot objects. No API token needed. | Optional owner budget: warn above it; block uploads above an optional hard budget |
+
+**Protective mode.** The Worker refuses to create channels, documents, folders, files and invitations. Messages continue: they are stored in their channel DOs, and the D1 copy keeps up until the 98% point.
+
+**Recovery.** The admin UI guides the owner to free space:
+
+- **Shorten search copy retention** (`installation.settings.search_copy_months`). This trims D1 `messages` and `search_index` rows older than N months. Those messages stay in their channel DOs, in the channel view and in exports; they just leave search.
+- Empty Trash early.
+- Enable retention policies.
+- Export and delete archived channels.
+
+**Growth guide:** 100 members × 100 messages a day is about 2 GB a year, including the FTS index. Trimming the search copy keeps D1 bounded indefinitely.
+
+### 7.8 Scheduled jobs
+
+Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
+
+| Job | Schedule | Section |
+|---|---|---|
+| Snooze wake-ups | 5 minutes | PRD §5.3 |
+| Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
+| Purge due objects, time-based retention (audit log, inbox items, sessions, invitations, tickets, huddle records) | Daily | §2.3 |
+| ChatChannel event-log trimming, D1 copy reconciliation, version thinning | Daily | §2.2, §3.3, §4.3 |
+| Release manifest check | Daily | §6.7 |
+| Usage panel refresh | Daily | §7.9 |
+| Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
+
+### 7.9 Usage, cost and telemetry
+
+- **Usage panel:**
+  - With an optional read-only account analytics API token (a Worker secret), the daily job queries Cloudflare's GraphQL Analytics API. It reads Workers requests; DO requests, duration and storage; D1 rows and storage; R2 storage and operations; Queues operations; and Realtime SFU egress. The panel shows month-to-date usage against the Workers Paid allowances, with projected overage.
+  - Without the token, the panel shows Officebox's own counters (messages, file bytes, D1 size, huddle minutes, share minutes) and links to Cloudflare billing.
+- **Billing alerts:** owners are prompted to set Cloudflare billing notifications, because Cloudflare has no hard spending cap.
+- **Telemetry:** off by default. When enabled, a weekly anonymous report sends Officebox:
+  - a random installation ID
+  - the version and channel
+  - a member-count range
+  - enabled features
+  - error counts by category.
+
+  It never sends content, names, emails or retained IPs. The exact payload is shown in the admin UI before telemetry is turned on.
+
 ## 8. Security model
 
-- Authentication: local accounts; passwords hashed with a memory-hard KDF; session JWTs short-lived and rotated.
-- Authorisation: the role model in PRD §10.1, resolved as described in §2.1. Owners and admins get management rights but no implicit read access to private content. All checks occur in the Worker before DO access.
-- First-run setup: protected by a one-time setup token with atomic claim; permanently disabled after use (§6.8).
-- Session and access revocation: incrementing `users.session_epoch` invalidates refresh. `closeConnections` closes open WebSockets on the UserHub and the affected channel and document DOs within seconds (§3.5).
-- Upgrades: no Cloudflare or GitHub credentials are held by the running application. Release tags are signature-verified against a pinned key before a sync PR is opened (§6.4).
-- Secrets: provider keys in AI Gateway Secrets Store; SMTP credentials as Worker secrets; no provider keys in D1 or browser code.
-- AI: retrieval permission-filtered; prompt-injection treated as untrusted input; tool calls permission-checked server-side; mutating actions require confirmation.
-- WebSockets: JWT validated on upgrade; DO attachment stores user and role; read-only roles cannot write.
-- Audit: administrative and AI-sensitive actions written to audit_log.
-- Data ownership: all data in the customer's Cloudflare account; export endpoint for portability.
+The web application follows **OWASP ASVS Level 2** as its baseline.
+
+### 8.1 Authentication and sessions
+
+- **Passwords:**
+  - Hashed with PBKDF2-HMAC-SHA256 via WebCrypto: 600,000 iterations and a 16-byte salt.
+  - Stored in a versioned format (`pbkdf2-sha256$600000$<salt>$<hash>`), so parameters can be raised and hashes upgraded at next sign-in.
+  - Chosen over Argon2id because native WebCrypto avoids WASM memory limits and CPU spikes in Workers.
+  - Minimum length 10, checked against a bundled list of common passwords. No composition rules.
+- **Sessions:**
+  - Cookies as in §3.1.
+  - Refresh-token rotation with reuse detection: presenting an old refresh token revokes the session.
+  - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
+- **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
+- **Rate limiting** with the Workers Rate Limiting binding:
+  - Sign-in: 5 attempts per minute per IP and 10 per hour per account, with progressive delays. There is no hard lockout, which would let attackers lock users out.
+  - Setup, recovery, invitation acceptance and password reset are limited the same way.
+- **Tokens:** invitation, reset and recovery tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days and resets after 1 hour.
+- **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: reset one owner's password and MFA. The action is audited, and a banner shows until the secret is deleted.
+- **SSO through Cloudflare Access (Phase 2):**
+  - When enabled, the Worker validates the `Cf-Access-Jwt-Assertion` header against the team's Access signing keys and application audience. Follow Cloudflare's current Access JWT validation guidance at implementation.
+  - It maps the asserted email to an existing active user or a pending invitation, never creating accounts automatically, and skips the password step.
+  - Owners can disable local passwords for members.
+
+### 8.2 Web application
+
+- **Authorisation:** the role model in PRD §10.1, resolved as described in §2.1. Owners and admins get management rights but no implicit read access to private content. Every check happens in the Worker before a DO is reached.
+- **CSRF:** `SameSite=Lax` cookies, plus a required custom header (`X-Officebox-Request: 1`) and an `Origin` check on every state-changing REST request. WebSocket upgrades check `Origin` too (§3.1).
+- **Headers:**
+  - `Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'` plus the Realtime SFU endpoints.
+  - HSTS, `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`.
+- **Rendering user content:**
+  - The server never renders user HTML.
+  - Rich text is ProseMirror JSON constrained by the Tiptap schema.
+  - Markdown is rendered client-side and sanitised with DOMPurify.
+  - Links get `rel="noopener noreferrer"`, and `javascript:` URLs are rejected.
+- **Link previews:**
+  - Phase 1 previews only internal Officebox objects, with permission checks.
+  - External unfurling is deferred. When it is added, it will run server-side without cookies, with size and time limits, and with private address ranges blocked. HTML will be parsed, not rendered.
+- **First-run setup:** protected by a one-time setup token with an atomic claim, and disabled after use (§6.8).
+- **Upgrades:** the running application holds no Cloudflare or GitHub credentials. Release tags are signature-verified against a pinned key before a sync PR is opened (§6.4).
+- **Secrets:** provider keys in the AI Gateway Secrets Store. Email, Realtime and TURN credentials as Worker secrets. No provider keys in D1 or browser code.
+- **AI:** retrieval is permission-filtered, retrieved content is treated as untrusted input (prompt injection), tool calls are permission-checked server-side, and mutating actions require confirmation.
+- **Audit:** administrative and AI-sensitive actions are written to `audit_log`.
+
+### 8.3 Files
+
+- **Uploads** stream through the Worker into R2 using the binding, so no R2 S3 credentials are needed.
+  - Files over 50 MB use R2 multipart upload: the client sends 10 MB parts and the Worker creates the upload, uploads each part and completes it.
+  - Each part is authorised against its upload session. The default maximum file size is 2 GB, configurable by owners. Owners can also deny chosen file extensions.
+- **Downloads** go through the Worker after a permission check, with Range support.
+  - Only allow-listed types are served inline: PNG, JPEG, GIF, WebP, PDF, MP4, WebM, MP3 and OGG.
+  - Everything else, including HTML and SVG, is sent with `Content-Disposition: attachment`.
+  - Every file response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
+- **Previews:** images and PDFs render in the browser, with PDFs in a sandboxed frame. Office documents are not converted server-side in Phase 1.
+- **Malware scanning** is out of scope (PRD §14), and the documentation says so.
+
+### 8.4 Realtime, huddles and devices
+
+- **WebSockets:** cookie or one-time ticket, `Origin` check, role stored in the attachment, and revocation (§3.1, §3.5).
+- **Huddles:** track subscriptions are confined to their huddle, and the SFU secret stays in the Worker (§3.6).
+- **Offline data:**
+  - On sign-out, the client deletes the workspace's IndexedDB stores, Cache Storage entries and service-worker caches.
+  - A socket closed with code `4401` triggers the same wipe.
+  - Admins can turn off offline document caching.
+
+### 8.5 Data
+
+- **Ownership:** all data stays in the customer's Cloudflare account, and the export allows portability.
+- **Location:** the D1 location hint is chosen at deploy time. The Phase 2 EU option uses EU jurisdiction for D1, R2 and Durable Objects where Cloudflare supports it; confirm per service at implementation.
+- **Access:** content is not end-to-end encrypted. Members of the Cloudflare account have full technical access (PRD §10.1).
 
 ## 9. Testing and validation
 
@@ -1138,7 +1401,8 @@ Cloudflare Email Workers are not used for invitations. Their sending binding is 
 - Access test: a member without access can't read a private channel, DM or restricted document through the REST API, WebSocket, search, previews or links. Admins without a grant can't read them either.
 - Upgrade test: the release-sync workflow opens a correct PR from a fresh customer copy (with signature verification), including a `wrangler.jsonc` merge that keeps resource IDs. Merging deploys. A conflicted release opens as a draft and can't deploy. Stable → beta works.
 - Rollback test: rolling back one version after a release with migrations works without a database restore (expand/contract). The previous release's integration tests pass against the new schema.
-- Storage test: upload rejection triggers before D1/DO storage exhaustion; admin warning appears.
+- Storage test: as D1 fills, warnings appear at 70% and 85%. At 95%, protective mode blocks new objects while messages continue. At 98%, D1 copying pauses without losing anything. Trimming the search copy frees space. An R2 hard budget blocks uploads when set.
+- Security test: CSRF and cross-origin WebSocket attempts are rejected. HTML and SVG files download instead of rendering. Reusing a refresh token revokes the session. Owner recovery works only with the secret and is audited. Sign-out clears local caches. One-time tickets can't be reused.
 - Export/restore test: export a fixture installation, restore into a fresh installation from first-run setup, and compare row counts, checksums, channel `seq` positions and document content. Missing export configuration warns but does not block startup.
 - Search test: results match permitted messages and documents only. Deleting or trashing removes results. **Rebuild search index** reproduces the index.
 - Revocation test: disabling a user, or removing them from a private channel or document, closes their open sockets within 5 seconds.
@@ -1150,7 +1414,18 @@ Cloudflare Email Workers are not used for invitations. Their sending binding is 
 - Chat message round-trip: p95 < 300 ms within region.
 - Document sync latency: p95 < 200 ms for keystroke propagation.
 - Cold document load: < 1 s for documents under 100 KB snapshot.
-- Huddle join: < 2 s from click to audio.
+- Huddle join: < 2 s from click to audio (Phase 2).
+- Screen share start: < 3 s from choosing a source to viewers seeing it (Phase 2).
+- Screen share latency: p95 < 500 ms glass-to-glass within region (Phase 2).
+
+### 9.3 Phase 2 validation: huddles and screen sharing
+
+- Join: 2 to 25 participants join from a channel, a document and a project. Audio connects through restrictive networks using TURN.
+- Screen sharing: screen, window and tab sharing work, including tab audio in Chromium. Desktop and mobile viewers see the share. A throttled viewer gets a lower layer without affecting others.
+- Single presenter: a second share request becomes a take-over request, and hand-over completes within 5 seconds. Hosts and channel admins can stop a share. Workspace policy and the resolution cap are enforced.
+- Isolation: a client can't subscribe to another huddle's tracks, even with valid SFU session IDs.
+- Present mode: followers track the presenter in documents and whiteboards. Break-away and rejoin work. Only one presenter per document is allowed.
+- Ending: when the last participant leaves, the huddle ends after 30 seconds and posts a summary to its context.
 
 ## 10. Open technical questions
 
@@ -1172,6 +1447,17 @@ Resolved in v1.1:
 - Message storage split: the DO is the source of truth, with an outbox to a D1 copy (§2.0, §3.3).
 - Upgrade mechanism: release-sync GitHub Actions PR plus Workers Builds; no deploy Worker (§6).
 
+Decided in v1.3 (from the review):
+- WebSocket auth: cookies plus `Origin` check; one-time tickets for clients without cookies (§3.1).
+- Whiteboard: Excalidraw (MIT) with an Officebox-maintained Yjs binding (§4.2).
+- Password hashing: PBKDF2-SHA256, 600,000 iterations, versioned format (§8.1).
+- File handling: streamed through the binding; multipart above 50 MB; allow-listed inline types (§8.3).
+- Huddle signalling: HuddleRoom DO with Worker-mediated SFU calls and confined track subscriptions (§3.6).
+- Screen sharing: one presenter, simulcast, detail and motion modes (§3.6). Present mode via Yjs awareness (§4.5).
+- Storage: protective mode and trimming of the D1 search copy (§7.7).
+
+To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
+
 **Still to confirm by measurement, not decision:** the Phase 1 load test (REVIEW.md H2) should confirm or adjust these numeric defaults:
 - compaction thresholds
 - outbox batching
@@ -1186,7 +1472,7 @@ Resolved in v1.1:
 | Concern | Reference |
 |---|---|
 | Durable Object WebSocket hibernation | Hibernation API keeps clients connected while the DO sleeps, reducing cost |
-| D1 limits | 10 GB per database on Workers Paid; 100,000 databases included |
+| D1 limits | 10 GB per database on Workers Paid |
 | D1 Time Travel | Restore to any minute in the last 30 days |
 | Vectorize + Workers AI RAG | Managed RAG pipeline with D1, Vectorize and Workers AI |
 | AI Gateway BYOK | Keys stored in Secrets Store; rotate without code changes |
@@ -1206,3 +1492,32 @@ Resolved in v1.1:
 | Durable Objects pricing (Workers Paid) | 1M requests/month included, then $0.15 per million (WebSocket messages, RPC and alarms count; incoming WebSocket messages at a 20:1 ratio). 400,000 GB-s duration included. 5 GB-month SQLite storage included. `setWebSocketAutoResponse` adds no billed duration. |
 | Vectorize | topK up to 50 with values or metadata, 100 without. 10 metadata indexes per index. 10 KiB metadata per vector. Filter operators `$eq $ne $in $nin $lt $lte $gt $gte`. Filter JSON under 2,048 bytes. |
 | Workers TCP sockets | Outbound port 25 blocked. STARTTLS supported. |
+
+## Appendix B — Cost model (25-person team, before load testing)
+
+**Assumptions (per month):**
+
+- 22 working days of 8 hours.
+- 25 members, each sending 60 messages a day.
+- 5 members editing documents about 1 hour a day.
+- Each member's hub is connected while they work.
+- Typing and awareness updates are throttled as described in §3.5.
+- Phase 2 huddles: 4 hours of 4-person audio and 1 hour of screen sharing to 5 viewers each week.
+
+| Item | Estimate per month | Included in Workers Paid | Notes |
+|---|---|---|---|
+| DO requests: channel socket connects (100 per member per day) | ~55,000 | | |
+| DO requests: document socket connects (20 per member per day) | ~11,000 | | |
+| DO requests: incoming chat, typing, Yjs and awareness messages | ~60,000 | | Counted at 20:1 |
+| DO requests: outbox alarms | ~33,000 | | Worst case: one per message |
+| DO requests: UserHub fan-out | up to ~330,000 | | Upper bound of one call per online member per message; batching reduces it |
+| DO requests: heartbeats and presence | ~250,000 | | |
+| **DO requests total** | **up to ~740,000** | 1,000,000 | Then $0.15 per million |
+| DO duration | ~50,000–100,000 GB-s | 400,000 GB-s | Mostly documents during active editing |
+| DO SQLite storage | under 1 GB | 5 GB-month | |
+| D1 storage | under 1 GB in year one | *(confirm current allowance)* | About 2 GB a year at 100 members |
+| R2 storage | 10–50 GB typical | *(confirm current free tier and price)* | Depends entirely on files |
+| Queues operations | ~150,000 | *(confirm current allowance)* | About 3 operations per message |
+| Realtime SFU egress | audio ~1 GB, screen sharing ~5 GB, video varies | 1,000 GB | Then $0.05/GB |
+
+**Conclusion:** a 25-person team should fit within the Workers Paid allowances. Even at four times these figures, Durable Object request overage would be under $1 a month. These are estimates. The Phase 1 load test (§10) replaces them with measurements, and the usage panel (§7.9) shows each installation's real figures.

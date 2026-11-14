@@ -48,6 +48,37 @@ Every open question in PRD §17 and TDD §10 now has a recommended decision, rec
 
 Still open: H2 (load test), H3 (token transport), H7, H8 and the remaining Medium items.
 
+## Status after PRD/TDD v1.3: review items addressed
+
+| Item | Status | Where |
+|---|---|---|
+| H2 Cost model | **Estimated.** A pre-test cost model shows about 740k of the 1M included DO requests used at worst, and overage would be cents. Usage panel and billing prompts. **The load test is still required.** | TDD Appendix B, §7.9 |
+| H3 WebSocket auth | **Resolved.** HttpOnly cookies with an `Origin` check; one-time tickets; revocation | TDD §3.1, §3.5 |
+| H6 Backup and restore | **Resolved,** with cross-store point-in-time limits documented | TDD §7.5 |
+| H7 Migrations | **Resolved.** Expand/contract, lazy DO migrations, failure handling | TDD §6.5 |
+| H8 Provisioning | **Resolved.** Post-deploy checklist; R2 through the binding only | TDD §6.1, §8.3 |
+| M3 Whiteboard licence | **Resolved.** Excalidraw (MIT); tldraw rejected | TDD §4.2 |
+| M4 Storage monitoring | **Resolved.** Per-store measurement, protective mode, search-copy trimming | PRD §13; TDD §7.7 |
+| M5 Scheduled work | **Resolved** | TDD §7.8 |
+| M7 File security | **Resolved** | PRD §5.7; TDD §8.3 |
+| M8 Web security | **Resolved.** ASVS L2, CSP, CSRF, KDF, rate limits | TDD §8 |
+| M9 Admin lockout | **Resolved.** Owner recovery secret | PRD §6; TDD §8.1 |
+| M10 Huddle signalling | **Resolved,** together with the new screen sharing work | PRD §5.8; TDD §3.6, §4.5 |
+| M11 Global teams | **Resolved.** Location hint; EU option in Phase 2 | PRD §13; TDD §8.5 |
+| M12 Leavers | **Resolved** | PRD §6, §10.2 |
+| M13 Admin access | Resolved in v1.1 | PRD §10.1 |
+| M14 Offline cache | **Resolved.** Wipe on sign-out or revocation | TDD §8.4 |
+| M15 Feedback loop | **Resolved.** Opt-in telemetry, release check, measurable targets | PRD §13, §16 |
+| Product gaps | **Resolved:** NFRs (§18), guests, imports and API (§19), custom domain, Cloudflare Access SSO, persona mapping (§3), success metrics (§16), support bundle privacy | PRD |
+| Contradictions | **Resolved:** AI and Inbox phase wording, SFU health in Phase 2, huddle targets labelled Phase 2, storage test, DO auth wording, "100,000 databases" removed | PRD, TDD |
+
+**New in v1.3: screen sharing.** Screen, window or tab sharing in huddles; one presenter with take-over; text-first quality with simulcast; admin policy and resolution cap; desktop sharing with viewing anywhere. Present mode follows the presenter in documents and whiteboards with no video.
+
+**Remaining before build:**
+1. Run the Phase 1 load test to confirm Appendix B.
+2. Confirm the implementation details listed in TDD §10.
+3. Validate pricing, the role model and Inbox behaviour with design partners.
+
 ---
 
 ## Critical: resolve before any build work
