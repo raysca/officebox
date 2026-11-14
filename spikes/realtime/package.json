@@ -5,8 +5,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "stock-client": "node scripts/stock-yjs-client.mjs"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p client",
+    "stock-client": "node scripts/stock-yjs-client.mjs",
+    "test:browser": "node scripts/browser-screen-share.mjs"
   },
   "dependencies": {
     "lib0": "^0.2.120",

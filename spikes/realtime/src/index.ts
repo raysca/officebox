@@ -13,18 +13,26 @@ import { seed } from "./dev";
 import type { DocRole } from "./doc-room";
 import type { Env, ProjectionMessage } from "./env";
 import { fanOut } from "./fanout";
+import { type ScreenSharePolicy, TRACK_KINDS, type TrackKind } from "./huddle-room";
+import { SfuError, iceServers, sfuFor, type SessionDescription } from "./sfu";
 import { applyProjection } from "./projection";
 
 export { ChatChannel } from "./chat-channel";
 export { DocRoom } from "./doc-room";
 export { WorkspacePresence } from "./presence";
 export { UserHub } from "./user-hub";
+export { HuddleRoom } from "./huddle-room";
+export { FakeSfu } from "./fake-sfu";
 
 const ID = "[A-Za-z0-9_-]{1,64}";
 const CHANNEL_WS = new RegExp(`^/ws/channels/(${ID})$`);
 const DOC_WS = new RegExp(`^/ws/docs/(${ID})$`);
 const CHANNEL_READ = new RegExp(`^/api/channels/(${ID})/read$`);
 const INBOX_ITEM = new RegExp(`^/api/inbox/(${ID})$`);
+const HUDDLE_WS = new RegExp(`^/ws/huddles/(${ID})$`);
+const HUDDLE_ROUTE = new RegExp(`^/huddles/(${ID})/(tracks/publish|tracks/subscribe|tracks/close|tracks/layer|renegotiate|ice-servers)$`);
+const RPC_ERROR = /^(forbidden|not_found|conflict|bad_request|gone): /;
+const RPC_STATUS: Record<string, number> = { forbidden: 403, not_found: 404, conflict: 409, bad_request: 400, gone: 410 };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -34,6 +42,9 @@ export default {
       if ((match = url.pathname.match(CHANNEL_WS))) return await connectChannel(request, env, match[1]!);
       if ((match = url.pathname.match(DOC_WS))) return await connectDoc(request, env, match[1]!);
       if (url.pathname === "/ws/hub") return await connectHub(request, env);
+      if ((match = url.pathname.match(HUDDLE_WS))) return await connectHuddle(request, env, match[1]!);
+      if (url.pathname === "/huddles" && request.method === "POST") return await startHuddle(request, env);
+      if ((match = url.pathname.match(HUDDLE_ROUTE))) return await huddleRoute(request, env, match[1]!, match[2]!);
       if (url.pathname === "/api/unread" && request.method === "GET") return await unread(request, env);
       if (url.pathname === "/api/inbox" && request.method === "GET") return await inbox(request, env);
       if ((match = url.pathname.match(CHANNEL_READ)) && request.method === "POST") return await markRead(request, env, match[1]!);
@@ -43,6 +54,10 @@ export default {
       return new Response("Not found", { status: 404 });
     } catch (err) {
       if (err instanceof HttpError) return new Response(err.message, { status: err.status });
+      if (err instanceof SfuError) return new Response(err.message, { status: err.status >= 500 || err.status < 400 ? 502 : err.status });
+      // Errors thrown by Durable Objects over RPC keep their message.
+      const rpc = err instanceof Error ? err.message.match(RPC_ERROR) : null;
+      if (rpc) return new Response(err instanceof Error ? err.message : "", { status: RPC_STATUS[rpc[1]!] });
       console.error(err);
       return new Response("Internal error", { status: 500 });
     }
@@ -224,5 +239,176 @@ async function devRoute(request: Request, env: Env, url: URL): Promise<Response>
     }
     default:
       throw new HttpError(404, "Unknown dev route");
+  }
+}
+
+// ------------------------------------------------------------------ huddles (TDD §3.6)
+
+interface HuddleRow {
+  id: string;
+  context_type: "channel" | "document";
+  context_id: string;
+  started_by: string;
+  ended_at: number | null;
+}
+
+/** Huddle access follows the context: channel membership (or public), or any document role. */
+async function huddleAccess(env: Env, userId: string, contextType: string, contextId: string): Promise<{ moderator: boolean }> {
+  if (contextType === "channel") {
+    const channel = await env.DB.prepare("SELECT type FROM channels WHERE id = ? AND deleted_at IS NULL").bind(contextId).first<{ type: string }>();
+    if (!channel) throw new HttpError(404, "Channel not found");
+    const member = await env.DB.prepare("SELECT role FROM channel_members WHERE channel_id = ? AND user_id = ?")
+      .bind(contextId, userId)
+      .first<{ role: ChannelRole }>();
+    if (!member && channel.type !== "public") throw new HttpError(403, "No access to this channel");
+    return { moderator: member?.role === "admin" };
+  }
+  if (contextType === "document") {
+    const role = await resolveDocRole(env, contextId, userId);
+    if (!role) throw new HttpError(403, "No access to this document");
+    return { moderator: role === "owner" };
+  }
+  throw new HttpError(400, "contextType must be channel or document");
+}
+
+async function loadHuddle(env: Env, huddleId: string): Promise<HuddleRow> {
+  const huddle = await env.DB.prepare("SELECT id, context_type, context_id, started_by, ended_at FROM huddles WHERE id = ?")
+    .bind(huddleId)
+    .first<HuddleRow>();
+  if (!huddle) throw new HttpError(404, "Huddle not found");
+  if (huddle.ended_at !== null) throw new HttpError(410, "Huddle has ended");
+  return huddle;
+}
+
+async function initHuddleRoom(env: Env, huddle: HuddleRow): Promise<void> {
+  const settings = await env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('screen_share', 'screen_share_max_height')").all<{ key: string; value: string }>();
+  const get = (k: string) => settings.results.find((r) => r.key === k)?.value;
+  await env.HUDDLES.get(env.HUDDLES.idFromName(huddle.id)).init({
+    huddleId: huddle.id,
+    contextType: huddle.context_type,
+    contextId: huddle.context_id,
+    hostId: huddle.started_by,
+    policy: (get("screen_share") ?? "everyone") as ScreenSharePolicy,
+    maxHeight: Number(get("screen_share_max_height") ?? 1080),
+  });
+}
+
+/** Starts a huddle in a context, or returns the active one (one per context, enforced by a partial unique index). */
+async function startHuddle(request: Request, env: Env): Promise<Response> {
+  const session = await requireSession(request, env, { stateChanging: true });
+  const { contextType, contextId } = (await request.json()) as { contextType?: string; contextId?: string };
+  if (typeof contextType !== "string" || typeof contextId !== "string") throw new HttpError(400, "contextType and contextId are required");
+  await huddleAccess(env, session.uid, contextType, contextId);
+  const inserted = await env.DB.prepare(
+    `INSERT OR IGNORE INTO huddles (id, context_type, context_id, started_by, started_at) VALUES (?, ?, ?, ?, ?) RETURNING id`,
+  )
+    .bind(crypto.randomUUID(), contextType, contextId, session.uid, Date.now())
+    .first<{ id: string }>();
+  if (!inserted) {
+    const active = await env.DB.prepare("SELECT id FROM huddles WHERE context_type = ? AND context_id = ? AND ended_at IS NULL")
+      .bind(contextType, contextId)
+      .first<{ id: string }>();
+    return Response.json({ huddleId: active!.id, created: false });
+  }
+  const huddle = await loadHuddle(env, inserted.id);
+  await initHuddleRoom(env, huddle);
+  if (contextType === "channel") {
+    await env.CHAT.get(env.CHAT.idFromName(contextId)).postSystemEvent(contextId, "huddle.started", { huddleId: huddle.id, startedBy: session.uid });
+  }
+  return Response.json({ huddleId: huddle.id, created: true });
+}
+
+async function connectHuddle(request: Request, env: Env, huddleId: string): Promise<Response> {
+  const userId = await authenticateUpgrade(request, env, `huddles:${huddleId}`);
+  const huddle = await loadHuddle(env, huddleId);
+  const { moderator } = await huddleAccess(env, userId, huddle.context_type, huddle.context_id);
+  await initHuddleRoom(env, huddle); // idempotent; covers a join racing the start
+  return env.HUDDLES.get(env.HUDDLES.idFromName(huddleId)).fetch(
+    new Request("https://do/connect", {
+      headers: { Upgrade: "websocket", "x-ob-user": userId, "x-ob-moderator": moderator || huddle.started_by === userId ? "1" : "0" },
+    }),
+  );
+}
+
+function isSessionDescription(value: unknown, type?: "offer" | "answer"): value is SessionDescription {
+  const sd = value as SessionDescription | undefined;
+  return !!sd && typeof sd.sdp === "string" && (sd.type === "offer" || sd.type === "answer") && (!type || sd.type === type);
+}
+
+/** SFU signalling goes through the Worker so the app secret never reaches clients and every call is authorised. */
+async function huddleRoute(request: Request, env: Env, huddleId: string, action: string): Promise<Response> {
+  const isGet = action === "ice-servers";
+  if (isGet ? request.method !== "GET" : request.method !== "POST") throw new HttpError(405, "Method not allowed");
+  const session = await requireSession(request, env, { stateChanging: !isGet });
+  const huddle = await loadHuddle(env, huddleId);
+  await huddleAccess(env, session.uid, huddle.context_type, huddle.context_id);
+  if (isGet) return Response.json({ iceServers: await iceServers(env) });
+
+  const room = env.HUDDLES.get(env.HUDDLES.idFromName(huddleId));
+  const sfu = sfuFor(env);
+  const body = (await request.json()) as Record<string, any>;
+  const connId = body.connId;
+  if (typeof connId !== "string") throw new HttpError(400, "connId is required");
+
+  switch (action) {
+    case "tracks/publish": {
+      const tracks = body.tracks as Array<{ mid: string; kind: TrackKind }>;
+      if (!isSessionDescription(body.sessionDescription, "offer")) throw new HttpError(400, "sessionDescription must be an SDP offer");
+      if (!Array.isArray(tracks) || tracks.length === 0 || tracks.length > 4) throw new HttpError(400, "tracks must list 1–4 tracks");
+      if (tracks.some((t) => typeof t.mid !== "string" || !TRACK_KINDS.includes(t.kind))) throw new HttpError(400, "each track needs a mid and a kind");
+      const prepared = await room.preparePublish(session.uid, connId, tracks.map((t) => t.kind));
+      let sessionId = prepared.sessionId;
+      if (!sessionId) {
+        sessionId = await sfu.newSession();
+        await room.setSession(session.uid, connId, sessionId);
+      }
+      // Track names are the kind; they are unique within a participant's SFU session.
+      const result = await sfu.addTracks(sessionId, {
+        sessionDescription: body.sessionDescription,
+        tracks: tracks.map((t) => ({ location: "local", mid: t.mid, trackName: t.kind })),
+      });
+      const ok = tracks.filter((t) => !(result.tracks ?? []).some((r) => r.mid === t.mid && r.errorCode));
+      if (ok.length > 0) await room.tracksPublished(session.uid, connId, ok.map((t) => ({ kind: t.kind, mid: t.mid, trackName: t.kind })));
+      return Response.json(result);
+    }
+    case "tracks/subscribe": {
+      const wanted = body.tracks as Array<{ connId: string; kind: string; preferredRid?: string }>;
+      if (!Array.isArray(wanted) || wanted.length === 0 || wanted.length > 64) throw new HttpError(400, "tracks must list 1–64 tracks");
+      const { sessionId, remote } = await room.authorizeSubscribe(session.uid, connId, wanted.map((w) => ({ connId: w.connId, kind: w.kind })));
+      const result = await sfu.addTracks(sessionId, {
+        tracks: remote.map((r, i) => ({
+          location: "remote",
+          sessionId: r.sessionId,
+          trackName: r.trackName,
+          // Simulcast layer choice for video and screen; fall back alphabetically (f > h > q) if the layer is missing.
+          ...(wanted[i]!.preferredRid && (r.kind === "screen" || r.kind === "video")
+            ? { simulcast: { preferredRid: wanted[i]!.preferredRid!, priorityOrdering: "asciibetical", ridNotAvailable: "asciibetical" } }
+            : {}),
+        })),
+      });
+      return Response.json({ ...result, publishers: remote.map((r) => ({ connId: r.connId, kind: r.kind })) });
+    }
+    case "renegotiate": {
+      if (!isSessionDescription(body.sessionDescription, "answer")) throw new HttpError(400, "sessionDescription must be an SDP answer");
+      await sfu.renegotiate(await room.sessionFor(session.uid, connId), body.sessionDescription);
+      return Response.json({});
+    }
+    case "tracks/close": {
+      const mids = body.mids as string[];
+      if (!Array.isArray(mids) || mids.length === 0 || mids.some((m) => typeof m !== "string")) throw new HttpError(400, "mids must be a non-empty list");
+      const sessionDescription = isSessionDescription(body.sessionDescription, "offer") ? body.sessionDescription : undefined;
+      const result = await sfu.closeTracks(await room.sessionFor(session.uid, connId), mids, { force: !sessionDescription, sessionDescription });
+      await room.tracksClosed(session.uid, connId, mids);
+      return Response.json(result);
+    }
+    case "tracks/layer": {
+      if (typeof body.mid !== "string" || typeof body.preferredRid !== "string") throw new HttpError(400, "mid and preferredRid are required");
+      const result = await sfu.updateTracks(await room.sessionFor(session.uid, connId), [
+        { location: "remote", mid: body.mid, simulcast: { preferredRid: body.preferredRid, priorityOrdering: "asciibetical", ridNotAvailable: "asciibetical" } },
+      ]);
+      return Response.json(result);
+    }
+    default:
+      throw new HttpError(404, "Unknown huddle route");
   }
 }

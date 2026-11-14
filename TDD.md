@@ -1463,6 +1463,20 @@ To confirm at implementation: the Realtime SFU endpoint and simulcast controls (
 - Stock clients must fetch a fresh ticket before each reconnect, by updating `provider.params.ticket`.
 - Server-side awareness avoids the y-protocols `Awareness` class (§4.1).
 
+The spike also validated huddles and screen sharing (§3.6, §4.5) against a fake SFU, plus browser capture in Chromium:
+- one huddle per context
+- track isolation
+- single presenter with take-over and forced hand-over
+- moderator stop and mute
+- sharing policy and resolution cap
+- simulcast layer requests and switching
+- huddle ending
+- present mode.
+
+The SFU client matches the documented Realtime API. Two implementation notes:
+- Return typed results for expected denials rather than throwing across Durable Object RPC, which logs them as uncaught exceptions.
+- Simulcast negotiation and TURN still need a run against a real Realtime app.
+
 **Still to confirm by measurement, not decision:** a Phase 1 load test should confirm or adjust these numeric defaults:
 - compaction thresholds
 - outbox batching

@@ -42,6 +42,8 @@ export class DocRoom extends DurableObject<Env> {
   private doc: Y.Doc | null = null;
   /** Awareness is relayed and remembered in memory only; clients re-announce it periodically. */
   private awareness = new Map<number, AwarenessEntry>();
+  /** Present mode (TDD §4.5): at most one presenting awareness client per document. Memory only. */
+  private presenter: { clientId: number; connId: string; userId: string } | null = null;
   private pendingUpdates = 0;
   private pendingBytes = 0;
 
@@ -161,13 +163,19 @@ export class DocRoom extends DurableObject<Env> {
       }
       case MSG_AWARENESS: {
         const update = decoding.readVarUint8Array(decoder);
-        const ids = this.applyAwareness(update);
+        const { ids, deniedBecause } = this.applyAwareness(update, att);
         const known = new Set(att.awarenessIds);
         if (ids.some((id) => !known.has(id))) {
           att.awarenessIds = [...new Set([...att.awarenessIds, ...ids])];
           ws.serializeAttachment(att);
         }
-        this.broadcast(frame(MSG_AWARENESS, update), ws);
+        if (deniedBecause) {
+          // Second presenter: strip the claim, tell the sender (and echo the corrected state back to them).
+          this.sendPermissionDenied(ws, `Currently presenting: ${deniedBecause}`);
+          ws.send(this.encodeAwareness(ids));
+        }
+        // Re-encode from server state so any stripped claim never reaches peers.
+        this.broadcast(this.encodeAwareness(ids), ws);
         return;
       }
       case MSG_QUERY_AWARENESS:
@@ -189,6 +197,7 @@ export class DocRoom extends DurableObject<Env> {
       this.broadcast(this.encodeAwareness(att.awarenessIds), ws);
       for (const id of att.awarenessIds) this.awareness.delete(id);
     }
+    if (this.presenter?.connId === att.connId) this.presenter = null;
     // Compact before the object goes idle, so the next cold load is a single snapshot.
     const others = this.ctx.getWebSockets().filter((s) => s !== ws);
     if (others.length === 0 && this.doc && this.pendingUpdates > 0) this.compact();
@@ -256,22 +265,44 @@ export class DocRoom extends DurableObject<Env> {
 
   // ---------------------------------------------------------- awareness
 
-  /** Parses an awareness update (y-protocols wire format), remembers newer states, returns the client IDs. */
-  private applyAwareness(update: Uint8Array): number[] {
+  /**
+   * Parses an awareness update (y-protocols wire format), remembers newer states and enforces present mode:
+   * a `presenting.active` claim is accepted only if nobody else is presenting; otherwise it is stripped.
+   */
+  private applyAwareness(update: Uint8Array, att: DocAttachment): { ids: number[]; deniedBecause: string | null } {
     const decoder = decoding.createDecoder(update);
     const count = decoding.readVarUint(decoder);
     const ids: number[] = [];
+    let deniedBecause: string | null = null;
     for (let i = 0; i < count; i++) {
       const clientId = decoding.readVarUint(decoder);
       const clock = decoding.readVarUint(decoder);
-      const state = decoding.readVarString(decoder);
+      let state = decoding.readVarString(decoder);
       ids.push(clientId);
       const current = this.awareness.get(clientId);
       if (current && current.clock > clock) continue;
+
+      const parsed = state === "null" ? null : (safeJson(state) as { presenting?: { active?: boolean } } | null);
+      if (parsed?.presenting?.active === true) {
+        if (!this.presenter || this.presenter.clientId === clientId) {
+          this.presenter = { clientId, connId: att.connId, userId: att.userId };
+        } else {
+          delete parsed.presenting;
+          state = JSON.stringify(parsed);
+          deniedBecause = this.presenter.userId;
+        }
+      } else if (this.presenter?.clientId === clientId) {
+        this.presenter = null; // stopped presenting (or left)
+      }
+
       if (state === "null") this.awareness.delete(clientId);
       else this.awareness.set(clientId, { clock, state });
     }
-    return ids;
+    return { ids, deniedBecause };
+  }
+
+  async presenting(): Promise<string | null> {
+    return this.presenter?.userId ?? null;
   }
 
   private encodeAwareness(clientIds: number[]): Uint8Array {
@@ -304,6 +335,14 @@ export class DocRoom extends DurableObject<Env> {
         // Socket closing; ignore.
       }
     }
+  }
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
 }
 

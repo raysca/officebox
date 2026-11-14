@@ -46,7 +46,11 @@ export class YClient {
   }
 
   setCursor(name: string): void {
-    this.awareness.setLocalStateField("user", { name });
+    this.setLocal("user", { name });
+  }
+
+  setLocal(field: string, value: unknown): void {
+    this.awareness.setLocalStateField(field, value);
     const e = encoding.createEncoder();
     encoding.writeVarUint(e, 1);
     encoding.writeVarUint8Array(e, awarenessProtocol.encodeAwarenessUpdate(this.awareness, [this.doc.clientID]));

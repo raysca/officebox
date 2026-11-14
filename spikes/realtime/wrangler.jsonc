@@ -8,12 +8,15 @@
       { "name": "CHAT", "class_name": "ChatChannel" },
       { "name": "DOCS", "class_name": "DocRoom" },
       { "name": "USER_HUB", "class_name": "UserHub" },
-      { "name": "PRESENCE", "class_name": "WorkspacePresence" }
+      { "name": "PRESENCE", "class_name": "WorkspacePresence" },
+      { "name": "HUDDLES", "class_name": "HuddleRoom" },
+      { "name": "FAKE_SFU", "class_name": "FakeSfu" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ChatChannel", "DocRoom"] },
-    { "tag": "v2", "new_sqlite_classes": ["UserHub", "WorkspacePresence"] }
+    { "tag": "v2", "new_sqlite_classes": ["UserHub", "WorkspacePresence"] },
+    { "tag": "v3", "new_sqlite_classes": ["HuddleRoom", "FakeSfu"] }
   ],
   "d1_databases": [
     {
@@ -35,6 +38,7 @@
       }
     ]
   },
-  // Spike only: enables /dev/* helper routes (login without password, seed data).
-  "vars": { "DEV_LOGIN": "1" }
+  // Spike only: /dev/* helper routes, and a fake SFU. For the real Realtime SFU set SFU_MODE to "real" and add the
+  // secrets REALTIME_APP_ID, REALTIME_APP_SECRET (and optionally TURN_KEY_ID, TURN_KEY_API_TOKEN) in .dev.vars.
+  "vars": { "DEV_LOGIN": "1", "SFU_MODE": "fake" }
 }
