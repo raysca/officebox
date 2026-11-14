@@ -41,10 +41,46 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 2. **Read** the slice's spec sections and the TDD sections it references. Check `spikes/` for proven patterns and the findings listed in the spike README.
 3. **Write a short plan** in the PR description before coding: the spec items covered, the files and modules touched, schema changes, and the tests you'll add.
 4. **Build vertically:** migration → Durable Object or service → API → UI → tests → docs, all in the same PR.
-5. **Verify** every item in the definition of done (§6). Run the checks locally before opening the PR.
-6. **Open the PR** with the template headings: Summary, Spec coverage (with links), Screenshots (UI), Tests, Migrations, Follow-ups. Wait for green CI and review before merging (squash merge).
+5. **Verify** every item in the definition of done (§6). Run the checks locally.
+6. **Get an independent review, then fix** (§3.3). This happens before opening the PR.
+7. **Open the PR** with the template headings: Summary, Spec coverage (with links), Screenshots (UI), Tests, Migrations, **Independent review**, Follow-ups. Wait for green CI and the product owner's review before merging (squash merge).
 
-### 3.3 Branches and commits
+### 3.3 Independent review
+
+When implementation is finished and your own checks pass, have a **separate, independent agent** review the change before you open the PR. An author reviewing their own work misses what they assumed.
+
+1. **Start a fresh agent.**
+   - It has no access to your conversation or reasoning: a new agent, not a fork or continuation of your session.
+   - If your tool can choose a different model for the reviewer, do.
+2. **Give it the material, not your conclusions:**
+   - the diff (or branch name)
+   - the slice's spec sections and the TDD sections it references
+   - this file.
+
+   Don't tell it what you think is fine or where the risks are; let it find them.
+3. **Ask it to review for:**
+   - **correctness bugs**, including edge cases and concurrency
+   - **spec coverage**: every acceptance criterion the slice claims, and behaviour that contradicts the spec
+   - **security and permissions**: every access goes through the permission engine; denied cases are tested; no secrets in client code or logs
+   - **conventions** in §4: typed results, concrete Durable Object RPC types, expand/contract migrations, Zod validation
+   - **tests**: missing cases, especially denied paths, and timing-sensitive tests that could be flaky
+   - **accessibility** of new UI.
+
+   It returns findings ranked by severity, each with a file and line and a concrete failure scenario.
+4. **Apply fixes.**
+   - Address every finding. Fix it, or decline it with a reason; don't ignore any.
+   - Re-run all checks after fixing.
+   - If the fixes were substantial (new logic, not just small corrections), run another independent review on the updated diff.
+5. **Record it in the PR's *Independent review* section:**
+   - the findings
+   - what was fixed
+   - what was declined and why.
+
+   Unresolved disagreements are flagged there for the product owner to decide.
+
+The independent review doesn't replace CI or the product owner's review. It runs before both.
+
+### 3.4 Branches and commits
 
 - `main` is always deployable through the Deploy to Cloudflare button.
 - Branch names: `<type>/<milestone>-<short-name>`, for example `feat/m3a-channels` or `fix/m1-invite-expiry`.
@@ -118,6 +154,7 @@ Known testing behaviour, learned in the spike:
 - [ ] Accessibility checks pass for new UI.
 - [ ] Audit entries exist for admin and destructive actions.
 - [ ] No secrets in client code or logs; expected failures are typed results.
+- [ ] An independent agent reviewed the change (§3.3). Every finding is fixed or declined with a reason, recorded in the PR.
 - [ ] Docs are updated: the spec status and decisions if behaviour changed, the TDD if design changed, and user-facing help or admin notes.
 - [ ] `main` still deploys from the Deploy button.
 
