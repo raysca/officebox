@@ -1,8 +1,22 @@
 # Spec: Calls (huddles)
 
 **Status:** Draft for review
+**Revision:** Revised after independent review (14 Nov 2026)
 **Feature name:** Calls (marketing name to be decided later; "huddles" in the PRD and TDD)
-**Milestone:** M4 ([PLAN](../PLAN.md)) · **Related:** PRD §5.8; TDD §3.6, §4.5; [Chat](chat.md), [Calendar](calendar.md)
+**Milestones** ([PLAN](../PLAN.md)):
+- M4: channel and DM calls
+- M5b: event calls
+- M6: document calls
+
+**Related specs:**
+- [Permissions](permissions.md) §4
+- [Notifications](notifications.md) §5
+- [Platform](platform.md): lifecycle, retention, timers, connection budget
+- [Chat](chat.md)
+- [Calendar](calendar.md)
+- [Documents](documents.md)
+
+**Related PRD and TDD sections:** PRD §5.8; TDD §3.6, §4.5
 
 Decisions marked **(default)** were not discussed; change them on review.
 
@@ -10,7 +24,7 @@ Decisions marked **(default)** were not discussed; change them on review.
 
 Instant, audio-first calls you can start from any conversation, document or calendar event, with optional video, screen sharing and present mode. Media goes through the Cloudflare Realtime SFU. Signalling and call state go through Officebox (TDD §3.6). No recording.
 
-**Gate:** the real-media run (`spikes/realtime`, `npm run test:media`) must pass on a real Realtime app before this milestone starts.
+**Gate:** the real-media run (`spikes/realtime`, `npm run test:media`) must pass on a real Realtime app before M4 starts.
 
 ## 2. Decisions
 
@@ -22,6 +36,8 @@ Instant, audio-first calls you can start from any conversation, document or cale
 | In-call features | **In-call chat, reactions and raise hand, noise-suppression toggle**. Background blur later. |
 | Channel call start | **Banner only**: "Call in progress" plus a system message. No pings. |
 | Calendar event calls | **Joinable from 10 minutes before start.** At start time attendees get "starting now — join". |
+| Event call access | **Invitees, plus anyone with details-level access to the event's calendar.** Free/busy-only viewers can't join. |
+| In-call chat retention | **Kept for the life of the context** (channel, DM, document or event). The call's metadata record is purged separately after 365 days. |
 | Layout | **Auto**: grid for up to 4 people, active-speaker focus above that. A screen share takes the main stage. Manual switch available. |
 | Size | **Up to 25 participants** |
 | Join state | **Mic on, camera off.** Mic is auto-muted when joining a call that already has 6 or more people. |
@@ -31,42 +47,54 @@ Instant, audio-first calls you can start from any conversation, document or cale
 
 ## 3. Where calls happen
 
-| Context | Start from | Who can join | Notes |
-|---|---|---|---|
-| Channel | Channel header "Start call" | Anyone who can read the channel | One active call per channel. Banner in the header and sidebar. |
-| DM / group DM | DM header | DM participants | **Rings** the others |
-| Document / whiteboard | Document header | Anyone with access to the document | Present mode is suggested |
-| Calendar event | Event "Join call" | Event attendees, plus anyone who can see the event **(default)** | Join window opens 10 minutes before start |
+| Context | Milestone | Start from | Who can join | Notes |
+|---|---|---|---|---|
+| Channel | M4 | Channel header "Start call" | Anyone who can read the channel | One active call per channel. Banner in the header and sidebar. Not available in archived channels. |
+| DM / group DM | M4 | DM header | DM participants | **Rings** the others |
+| Calendar event | M5b | Event "Join call" | **Invitees + anyone with details-level access to the event's calendar** ([Calendar](calendar.md) §4.5). Free/busy-only viewers can't. | Join window opens 10 minutes before start |
+| Document / whiteboard | M6 | Document header | Anyone with access to the document | Present mode is suggested |
 
-- A context has at most one active call. Starting one when a call already exists joins it (TDD §3.6).
-- **Start and end system messages** appear in the channel or DM. The end message shows duration and participants. Event calls record this on the event, and document calls in the document's activity **(default)**.
+**Context keys.** At most one active call per context key, and starting one when a call already exists joins it (TDD §3.6):
+
+| Context | Key |
+|---|---|
+| Channel or DM | `channel:<channelId>` |
+| Document | `document:<documentId>` |
+| Single event | `event:<eventId>` |
+| Recurring event occurrence | `event:<eventId>:<occurrenceStart>`, where `occurrenceStart` is the occurrence id used by `event_exceptions.original_start` |
+
+**Start and end records:**
+- **Channels and DMs:** start and end **system messages**. The end message shows duration and participants.
+- **Events:** recorded on the event (shown in the event detail).
+- **Documents:** recorded in the **document details panel → Activity** ([Documents](documents.md), section "Activity") **(default)**.
 
 ## 4. Ringing (DMs and group DMs)
 
 - Starting a call in a DM sends a **ring** through each other participant's UserHub (M2). Their app shows an incoming-call banner with the caller's name and avatar plus **Accept** and **Decline**, and a ring sound (with a per-member setting to silence it).
 - Rings last **30 seconds**. Accepting joins the call. Declining tells the caller "*Ana* declined".
-- If nobody answers in 30 seconds, the caller sees "No answer". A **"Missed call" system message** goes into the DM and a `missed_call` inbox item is created.
-- **Do-not-disturb** (manual or scheduled) and **time off** suppress ringing. The caller sees "*Ana* is in do-not-disturb" or "*Ana* is away until Monday", and a missed call is recorded.
+- If nobody answers in 30 seconds, the caller sees "No answer". A **"Missed call" system message** goes into the DM and a `missed_call` inbox item is created ([Notifications](notifications.md) §3).
+- **Do-not-disturb** (manual, scheduled or focus time) and **time off** suppress ringing ([Notifications](notifications.md) §5). The caller sees "*Ana* is in do-not-disturb" or "*Ana* is away until Monday", and a missed call is recorded.
 - Ringing goes to every device where the person is online. Accepting on one device stops it on the others.
 - A group DM rings everyone. The call carries on for whoever joins.
+- **Call waiting:** calling someone who is already in another call still rings them, with **"*Ana* is calling (you're in a call)"**. Accepting asks "Leave your current call and join?", because the one-call-at-a-time rule applies (§5).
+- **Source of truth:** the **UserHub** holds live ring state (ringing, accepted, declined). `call_rings` in D1 is the durable record, written when a ring ends, used for missed calls and history.
 
 ## 5. Joining
 
 - **Join state:**
   - Mic on and camera off by default.
-  - Joining a call that already has 6 or more participants starts **muted**, with a hint "You're muted — the call has 7 people".
+  - Joining a call that already has 6 or more participants starts **muted**, with a hint "You're muted — the call has *N* people" (*N* is 6 or more).
   - DM calls never auto-mute.
 - **Device choice:** microphone, camera and speaker can be picked from the call controls at any time. The last choice is remembered per device. A **pre-join screen** appears only when the browser hasn't granted permission, or the remembered device is missing **(default)**.
-- **Permissions:** if the browser denies microphone access, the member joins listen-only with a clear prompt to fix it.
 - **Two devices (handoff):**
   - Joining from a second device while already in the call shows "**Move call here?**". Confirming moves the person, and the first device leaves with "Call moved to another device".
   - The HuddleRoom enforces **one connection per person**.
 - **One call at a time:** joining a second call asks "Leave *#design* call and join *#ops* call?". The server enforces this too. A member's UserHub records their current call, and joining another requires confirmation.
-- **Capacity:** 25 participants. The 26th sees "This call is full (25)".
+- **Capacity:** 25 participants.
 - **Event calls:**
   - "Join call" appears on the event **10 minutes before** start and stays while the call is active.
   - The call can still be joined until the event's end time, plus as long as people remain **(default)**.
-  - At start time, attendees who've accepted or not answered get a **"*Weekly sync* is starting — Join"** notification. Declined attendees get none.
+  - At start time, attendees who've accepted or not answered get a **"*Weekly sync* is starting — Join"** notification, triggered by the ReminderScheduler ([Platform](platform.md) §11). Declined attendees get none.
 
 ## 6. In the call
 
@@ -81,7 +109,9 @@ Mute, camera, share screen, reactions, raise hand, in-call chat, participants li
 | Cmd/Ctrl+D | Mute / unmute |
 | Cmd/Ctrl+E | Camera on / off |
 | Cmd/Ctrl+Shift+S | Share screen |
-| Space (hold) | Push-to-talk while muted **(default)** |
+| Space (hold) | **Push-to-talk** while muted |
+
+**Push-to-talk** is **off by default** and can be turned on in call settings. It's disabled while any text input has focus, including the in-call chat (WCAG 2.1.4).
 
 ### 6.2 Layout
 
@@ -95,17 +125,18 @@ Mute, camera, share screen, reactions, raise hand, in-call chat, participants li
 
 ### 6.3 Reactions and raise hand
 
-- **Reactions:** quick emoji (👍 ❤️ 😂 🎉 👏 😮) that float over the sender's tile for 3 seconds.
+- **Reactions:** quick emoji (👍 ❤️ 😂 🎉 👏 😮) **(default)** that float over the sender's tile for 3 seconds **(default)**. Reactions are ephemeral and not stored.
 - **Raise hand:**
   - A hand icon on the tile, and an **ordered queue** in the participants list, showing who raised first.
-  - People lower their own hand. The host and channel admins can lower anyone's. Hands lower automatically when that person unmutes and speaks for a few seconds **(default)**.
+  - People lower their own hand. Moderators (§6.7) can lower anyone's. Hands lower automatically when that person unmutes and speaks for a few seconds **(default)**.
 
 ### 6.4 In-call chat
 
 - A chat panel inside the call. It supports text, mentions, links and emoji. Files come later **(default)**.
 - **Saved afterwards:**
-  - Channel and DM calls: messages are posted as a **thread under the call's "started" system message**, reusing chat (`specs/chat.md` §5). The conversation stays with the channel.
-  - Document and event calls: messages are kept with the call record and linked from the call summary in the document's activity or on the event **(default)**.
+  - **Channel and DM calls:** messages are posted as a **thread under the call's "started" system message**, reusing chat ([Chat](chat.md) §5). The HuddleRoom writes them through a **typed-result RPC to the ChatChannel DO**, never throwing expected denials ([AGENTS.md](../AGENTS.md) §4.1).
+  - **Document and event calls:** messages are stored in `huddle_messages`, **attached to the context** (document or event), not to the call record. The HuddleRoom writes them to D1 **through an outbox** (TDD §2.0). They're linked from the call record in the document's Activity or on the event.
+- **Retention:** in-call chat is kept for **the life of the context**. It isn't deleted when the call's metadata is purged after 365 days ([Platform](platform.md) §5). It's deleted with its context.
 - Everyone who can see the context can read the saved chat, whether or not they were in the call.
 
 ### 6.5 Audio
@@ -130,45 +161,73 @@ As specified in **PRD §5.8** and **TDD §3.6 / §4.5**, and validated in the sp
 
 ### 6.7 Moderation
 
-- **Host:** the person who started the call. The host and channel admins (document owners for document calls, event organisers for event calls) can:
+- **Moderators:**
+  - the **host**: the person who started the call
+  - in channel calls: **channel admins**
+  - in document calls: **document owners**
+  - in event calls: the **event organiser**.
+- **When the host leaves,** moderation passes to the moderators present: channel admins, document owners or the event organiser. If none are present, the call continues without a moderator.
+- **In DM and group-DM calls**, any participant may stop a screen share **(default)**.
+- **Moderators can:**
   - mute a participant (the participant must unmute themselves; they can't be force-unmuted)
   - stop a screen share
   - lower hands
-  - remove a participant from the call (they can rejoin unless they lose access) **(default)**.
+  - **remove a participant** from the call; they can rejoin unless they lose access **(default)**.
 - Moderation actions are audited.
 
 ## 7. Ending
 
-- A call ends **30 seconds after the last participant leaves** (TDD §3.6). The end system message shows duration and who attended.
-- Huddle records are **metadata only** (context, participants, times, whether a screen was shared) and are kept for 365 days (PRD §10.2). No audio, video or screen content is ever recorded.
+- A call ends **30 seconds after the last participant leaves** (TDD §3.6). The end record shows duration and who attended (§3).
+- **Huddle records** are **metadata only** (context, participants, times, whether a screen was shared) and are purged after 365 days ([Platform](platform.md) §5). No audio, video or screen content is ever recorded. In-call chat is separate and follows its context (§6.4).
 
-## 8. Mobile
+## 8. Errors and edge cases
+
+| Situation | Behaviour |
+|---|---|
+| **SFU unreachable** (session creation or publish fails) | "Can't connect to the call service — retrying…" with automatic retries (1 s, 2 s, 4 s, up to 30 s) **(default)**, then "Try again". Chat and the rest of the app keep working (PRD §18). |
+| **Room full** (26th person) | Join refused: "This call is full (25)". No connection is opened. |
+| **Microphone denied** | The member joins **listen-only**, with a banner explaining how to allow the mic in the browser. Camera denied disables only the camera control. |
+| **Network drop** | The client keeps the participant's slot for 30 seconds (the SFU's session reuse window), shows "Reconnecting…", and renegotiates on return. After 30 seconds they're removed and can rejoin. |
+| **Host disabled mid-call** | Revocation closes their call connection like any room ([Platform](platform.md) §3). Moderation passes on as in §6.7. |
+| **Participant loses access mid-call** (removed from the channel, invitation withdrawn) | Their call connection is closed with "You no longer have access to this call". |
+| **Presenter's capture ends unexpectedly** (window closed) | Treated as stopping the share; the presenter slot is released. |
+
+**Revocation:** the HuddleRoom **joins the UserHub room registry** like channel and document objects. Disabling a member, or removing their access to the call's context, closes their call connection within seconds ([Platform](platform.md) §3; TDD §3.5).
+
+## 9. Mobile
 
 - Mobile browsers and the installed PWA can **join with audio and video**, receive rings while the app is open, and view screen shares.
 - They can't share their screen; the control is hidden.
 - Push-notification ringing when the app is closed arrives with web push (Phase 2, PRD §8).
 
-## 9. Data model (additions to TDD §3.6)
+## 10. Data model (additions to TDD §3.6)
 
 ```sql
--- huddles: new context types and the in-call chat link
--- context_type: 'channel' (includes DMs), 'document', 'event'
-ALTER TABLE huddles ADD COLUMN started_message_id TEXT;    -- channel/DM: the "call started" message (in-call chat thread root)
-ALTER TABLE huddles ADD COLUMN kind TEXT NOT NULL DEFAULT 'ad_hoc' CHECK (kind IN ('ad_hoc', 'dm', 'event'));
+-- huddles.context_type gains 'event' (schema reconciliation, platform §14).
+-- The call "kind" is derived, not stored: DM = channel context whose channel type is a DM or group DM; event = 'event' context.
+ALTER TABLE huddles ADD COLUMN context_key TEXT;            -- e.g. 'event:<eventId>:<occurrenceStart>' (§3)
+ALTER TABLE huddles ADD COLUMN started_message_id TEXT;     -- channel/DM: the "call started" message (in-call chat thread root)
+-- Active-call uniqueness moves to the context key:
+--   CREATE UNIQUE INDEX huddles_active ON huddles(context_key) WHERE ended_at IS NULL;
 
-CREATE TABLE huddle_messages (                              -- in-call chat for document/event calls only
+CREATE TABLE huddle_messages (                              -- in-call chat for document and event calls
   id TEXT PRIMARY KEY,
-  huddle_id TEXT NOT NULL REFERENCES huddles(id) ON DELETE CASCADE,
+  context_type TEXT NOT NULL CHECK (context_type IN ('document', 'event')),
+  context_id TEXT NOT NULL,                                 -- document id, or event id (occurrence in context_key)
+  context_key TEXT NOT NULL,
+  huddle_id TEXT,                                           -- informational link; no cascade from huddles
   sender_id TEXT REFERENCES users(id),
   format TEXT NOT NULL,
   text TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE INDEX huddle_messages_context ON huddle_messages(context_type, context_id, created_at);
+-- Deleted with the context (document or event purge), never with the huddle record (platform §4, §5).
 
-CREATE TABLE call_rings (                                   -- for missed-call records and ring state
-  huddle_id TEXT NOT NULL REFERENCES huddles(id) ON DELETE CASCADE,
+CREATE TABLE call_rings (                                   -- durable record; live ring state is in the UserHub
+  huddle_id TEXT NOT NULL,
   user_id TEXT NOT NULL REFERENCES users(id),
-  state TEXT NOT NULL CHECK (state IN ('ringing', 'accepted', 'declined', 'missed', 'suppressed')),
+  state TEXT NOT NULL CHECK (state IN ('accepted', 'declined', 'missed', 'suppressed')),
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (huddle_id, user_id)
 );
@@ -176,39 +235,108 @@ CREATE TABLE call_rings (                                   -- for missed-call r
 
 **HuddleRoom DO** additions:
 - one connection per user, with handoff closing the old socket with code `4002 "moved"`
-- the raise-hand queue
+- the raise-hand queue and moderator hand-over when the host leaves
 - reaction relay, which is ephemeral and not stored
-- in-call chat relay, writing to the channel DO thread or to `huddle_messages`
-- participant removal.
+- in-call chat relay: typed-result RPC to the ChatChannel DO, or outbox to `huddle_messages`
+- participant removal
+- registration in the UserHub room registry.
 
 **UserHub** additions:
 - `currentCall` (the one-call-at-a-time rule)
-- ring delivery: `call.ring`, `call.ring.cancel` and `call.accepted-elsewhere`.
+- live ring state and delivery: `call.ring`, `call.ring.cancel`, `call.accepted-elsewhere`, and call waiting.
 
-## 10. Acceptance criteria
+## 11. API
 
+All routes need a session. State-changing routes need the CSRF header (TDD §8.2). Track routes follow TDD §3.6 and the spike.
+
+| Method and path | Purpose |
+|---|---|
+| `POST /calls` `{ contextType, contextId, occurrence? }` | Start a call in a context, or get the active one. Returns `{ huddleId, created }`. DM contexts start ringing. |
+| `GET /calls/:id` | Call state: context, participants, presenter |
+| `GET /calls/:id/ice-servers` | STUN, and short-lived TURN credentials if configured |
+| `POST /calls/:id/tracks/publish` `{ connId, sessionDescription, tracks[{ mid, kind }] }` | Publish local tracks (SFU session created on first publish) |
+| `POST /calls/:id/tracks/subscribe` `{ connId, tracks[{ connId, kind, preferredRid? }] }` | Pull remote tracks; returns the SFU's offer |
+| `POST /calls/:id/renegotiate` `{ connId, sessionDescription }` | Answer the SFU's offer |
+| `POST /calls/:id/tracks/close` `{ connId, mids, sessionDescription? }` | Close own tracks |
+| `POST /calls/:id/tracks/layer` `{ connId, mid, preferredRid }` | Switch simulcast layer |
+| `POST /calls/:id/ring/accept` · `POST /calls/:id/ring/decline` | Answer a ring |
+| `POST /calls/:id/participants/:connId/remove` | Moderator removes a participant |
+| `GET /calls/:id/chat` · `GET /contexts/:type/:id/call-chat?before=…` | In-call chat history for the live call, or saved chat for a document or event |
+
+**WebSocket** (`/ws/calls/:id`, authenticated as in TDD §3.1).
+
+Client → room:
+
+| Message | Purpose |
+|---|---|
+| `screen.start` · `screen.stopped` · `screen.handover { toConnId }` | Screen sharing (TDD §3.6) |
+| `screen.stop { targetConnId }` · `mute { targetConnId }` | Moderation |
+| `hand { raised }` · `hand.lower { targetConnId }` | Raise hand |
+| `reaction { emoji }` | Reactions |
+| `chat.send { clientId, format, text }` | In-call chat |
+| `handoff.confirm` | Move the call to this device |
+
+Room → client:
+
+| Message | Purpose |
+|---|---|
+| `welcome` (connId, policy, roster) · `roster` | Join and roster updates |
+| `screen.granted` · `screen.pending` · `screen.request` · `screen.stop-requested` · `screen.stopped-by` | Screen sharing |
+| `muted-by` | Moderation |
+| `hand.queue` | Raise-hand queue |
+| `reaction` | Reactions |
+| `chat.message` · `chat.ack` | In-call chat |
+| `moderators` | Who moderates now |
+| `removed` · `moved` (close codes `4003` removed, `4002` moved) | Leaving the call |
+| `error` | Typed errors |
+
+Hub → client (UserHub): `call.ring`, `call.ring.cancel`, `call.accepted-elsewhere`, `call.declined`.
+
+## 12. Acceptance criteria
+
+**M4: channel and DM calls**
 - **Real media:** `test:media` passes against the production Worker (join-to-audio under 2 s, share start under 3 s, screen latency p95 under 500 ms, moderator stop under 3 s).
 - **Ringing:**
-  - a DM call rings the other person on all their online devices; accepting on one stops the others
-  - an unanswered ring creates a missed-call message and inbox item
-  - DND suppresses the ring.
-- **Channel calls:** a channel call shows the banner and system messages and pings nobody.
+  - a DM call rings the other person on all their online devices; accepting on one sends `call.ring.cancel` to the others within 1 s
+  - an unanswered ring creates a missed-call message, a `call_rings` row (`missed`) and a `missed_call` inbox item after 30 s
+  - DND suppresses the ring and records `suppressed`
+  - calling someone already in a call shows the call-waiting banner, and accepting asks them to leave their current call.
+- **Channel calls:** a channel call shows the banner and system messages, and creates no inbox items.
 - **Joining:**
-  - joining a call with 6 or more people starts muted
-  - joining from a second device hands off the call
-  - joining a second call asks to leave the first.
-- **In-call chat:** in a channel call it ends up as a thread under the call's start message.
-- **Raise hand:** the queue shows the correct order; the host can lower hands.
-- **Event calls:** the event call is joinable 10 minutes before start, and attendees are notified at start time.
-- **Capacity:** the 26th participant is refused with a clear message.
-- **Browsers:** a call between Chrome and Safari has two-way audio and screen sharing.
+  - joining a call with 6 or more participants starts muted
+  - joining from a second device hands off the call, and the first socket closes with `4002`
+  - joining a second call without confirming is refused by the server.
+- **Capacity:** the 26th join is refused with "This call is full (25)".
+- **In-call chat:** in a channel call it ends up as a thread under the call's start message, written through a typed-result RPC.
+- **Raise hand and moderation:**
+  - the raise-hand queue shows the correct order; moderators can lower hands
+  - when the host leaves, a channel admin present receives `moderators` and can stop a share
+  - in a group-DM call any participant can stop a share
+  - a removed participant's socket closes with `4003`.
+- **Revocation:** disabling a member closes their call connection within 5 seconds.
+- **Errors:** with the SFU unreachable, the client shows the retry message and the rest of the app keeps working (fake SFU returning errors).
+- **Accessibility:** push-to-talk is off by default and ignored while a text input has focus.
+- **Browsers (manual):** a call between Chrome and Safari has two-way audio and screen sharing.
 
-## 11. Later
+**M5b: event calls**
+- The call is joinable 10 minutes before start; earlier joins are refused.
+- Invitees and details-level calendar viewers can join; free/busy-only viewers get 403.
+- Each recurring occurrence gets its own call (distinct context keys).
+- Attendees (except those who declined) get "starting now" within 1 minute of start.
+- In-call chat is stored in `huddle_messages` against the event and survives the purge of the call's metadata.
+
+**M6: document calls**
+- Anyone with access to the document can start or join.
+- The call appears in the document details panel → Activity.
+- In-call chat is stored against the document and is deleted only with the document.
+
+## 13. Later
 
 External participants by link (with guest accounts) · background blur and virtual backgrounds · transcription and summaries (Phase 3) · push-notification ringing (Phase 2) · persistent rooms · files in in-call chat.
 
-## 12. Open questions
+## 14. Open questions
 
-1. **Event call access:** attendees only, or anyone who can see the event? (The default above is anyone who can see it.)
-2. **Push-to-talk with Space:** useful, or risky when typing in the in-call chat? (It would be disabled while the chat input has focus.)
-3. **Participant removal by hosts:** needed in the first release, or is muting enough?
+None outstanding. Resolved in this revision:
+- Event call access: invitees plus details-level calendar viewers.
+- Push-to-talk: off by default and disabled while typing.
+- Participant removal: kept **(default)**.
