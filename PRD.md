@@ -14,7 +14,7 @@
 - imports, integrations and APIs (§19).
 
 **Changes in 1.2:** All open product questions now have a recommended decision (§17). New or expanded: Personal Inbox rules (§5.3), editor and revision history (§5.5), board component (§5.6), support plans (§1), AI log visibility (§11), export and restore (§13), native app criteria (§9).  
-**Changes in 1.1:** Licence and business model defined (open source, paid support). Upgrade delivery via release-sync pull requests. Secure first-run setup. Baseline role model. Baseline retention and deletion rules. Message source of truth. See [REVIEW.md](REVIEW.md) items C1–C5.
+**Changes in 1.1:** Licence and business model defined (open source, paid support). Upgrade delivery via release-sync pull requests. Secure first-run setup. Baseline role model. Baseline retention and deletion rules. Message source of truth.
 
 ## 1. Product summary
 

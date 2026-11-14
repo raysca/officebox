@@ -22,7 +22,7 @@
 - email delivery (§7.6).
 
 The Durable Object value limit is corrected to 8 MB.  
-**Changes in 1.1:** Storage ownership and message write path (§2.0, §3.3). Complete Phase 1 schema with permission resolution (§2.1). Deletion, retention and purge (§2.3). Release-sync upgrades, migrations and rollback (§6). First-run setup (§6.8). See [REVIEW.md](REVIEW.md) items C1–C5.
+**Changes in 1.1:** Storage ownership and message write path (§2.0, §3.3). Complete Phase 1 schema with permission resolution (§2.1). Deletion, retention and purge (§2.3). Release-sync upgrades, migrations and rollback (§6). First-run setup (§6.8).
 
 ## 1. Architecture overview
 
@@ -1458,7 +1458,7 @@ Decided in v1.3 (from the review):
 
 To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
 
-**Still to confirm by measurement, not decision:** the Phase 1 load test (REVIEW.md H2) should confirm or adjust these numeric defaults:
+**Still to confirm by measurement, not decision:** a Phase 1 load test should confirm or adjust these numeric defaults:
 - compaction thresholds
 - outbox batching
 - fan-out cache time
