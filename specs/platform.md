@@ -72,7 +72,7 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | Chat | `thread_follows`, `saved_items`; `@handle` text re-rendered as "Former member" in the D1 message copy, `search_index`, **and the ChatChannel DO's plain-text body** (a DO-side erase task run per channel the member posted in) |
 | Calendar | `time_off`, `event_notes`, `event_reminders`, `ics_feeds`, `ics_subscriptions` (and their cached events) |
 | Documents | `stars`, `recent_items`, `access_requests` (as requester) |
-| Notifications | `inbox_items`, `pending_emails`, `notify_anyway_log` |
+| Notifications | `inbox_items`, `pending_emails`, `notify_anyway_log`, **`user_availability`** |
 | Membership | `group_members`, `channel_members` (channel history stays) |
 
 `ON DELETE CASCADE` on `users` never fires, because user rows are anonymised, not deleted. The purge job must delete each table explicitly.
@@ -198,7 +198,7 @@ The single list of workspace settings. Feature specs reference this table instea
 | `link_previews_enabled` | on | Admin | `settings.link_previews` | Chat §11 |
 | `link_preview_blocked_domains` | empty | Admin | `settings.link_preview_domains` | Chat §11 |
 | `screen_share` | `everyone` (`everyone` / `admins` / `off`). **`admins`** means workspace owners and admins, plus channel admins for channel calls. | **Owner** | `settings.screen_share` | PRD §5.8, Calls §6.6 |
-| `screen_share_max_height` | 1080 (720 / 1080) | **Owner** | `settings.screen_share_cap` | PRD §5.8, Calls §6.6 |
+| `screen_share_max_height` | 1080 (720 / 1080) | **Owner** | `settings.screen_share_max_height` | PRD §5.8, Calls §6.6 |
 | `holiday_regions` | regions of current members | Admin | `settings.holiday_regions` | Calendar §6 |
 | `external_invites` | `on` (`on` / `admins` / `off`) | Admin | `settings.external_invites` | Calendar §8 |
 | `external_invite_daily_cap` | 50 recipients per member per day | Admin | `settings.external_invite_cap` | Calendar §8, §8 here |
@@ -227,7 +227,7 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Action | Limit | Mechanism | Source |
 |---|---|---|---|
 | Sign-in attempts, per IP | 5 per minute | binding | TDD §8.1 |
-| Sign-in attempts, per account | 10 per hour; progressive delay after the 3rd failure (1 s, 2 s, 4 s … capped at 30 s), no lockout | D1 counter | TDD §8.1, Identity §4.4 |
+| Sign-in attempts, per account | 10 per hour; attempts 1–5 immediate, then a progressive delay of 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s; no lockout | D1 counter | TDD §8.1, Identity §4.4 |
 | Magic-link and password-reset requests | 3 per 15 minutes per account; 20 per hour per IP **(default)** | D1 counter | Identity §4.4 |
 | Setup, recovery, invitation acceptance | 5 per minute per IP | binding | TDD §8.1 |
 | Message sends | 10 per 10 seconds per user per conversation **(default)** | DO (ChatChannel) | Chat §20 |
@@ -236,6 +236,7 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Group DM creation | 20 per hour per user **(default)** | D1 counter | Chat §20 |
 | Poll creation | 10 per hour per user **(default)** | D1 counter | Chat §20 |
 | Rings | 5 rings to the same person per 10 minutes **(default)** | DO (caller's UserHub) | Calls §4 |
+| In-call chat (`call_chat`) | 20 messages per 10 seconds per user per call **(default)**, separate from the per-conversation send limit | DO (ChatChannel, or HuddleRoom for document and event calls) | Chat §4.7 |
 | Handle changes | 3 per 30 days per user **(default)** | D1 counter (from `handles` history) | Identity §4.8 |
 | Access requests | 1 pending request per object per requester (unique index); 20 per day per requester **(default)** | D1 (unique index) + D1 counter | Permissions §7 |
 | External event invitation emails | 50 external recipients per member per day (setting) | D1 counter | Calendar §8 |
@@ -259,7 +260,7 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Call participants | 25 |
 | Drives per workspace | 500 **(default)** |
 | Offline documents per device | 20 documents, 100 MB total **(default)** |
-| Message body | 40 KB of text; the serialised message state must stay under 96 KB so it fits a queue message (Chat §4.1) **(default)** |
+| Message body | 40 KB of text; rich-text JSON (`format`) at most 100 KB, so the serialised message state stays under 110 KB, inside the 128 KB queue message limit (Chat §4.1) **(default)** |
 | Reactions per message | 50 distinct emoji **(default)** |
 | Poll options | 2–10 **(default)** |
 | Channel topic / description | 250 / 1,000 characters **(default)** |
@@ -312,11 +313,11 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 |---|---|---|
 | Event reminders | **ReminderScheduler DO** (singleton) | `scheduled_triggers` (below) |
 | Event call starting (`call_starting` notification) | ReminderScheduler | Trigger kind `event_start` |
-| Focus-time DND start and end | ReminderScheduler | Kinds `focus_start` / `focus_end`, one pair per occurrence → availability update in UserHub (Notifications §5) |
-| Time-off status start and end | ReminderScheduler | Kinds `timeoff_start` / `timeoff_end` → availability update |
+| Focus-time DND start and end | ReminderScheduler | Kinds `focus_start` / `focus_end`, one pair per occurrence; write `user_availability.focus_until` and call UserHub `refreshAvailability()` (Notifications §5.7) |
+| Time-off status start and end | ReminderScheduler | Kinds `time_off_start` / `time_off_end`; write `user_availability.away_until` and call UserHub `refreshAvailability()` |
 | Status expiry | ReminderScheduler | Kind `status_expire` |
-| DND schedule (weekly quiet hours) | ReminderScheduler | Kinds `dnd_start` / `dnd_end`, expanded from the member's schedule, refilled hourly |
-| Manual DND expiry | ReminderScheduler | Kind **`dnd_until_end`**, created when a member sets DND "for 1 hour", "until tomorrow" and so on |
+| DND schedule (weekly quiet hours) | ReminderScheduler | Kinds `dnd_start` / `dnd_end`, expanded from the member's schedule, refilled hourly; each calls UserHub `refreshAvailability()` |
+| Manual DND expiry | ReminderScheduler | Kind **`dnd_until_end`**, created when a member sets DND "for 1 hour", "until tomorrow" and so on; calls UserHub `refreshAvailability()` |
 | Holds longer than 12 hours (e.g. an email held for a long time off) | ReminderScheduler | Kind `email_release`, instead of a queue delay |
 | **Offline unread email** | **Queues, delayed message** + D1 `pending_emails` | Below |
 | Hourly and daily email digests | Hourly cron | For members whose email delay is "hourly" or "daily": send one digest of still-unread items; daily digests go at the start of the member's working hours ([Notifications](notifications.md) §6) |
@@ -335,7 +336,7 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 **Offline unread email:**
 1. When a qualifying notification (mention, DM, thread reply, …) is created for an offline or inactive member, the consumer inserts a row into **`pending_emails`** with a uniqueness key `(user_id, conversation_id, window)`. `window` is the time bucket of the member's delay, so repeated events in one conversation share one row. Queues don't deduplicate, so this table does.
 2. If the row is new, a queue message is sent with `delaySeconds` = the member's delay (Queues allow at most **12 hours**).
-3. When it fires, the consumer re-checks: read cursor, activity, DND, time off and message deletion.
+3. When it fires, the consumer re-checks the member's **inbox records** for that conversation (Notifications §3.1: still unread, not retracted by message deletion), plus activity, DND and time off.
    - Read, or every message deleted: the row is deleted and nothing is sent.
    - **In DND or on time off:** the email is held. When DND or time off ends it's **re-evaluated: if still unread it's sent after the remaining delay, or immediately if the delay has passed** ([Notifications](notifications.md) §6). The release is a queue message if the remaining hold is 12 hours or less, otherwise an `email_release` trigger.
    - Otherwise it's sent, and the row is deleted.
@@ -360,7 +361,7 @@ CREATE TABLE pending_emails (
 CREATE TABLE scheduled_triggers (            -- in the ReminderScheduler DO's SQLite
   id TEXT PRIMARY KEY,                        -- idempotency key, e.g. "reminder:<event>:<occurrence>:<user>:<minutes>"
   fire_at INTEGER NOT NULL,                   -- UTC ms
-  kind TEXT NOT NULL,                         -- reminder | event_start | focus_start | focus_end | timeoff_start | timeoff_end
+  kind TEXT NOT NULL,                         -- reminder | event_start | focus_start | focus_end | time_off_start | time_off_end
                                               -- | status_expire | dnd_start | dnd_end | dnd_until_end | email_release (Zod-validated)
   target TEXT NOT NULL,                       -- JSON: { eventId, occurrence, userId, ... }
   fired_at INTEGER
@@ -451,11 +452,13 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `invitations.email` | Nullability | **NOT NULL** (copy-link invites always carry the email) | Identity §4.2 |
 | `invitations` | Add | `group_ids` | Identity §5 |
 | `groups`, `group_members` | Add | `groups.handle`; `group_members.role` (`manager`, `member`) | Identity §5 |
-| `sessions` | Add | `device_label`, `approx_location` | Identity §5 |
+| `sessions` | Add | `device_label`, `approx_location`, `previous_refresh_hash`, `rotated_at` (30-second refresh grace window) | Identity §4.5, §5 |
+| `users` | Add | `admin_reset_at`, `admin_reset_by`, `admin_reset_acknowledged_by` (no-email recovery flag) | Identity §4.6, §5 |
+| `auth_tokens.kind` | Values | `magic_link`, `password_reset`, `recovery`, `email_change`; plus a `payload` column (pending new email) | Identity §4.11, §5 |
 | `channels.type` | Add value | `public`, `private`, `dm`, **`group_dm`**. `dm_key` is required for `dm` and `group_dm`. Converting a group DM to a private channel clears `dm_key` and sets a name. | Chat §3.1 |
-| `channels` | Add | `topic`, `description`, `posting_policy` | Chat §15 |
+| `channels` | Add | `topic`, `description`, `posting_policy`, **`config_version`** (`INTEGER NOT NULL DEFAULT 0`, bumped on every change pushed by `applyConfig`) | Chat §3.4, §15 |
 | `channel_members` | Add | `can_post`, `hidden` (no per-conversation email delay; the delay lives only in `user_preferences.email_delay`, Notifications §7) | Chat §15 |
-| `messages` (D1 copy) | Add | `kind` (`user` or a system kind), `format` (rich-text JSON; the existing `body` column holds the plain-text copy, `text`), `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15 |
+| `messages` (D1 copy) | Add | `kind` (`user`, **`call_chat`**, or a system kind, Chat §4.6), `format` (rich-text JSON; the existing `body` column holds the plain-text copy, `text`), `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15 |
 | `thread_follows` | New table | Thread follows and per-thread read state. The TDD `follows` table remains for other object types. | Chat §15 |
 | `saved_items`, `sidebar_prefs`, `link_previews`, `message_previews` | New tables | As Chat §15 (`saved_items.state`: `in_progress`, `done`) | Chat §15 |
 | `channel_members.notify_level` | Values | `default`, `all`, `mentions`, `mute`, `nothing` | Notifications §7 |
@@ -474,12 +477,13 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `huddles.context_type` | Values | `channel` (including DMs), `document`, `event` (`project` reserved) | Calls §10 |
 | `huddles` | Add | `started_message_id`, `purge_after`, **`context_key`** (e.g. `channel:<id>`, `document:<id>`, `event:<id>`, `event:<id>:<occurrenceStart>`). The active-call unique index moves to `context_key WHERE ended_at IS NULL`. The call kind is **derived**, not stored. | Calls §3, §10 |
 | `huddle_messages` | New table | Keyed to the **context** (`context_type`, `context_id`, `context_key`), plus `huddle_id` as a nullable reference **without cascade**. Written through an outbox. | Calls §10, §5 here |
-| `call_rings` | New table | Missed-call records (UserHub holds live ring state) | Calls §10 |
+| `call_rings` | New table | Missed-call records (UserHub holds live ring state). `state`: `ringing`, `accepted`, `declined`, `missed`, `suppressed`, **`refused`** | Calls §10 |
 | `calendars.kind` | Values | `personal`, `group`, `channel`, `standalone`, `workspace`, `external` (holidays are generated, not stored) | Calendar §12 |
 | Calendar tables | New tables | `calendars`, `events` (with `range_start`, `range_end` in UTC ms for every event, and `purge_after`), `event_exceptions`, `event_attendees`, `event_reminders`, `event_notes`, `time_off`, `ics_feeds`, `ics_subscriptions` | Calendar §12 |
 | `time_off` | Columns | `deleted_at` for audit only; **no `purge_after`** (no Trash; hard-deleted 30 days after `deleted_at`, §5) | Calendar §12 |
 | UserHub room registry | Durable | SQLite table keyed `(kind, room_id, connection_id)`; kinds `channel`, `doc`, `board`, **`huddle`** (§12) | §3, §12 |
-| `user_preferences`, `notify_anyway_log` | New tables | Defined in Notifications §7 (`user_preferences.reminder_defaults`, `offline_cache`, `dnd_until`, `dnd_schedule`, ...) | Notifications §7 |
+| `user_preferences`, `notify_anyway_log`, **`user_availability`** | New tables | Defined in Notifications §7 (`user_preferences.reminder_defaults`, `offline_cache`, `dnd_until`, `dnd_schedule`, ...; `user_availability.focus_until`, `away_until`, `schedule_dnd_until`, ...) | Notifications §5.7, §7 |
+| `inbox_items` | Replace | As Notifications §7: adds `count`, `preview` (redactable, up to 140 characters), `last_event_at` and a `message_id` index; `UNIQUE (user_id, dedupe_key)`, with resolved records reopened in place | Notifications §3.1, §7 |
 | `scheduled_triggers`, `trigger_outbox` | New tables (ReminderScheduler DO SQLite) | §11.1 | §11 |
 | `pending_emails`, `rate_counters`, `ics_opt_outs` | New D1 tables | §11, §8, §15 | here |
 | Spec DDL `CHECK`s on growable enums | Rule | `calendars.kind`, `events.type`, `huddle_messages.context_type`, `auth_tokens.kind`, `drives.kind`, `item_activity.kind`, `pending_emails.state` and similar are **Zod-validated; the `CHECK` is omitted in migrations**, even where a spec's illustrative DDL shows one | here |
@@ -543,7 +547,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 - **Retention:** document and event in-call chat survives the 365-day huddle purge. External attendee emails are gone 90 days after the event ends.
 - **Export:** an export contains file versions, calendars, time off and hashed poll votes. It contains no sessions, auth tokens, passkeys, ICS feed tokens or ICS-in URLs. A restore into a new domain requires passkey re-registration and works with owner passwords.
 - **Admin settings:** every key in §7 is enforced, changeable only by the listed role, and writes its audit event.
-- **Rate limits:** each limit in §8 returns `rate_limited` with retry-after at the threshold, using its stated mechanism. The 51st external recipient in a day is refused. Sign-in delays follow the 1 s, 2 s, 4 s … schedule after the 3rd failure.
+- **Rate limits:** each limit in §8 returns `rate_limited` with retry-after at the threshold, using its stated mechanism. The 51st external recipient in a day is refused. Sign-in attempts 1–5 are immediate; the 6th onwards are delayed 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s.
 - **Outbound fetching:** preview and ICS fetches to IP-literal hosts `127.0.0.1`, `10.0.0.0/8`, `169.254.169.254`, `[::1]`, `fc00::/7`, `[::ffff:127.0.0.1]`, `2130706433` and `0177.0.0.1`, and redirects to them, are refused. Non-443 ports and `http://` URLs are refused. Responses over the byte cap are aborted. (DNS-rebinding protection is best-effort and not part of the pass criteria.)
 - **Email links:** a GET to any email link changes nothing (scanner-safe); only the confirmation POST does. An RSVP token works repeatedly until the event ends. Opted-out addresses can't be invited.
 - **Timers:**

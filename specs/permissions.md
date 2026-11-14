@@ -165,7 +165,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Freebusy viewer | Busy block only | Busy block only | **Full details** (public overrides freebusy) |
 | No calendar role, not invited | Nothing | Nothing | Nothing |
 
-- **Event calls:** invitees, plus anyone whose effective view of the event is "full details". Free/busy viewers can't join.
+- **Event calls:** the organiser, attendees and anyone whose effective view of the event is "full details" can **start or join** the call **(default)**. Free/busy viewers can't.
 - **Moving an event between calendars** needs editor on both calendars and organiser rights **(default)**.
 - **Orphaned private events:** if the organiser of a private event is disabled or deleted, an **owner or admin** can delete it. They see only a busy block and the attendee count, never the details. Audited.
 

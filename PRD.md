@@ -1,8 +1,9 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.4  
+**Version:** 1.5  
 **Date:** 14 November 2026  
+**Changes in 1.5:** second independent review decisions: admin self-access to groups and drives needs an owner; recovery links issued without email are flagged on the sign-in page and to every owner; first-release setup creates identity objects only, with other objects arriving with their milestones; editors moderate comments; viewers can start document calls; admins moderate private channels they belong to; orphaned private events can be removed by owners and admins; one Trash restore rule; calendar purge moves events to organisers; time off has no Trash (§5.3, §5.8, §6, §8, §10.1, §10.2, §18).  
 **Changes in 1.4:** Feature specs ([identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md)) and cross-cutting specs ([permissions](specs/permissions.md), [notifications](specs/notifications.md), [platform rules](specs/platform.md)) adopted. Calendar becomes a first-class feature (§5.10). Decisions from the spec interviews and the independent review are folded in: identity (§6), chat (§5.4), documents and files (§5.5, §5.7), calls (§5.8), notifications (§8), permissions (§10.1), retention (§10.2), export (§13), phases (§15) and limits (§18). **Where this PRD and a spec differ on feature detail, the spec wins.**  
 **Changes in 1.3:** Screen sharing and present mode (§5.8). Remaining review items addressed:
 - persona-to-role mapping (§3)
@@ -166,7 +167,7 @@ Initial conceptual views:
 - Today: prioritised items for the current day.
 - Upcoming: future commitments over the coming days/week.
 - Inbox: items requiring acknowledgement, response or action.
-- Assigned to me: tasks and issues assigned to the user.
+- Assigned to me: items assigned to the user that exist in the first release (for example calendar invitations awaiting a response and access requests to approve). Issue assignments arrive with projects (Phase 2).
 - Following: relevant activity from conversations, documents and projects the user follows.
 
 These are views over underlying workspace objects, not duplicate copies. Users can act on an item in context and return to the inbox without losing their place.
@@ -240,7 +241,7 @@ First-release document capabilities (detail in [specs/documents.md](specs/docume
   - headings, lists, tables, task lists, links, images and mentions
   - **slash commands**, **callouts**, **toggles** and **code blocks**
   - live **Officebox embeds** of messages, events, whiteboards and other documents, which respect access.
-- **Comments:** inline and page-level threads with mentions, resolve and reopen, and moderation by the document owner. No suggestion mode.
+- **Comments:** inline and page-level threads with mentions, resolve and reopen, and moderation (removing others' comments) by the document owner, editors and admins. No suggestion mode.
 - **Revision history:** automatic versions hourly for 7 days and daily for 90 days, plus named versions kept for the document's lifetime. Users can view and restore any version, and restoring creates a new version. **Comparing versions** is custom work (Tiptap's compare is a paid extension) and may move later.
 - **Offline:** the 20 most recently opened documents (up to 100 MB) stay editable offline and sync when back online. Caches are wiped on sign-out.
 - **Export and import:** export as **Markdown** or **PDF** (printed by the browser); import Markdown and HTML.
@@ -333,7 +334,7 @@ Users can share their screen in any call, or start a call by sharing straight fr
   - Officebox notifications are suppressed on the presenter's device while sharing
   - a reminder appears when sharing an entire screen.
 - **Devices:** sharing needs a desktop browser (Chrome, Edge, Firefox or Safari). Mobile browsers and the installed PWA can view shares but not share, because mobile browsers don't offer screen capture.
-- **Administration:** owners choose who may share (everyone by default, admins and channel admins only, or nobody). They can also cap share resolution at 720p or 1080p to limit bandwidth.
+- **Administration:** owners choose who may share: everyone (default), *admins* (workspace owners and admins, plus channel admins in channel calls), or nobody. They can also cap share resolution at 720p or 1080p to limit bandwidth.
 - **Not included:** remote control of another person's screen, annotation on shared screens, and recording (§14).
 
 #### Present mode for documents and whiteboards
@@ -428,6 +429,10 @@ First-release sign-in and security (detail in [specs/identity.md](specs/identity
   - Admins can disable, delete, change the email of, or issue a **recovery link** to *members*.
   - Doing any of those to admins or owners needs an owner.
   - Every use notifies the person, by email to their old address and with an in-app banner, and revokes their pending sign-in links.
+  - **Without email configured**, a recovery link is still allowed for members, but it's loudly flagged: the member sees a notice on the sign-in page ("An admin reset your account on …"), and every owner sees it flagged on the member list until one acknowledges it.
+  - An admin adding **themselves** to a group, or granting **themselves** access to a group drive or folder, needs an owner.
+- **Security notices** are sent for: recovery link issued, email changed, role changed, and passkey clone detected. They're never held or muted.
+- **What the identity milestone creates:** setup and account creation make identity objects only (the workspace, people, handles, groups, invitations, sessions and passkeys). `#general` and default channels arrive with chat, calendars with calendar, and drives with documents; each of those milestones backfills them for people and groups that already exist.
 - **Profiles:** name, unique **@handle** (shared namespace with groups), avatar, time zone, working hours, region, title, team, pronouns, phone, location and status. The directory shows contact details to every member.
 - **Groups** have **group managers**, and **@group mentions** notify members who can see the conversation.
 - **TOTP multi-factor authentication arrives after launch.**
@@ -478,7 +483,7 @@ Behaviour is specified in [specs/notifications.md](specs/notifications.md), incl
 - **Disclosure:** presence, senders and callers see "in do-not-disturb", "focusing until…" or "away until…".
 - **Offline email:** sent after 10 minutes unread by default; configurable to 5 or 30 minutes, hourly or daily digests, or off. Batched per conversation and cancelled when read.
 - **Emails for DMs, group DMs and private channels contain no message text** unless the member opts in.
-- **Security notices** (recovery link issued, email changed, role changed) are never held or muted.
+- **Security notices** (recovery link issued, email changed, role changed, passkey clone detected) are never held or muted.
 - **Web push** (PWA) arrives in Phase 2.
 
 Push payloads are generic by default and avoid sensitive message content. The client fetches the actual content after authenticating.
@@ -520,7 +525,7 @@ All object relationships, previews, inbox aggregations, search results and AI re
 | Role | Can |
 |---|---|
 | Owner | Everything an admin can, plus invite, promote and manage admins and owners, transfer ownership, and see installation, upgrade, backup and export settings. Owners must keep a password. At least one active owner must always exist. |
-| Admin | Invite members; disable, delete, change the email of, or issue recovery links to *members* (acting on admins or owners needs an owner, and the person is always notified); manage groups; configure workspace settings; archive or delete any channel or object (without reading private content); view the audit log. |
+| Admin | Invite members; disable, delete, change the email of, or issue recovery links to *members* (acting on admins or owners needs an owner, and the person is always notified); manage groups (adding **themselves** to a group or drive needs an owner); configure workspace settings; archive or delete any channel or object (without reading private content); delete messages in public channels and in private channels they're a member of; view the audit log. |
 | Member | Use the workspace; create public and private channels, documents, whiteboards and files; share what they own. |
 
 Guest and external-collaborator accounts are out of scope for the first release. A **guest** role is planned for Phase 2. Guests can see only the channels and documents explicitly shared with them. They never see the member directory, public channels or workspace-wide search, and they can't create channels or invite others. The `users.role` column reserves this value, so adding guests needs no schema redesign.
@@ -561,6 +566,13 @@ Channel roles are *channel admin* (rename, manage members, archive), *poster* (a
 - **Private events** show calendar editors a "busy" block they can't open or edit. Invitees always see the details.
 - **Time off:** everyone sees the dates; the type and note are visible only to the member.
 
+- **Orphaned private events:** if a private event's organiser is disabled or deleted, an owner or admin can delete it without seeing its details.
+- **Purged group and channel calendars:** each event moves to its organiser's personal calendar so attendees keep it.
+
+**Comments and calls on documents.** Document owners, editors and admins can remove others' comments. Anyone who can open a document, viewers included, can start a call on it.
+
+**Restoring from Trash** follows one rule everywhere: the item's owner, the person who deleted it, drive managers of its drive, and admins.
+
 **Projects (Phase 2).** Public or private, like channels.
 
 **Administrative access to private content.**
@@ -575,9 +587,9 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 
 | Data | Default retention | On deletion |
 |---|---|---|
-| Messages | Kept until deleted | The author or a channel admin deletes a message. Its body, attachments and reactions are removed immediately from the channel, the D1 copy and the search and AI indexes. A "message deleted" tombstone keeps thread structure intact. |
+| Messages | Kept until deleted | The author, a channel admin, or a workspace admin (public channels and private channels they belong to) deletes a message. Its body, attachments and reactions are removed immediately from the channel, the D1 copy and the search and AI indexes. A "message deleted" tombstone keeps thread structure intact. |
 | Channels | Kept until deleted | Archive is reversible. Delete moves the channel to Trash for 30 days, then it is purged with all its messages. |
-| Documents and whiteboards | Kept until deleted | Moved to Trash for 30 days and restorable by the owner or an admin, then purged along with all revisions and snapshots. |
+| Documents and whiteboards | Kept until deleted | Moved to Trash for 30 days, restorable under the Trash rule (§10.1), then purged along with all revisions and snapshots. |
 | Document revisions | Same as the parent document | Purged with the parent. |
 | Files | Kept until deleted | Moved to Trash for 30 days, then the R2 object and its metadata are purged. Files attached to a deleted message are purged with it. |
 | Inbox items | 90 days after being completed or dismissed | Purged automatically. Underlying objects are unaffected. |
@@ -586,11 +598,11 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 | AI interaction logs (Phase 3) | 30 days, configurable | Purged automatically. |
 | Call (huddle) history | 365 days | Metadata only (context, participants, times, rings). No audio, video or screen content is ever recorded. Separate from in-call chat. |
 | In-call chat | Life of its context | Channel and DM calls: a thread in the conversation. Document and event calls: kept with the document or event, not purged with the call record. |
-| Calendars and events | Kept until deleted | Trash for 30 days, restorable by the owner, organiser, calendar editors or an admin |
-| Time off | Until the member deletes it | Erased when the member is deleted (it can contain sensitive types) |
+| Calendars and events | Kept until deleted | Trash for 30 days, restorable under the Trash rule (§10.1). Purged group and channel calendars move their events to the organisers' personal calendars. |
+| Time off | Until the member deletes it | No Trash: a deleted entry is kept for audit and hard-deleted 30 days later. Erased when the member is deleted (it can contain sensitive types). |
 | External attendee emails | 90 days after the event ends (the last occurrence, for a series) | Purged automatically |
-| Drives and folders | Kept until deleted | Trash for 30 days, restorable by drive managers, editors of the parent folder or an admin |
-| Comments | Life of the document | Deleted immediately when the author or a moderator deletes them |
+| Drives and folders | Kept until deleted | Trash for 30 days, restorable under the Trash rule (§10.1) |
+| Comments | Life of the document | Deleted immediately when the author, the document owner, an editor or an admin deletes them |
 | File versions | With their file (at most 100 versions; the oldest are dropped first) | Purged with the file |
 | Polls and votes | Life of the channel | Votes are stored only as per-poll hashed keys |
 | Saved items | Until removed, or until access is lost or the message is deleted | — |
@@ -905,7 +917,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Availability | Inherits Cloudflare's platform availability; Officebox offers no separate uptime SLA (support plans cover response times). Chat and documents keep working when optional services (AI, email, calls) are unavailable. |
 | Performance | The targets in TDD §9.2. |
 | Security | OWASP ASVS Level 2 as the baseline for the web application (TDD §8). |
-| Limits (defaults) | Designed and tested for 100 members (soft limit 250). Messages up to 40 KB, with 20 attachments per message and 3 link previews. Group DMs of 3–8 people; 100 pins per channel. Files up to 2 GB, with 100 versions per file. Calls of 25 participants, one screen share per call. Offline documents: 20, up to 100 MB. External calendar subscriptions: 50 per workspace. External invitation recipients: 50 per member per day. Documents tested to 5 MB of content. All limits and rate limits: [platform §8](specs/platform.md). |
+| Limits (defaults) | Designed and tested for 100 members (soft limit 250). Messages up to 40 KB (rich text up to 100 KB), with 20 attachments, 3 link previews and 50 distinct reactions per message. In-call chat: 20 messages per 10 seconds per person. Group DMs of 3–8 people; 100 pins per channel. Files up to 2 GB, with 100 versions per file. Calls of 25 participants, one screen share per call. Offline documents: 20, up to 100 MB. External calendar subscriptions: 50 per workspace. External invitation recipients: 50 per member per day. Documents tested to 5 MB of content. All limits and rate limits: [platform §8](specs/platform.md). |
 
 ## 19. Imports, integrations and APIs
 
