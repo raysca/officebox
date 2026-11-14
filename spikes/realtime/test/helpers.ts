@@ -29,6 +29,7 @@ export async function upgrade(path: string, opts: { cookie?: string; origin?: st
 export class JsonClient {
   readonly received: any[] = [];
   closed: { code: number; reason: string } | null = null;
+  welcome: any = null;
   private waiters: Array<() => void> = [];
 
   constructor(readonly ws: WebSocket) {
@@ -47,7 +48,7 @@ export class JsonClient {
     const res = await upgrade(path, { cookie });
     if (res.status !== 101 || !res.webSocket) throw new Error(`upgrade failed: ${res.status} ${await res.text()}`);
     const client = new JsonClient(res.webSocket);
-    await client.next((m) => m.type === "welcome");
+    client.welcome = await client.next((m) => m.type === "welcome");
     return client;
   }
 

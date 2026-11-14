@@ -203,6 +203,29 @@ export class ChatChannel extends DurableObject<Env> {
     }
   }
 
+  /** System messages in the channel, e.g. "huddle started/ended" (TDD §3.6). Authored by the `system` user. */
+  async postSystemEvent(channelId: string, kind: string, details: Record<string, unknown>): Promise<number> {
+    if (!this.getMeta("channel_id")) this.setMeta("channel_id", channelId);
+    const body = kind === "huddle.started" ? "Huddle started" : kind === "huddle.ended" ? "Huddle ended" : kind;
+    const id = crypto.randomUUID();
+    const seq = this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      const seq = this.appendEvent("message.created", id, "system", null, { body, parentId: null, mentions: [], system: { kind, ...details } }, now);
+      this.sql.exec(
+        `INSERT INTO messages (id, seq, sender_id, parent_id, body, mentions, reactions, created_at, last_event_seq)
+         VALUES (?, ?, 'system', NULL, ?, '[]', '{}', ?, ?)`,
+        id,
+        seq,
+        body,
+        now,
+        seq,
+      );
+      return seq;
+    });
+    await this.afterEvent(seq);
+    return seq;
+  }
+
   /** Revocation (TDD §3.5): close every socket of a user, e.g. after removal from a private channel. */
   async closeConnections(userId: string, code = 4403, reason = "access removed"): Promise<number> {
     const sockets = this.ctx.getWebSockets(userId);

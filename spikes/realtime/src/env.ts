@@ -2,6 +2,8 @@ import type { ChatChannel } from "./chat-channel";
 import type { DocRoom } from "./doc-room";
 import type { UserHub } from "./user-hub";
 import type { WorkspacePresence } from "./presence";
+import type { HuddleRoom } from "./huddle-room";
+import type { FakeSfu } from "./fake-sfu";
 
 /** Full current state of one message, sent from a ChatChannel DO to the D1 copy (TDD §3.3). */
 export interface ProjectionMessage {
@@ -41,6 +43,13 @@ export interface Env {
   DOCS: DurableObjectNamespace<DocRoom>;
   USER_HUB: DurableObjectNamespace<UserHub>;
   PRESENCE: DurableObjectNamespace<WorkspacePresence>;
+  HUDDLES: DurableObjectNamespace<HuddleRoom>;
+  FAKE_SFU: DurableObjectNamespace<FakeSfu>;
+  SFU_MODE?: "fake" | "real";
+  REALTIME_APP_ID?: string;
+  REALTIME_APP_SECRET?: string;
+  TURN_KEY_ID?: string;
+  TURN_KEY_API_TOKEN?: string;
   PROJECTION_QUEUE: Queue<ProjectionMessage>;
   SESSION_SECRET: string;
   DEV_LOGIN?: string;

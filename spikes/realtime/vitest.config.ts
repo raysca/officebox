@@ -8,6 +8,7 @@ export default defineConfig({
       miniflare: {
         bindings: {
           SESSION_SECRET: "test-secret-0123456789abcdef0123456789abcdef",
+          SFU_MODE: "fake",
           TEST_MIGRATIONS: await readD1Migrations("./migrations"),
         },
       },
