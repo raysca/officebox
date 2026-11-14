@@ -1,9 +1,23 @@
 # Officebox — Technical Design Document (TDD)
 
 **Status:** Draft for engineering review  
-**Version:** 1.3  
+**Version:** 1.4  
 **Date:** 14 November 2026  
-**Companion to:** [Officebox PRD v1.3](PRD.md)  
+**Companion to:** [Officebox PRD v1.4](PRD.md) and the feature and cross-cutting specs in [`specs/`](specs/)  
+**Changes in 1.4:** brought in line with the eight specs ([Identity](specs/identity.md), [Chat](specs/chat.md), [Calls](specs/calls.md), [Calendar](specs/calendar.md), [Documents](specs/documents.md), [Permissions](specs/permissions.md), [Notifications](specs/notifications.md), [Platform](specs/platform.md)):
+- baseline schema value lists and new tables, with spec data-model sections authoritative for feature tables (§2.1)
+- the union permission rule and admin limits (§2.1)
+- ChatChannel message, poll and preview state, plus the ReminderScheduler DO (§2.2)
+- lifecycle and cascades delegated to Platform §3–§5 (§2.3)
+- search through drive and folder inheritance (§2.4)
+- passkeys, magic links and scanner-safe email links (§3.1)
+- the six-socket budget and role-downgrade propagation (§3.5)
+- call context keys, rings, handoff and in-call chat (§3.6)
+- comment anchors and compare (§4.3–4.4)
+- bindings, queues and settings (§6.1); export coverage (§7.5); scheduled jobs (§7.8)
+- outbound fetching and link previews at launch (§8.2)
+- new tests (§9.1) and open questions (§10).
+
 **Changes in 1.3:**
 - Huddles with screen sharing (HuddleRoom DO, §3.6) and present mode (§4.5).
 - Cookie and ticket authentication for WebSockets (§3.1).
@@ -138,6 +152,12 @@ Conventions:
 - Soft-deletable objects carry `deleted_at` and `purge_after` (§2.3). Normal queries filter `deleted_at IS NULL`.
 - Foreign keys are declared wherever both ends live in D1; D1 enforces them by default. Polymorphic references (`resource_grants`, `object_links`, `inbox_items`, `files.parent_*`) can't use foreign keys. The purge pipeline (§2.3) keeps them consistent.
 - The schema implements the role model and retention rules in PRD §10.1 and §10.2.
+- **Authority:**
+  - This section is authoritative for the **core** tables: installation, users, sessions, invitations, groups, channels, channel members, the message copy, resource grants, audit, jobs.
+  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §11.1.
+  - [Platform §14](specs/platform.md) reconciles every change.
+- **Enums that may grow are validated with Zod** in `packages/shared`, not with SQL `CHECK` constraints (Platform §14). The value lists are given as comments below. Fixed sets (for example `group_members.role`) may keep a `CHECK`.
+- **Baseline rule:** spec changes to a table are folded into the baseline migration of the milestone that first creates it, so no table is rebuilt. After a release, changes follow expand/contract (§6.5).
 
 ```sql
 -- Installation (single row)
@@ -159,7 +179,7 @@ CREATE TABLE users (
   email TEXT UNIQUE COLLATE NOCASE,  -- NULL only once deleted
   display_name TEXT NOT NULL,
   password_hash TEXT,                -- NULL once deleted (and for future SSO-only accounts)
-  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
+  role TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member | guest (guest reserved for Phase 2; Zod)
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted')),
   session_epoch INTEGER NOT NULL DEFAULT 0,  -- increment to invalidate every session
   created_at INTEGER NOT NULL,
@@ -170,7 +190,7 @@ CREATE TABLE users (
 
 CREATE TABLE invitations (
   id TEXT PRIMARY KEY,
-  email TEXT COLLATE NOCASE,         -- optional for manually shared links
+  email TEXT NOT NULL COLLATE NOCASE, -- always required; copy-link invites are bound to it (Identity §4.2)
   role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
   token_hash TEXT NOT NULL UNIQUE,   -- single-use; raw token only ever in the link
   invited_by TEXT NOT NULL REFERENCES users(id),
@@ -232,7 +252,7 @@ CREATE INDEX group_members_user ON group_members(user_id);
 -- Channels
 CREATE TABLE channels (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL CHECK (type IN ('public', 'private', 'dm')),
+  type TEXT NOT NULL,                -- public | private | dm | group_dm (Zod); dm_key required for dm and group_dm
   name TEXT,                         -- NULL for DMs
   topic TEXT,
   dm_key TEXT UNIQUE,                -- sorted participant IDs; one DM per participant set
@@ -252,7 +272,7 @@ CREATE TABLE channel_members (
   role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
   last_read_seq INTEGER NOT NULL DEFAULT 0,  -- written by the client, debounced
   notify_level TEXT NOT NULL DEFAULT 'default'
-    CHECK (notify_level IN ('default', 'all', 'mentions', 'none')),
+                                     -- default | all | mentions | mute (direct @you only) | nothing (Notifications §4)
   muted_until INTEGER,
   joined_at INTEGER NOT NULL,
   PRIMARY KEY (channel_id, user_id)
@@ -285,8 +305,7 @@ CREATE TABLE documents (
   type TEXT NOT NULL DEFAULT 'document' CHECK (type IN ('document', 'whiteboard')),
   title TEXT NOT NULL,
   owner_id TEXT NOT NULL REFERENCES users(id),
-  general_access TEXT NOT NULL DEFAULT 'restricted'
-    CHECK (general_access IN ('restricted', 'workspace_view', 'workspace_comment', 'workspace_edit')),
+  general_access TEXT NOT NULL DEFAULT 'restricted',  -- restricted | workspace_view | workspace_comment | workspace_edit (Zod)
   origin_channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -297,11 +316,11 @@ CREATE INDEX documents_owner ON documents(owner_id);
 
 -- Explicit grants on documents, whiteboards, folders, files (and projects in Phase 2)
 CREATE TABLE resource_grants (
-  resource_type TEXT NOT NULL CHECK (resource_type IN ('document', 'folder', 'file', 'project')),
+  resource_type TEXT NOT NULL,       -- document | whiteboard | folder | file | drive | calendar | project (Zod; Permissions §9)
   resource_id TEXT NOT NULL,
   principal_type TEXT NOT NULL CHECK (principal_type IN ('user', 'group', 'channel')),
   principal_id TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('owner', 'editor', 'commenter', 'viewer')),
+  role TEXT NOT NULL,                -- owner | manager (drives) | editor | commenter | viewer | freebusy (calendars) (Zod)
   granted_by TEXT NOT NULL REFERENCES users(id),
   created_at INTEGER NOT NULL,
   PRIMARY KEY (resource_type, resource_id, principal_type, principal_id)
@@ -313,8 +332,7 @@ CREATE TABLE folders (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   parent_id TEXT REFERENCES folders(id),
-  general_access TEXT NOT NULL DEFAULT 'workspace_view'
-    CHECK (general_access IN ('restricted', 'workspace_view', 'workspace_comment', 'workspace_edit')),
+  general_access TEXT NOT NULL DEFAULT 'restricted',  -- new items follow their container (Permissions §5.2)
   created_by TEXT NOT NULL REFERENCES users(id),
   created_at INTEGER NOT NULL,
   deleted_at INTEGER,
@@ -329,9 +347,11 @@ CREATE TABLE files (
   size_bytes INTEGER NOT NULL,
   sha256 TEXT,
   uploaded_by TEXT REFERENCES users(id),
-  folder_id TEXT REFERENCES folders(id),   -- standalone file: folder access applies
-  parent_type TEXT CHECK (parent_type IN ('message', 'document', 'issue')),
+  folder_id TEXT REFERENCES folders(id),   -- drive file: folder/drive access applies; versioned (Documents §6)
+  parent_type TEXT,                        -- message | document | issue (Zod)
   parent_id TEXT,                          -- attachment: inherits the parent's access
+  -- Message-owned files (parent_type = 'message') never get a folder or versions and are deleted with the message.
+  -- "Save to folder" copies one into a new drive file (copied_from_file_id). Platform §14.
   created_at INTEGER NOT NULL,
   deleted_at INTEGER,
   purge_after INTEGER,
@@ -460,18 +480,41 @@ CREATE TABLE embedding_jobs (        -- Phase 3
 CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 ```
 
-**Permission resolution** (implements PRD §10.1). The Worker resolves access in this order and stops at the first match:
+**Schema changes from the specs.** Platform §14 has the complete table. In summary:
+
+| Area | Change | Defined in |
+|---|---|---|
+| Identity | `users` profile columns, `handle` (copy of the authoritative `handles` table) and `pending_security_notice`; new `handles`, `passkeys`, `auth_tokens`; `invitations.group_ids`; `groups.handle`; `group_members.role` (manager, member); `sessions.device_label` / `approx_location` | Identity §5 |
+| Chat | `channels.topic` / `description` / `posting_policy`; `channel_members.can_post` / `hidden` / `email_delay`; message copy columns `kind`, `format`, `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` (`body` stays the plain-text copy); new `thread_follows`, `saved_items` (`in_progress` / `done`), `sidebar_prefs`, `link_previews`, `message_previews` | Chat §15 |
+| Permissions | `resource_grants` value lists; `general_access` values including `workspace_freebusy` (calendars only); `access_requests` with `expires_at` and a unique pending request per requester and object | Permissions §9 |
+| Documents | `drives`, `file_versions`, `stars`, `recent_items`, `comment_threads`, `comments`, `item_activity`; `folders.drive_id` / `channel_id`; `documents.folder_id` / `drive_id` / `created_by`; `files.drive_id` / `current_version` / `copied_from_file_id` | Documents §9 |
+| Calendar | `calendars`, `events` (with `range_start` / `range_end` UTC ms on every event), `event_exceptions`, `event_attendees`, `event_reminders`, `event_notes`, `time_off`, `ics_feeds`, `ics_subscriptions`. Holidays are generated, not stored. | Calendar §12 |
+| Calls | `huddles.context_type` adds `event`; new `huddles.context_key` carries the active-call unique index; new `huddle_messages` (keyed to the context, no cascade from `huddles`) and `call_rings` | Calls §10, §3.6 here |
+| Notifications | `user_preferences` (email delay, DM text opt-in, DND, reminder defaults, offline cache, shortcuts), `notify_anyway_log`; `notification_preferences` keyed by `user_id, event_type, delivery` | Notifications §7 |
+| Timers | `scheduled_triggers` in the ReminderScheduler DO | Platform §11.1 |
+
+**Permission resolution** ([Permissions](specs/permissions.md) §5). The Worker resolves access as follows:
 
 1. **Account:** the user's status must be `active`.
-2. **Workspace role:** owners and admins get *management* rights (rename, archive, delete, manage members). They do **not** get implicit read access to private channels, DMs or restricted documents.
-3. **Channels:** public channels are readable by every member. Private channels and DMs require a `channel_members` row.
-4. **Documents, folders and files:**
-   - Explicit `resource_grants` to the user, to any of their groups, or to a channel they belong to. The highest role wins.
-   - Otherwise, `general_access`.
-   - Attachments resolve through their parent object.
+2. **Channels and messages** don't use grants. Access comes from channel type and membership, or DM participation. Members add people to private channels; channel admins remove them. Message-owned files inherit their message's access.
+3. **Documents, whiteboards, files, folders and drives use the union rule.** The effective role is the **highest** of:
+   - grants on the item
+   - grants on each ancestor folder up to the drive root
+   - grants on the drive, plus built-in drive roles (My files → owner; group drive → group members edit)
+   - the channel-folder rule (channel members edit; public channel → everyone can view)
+   - the general access of the item and of each ancestor.
+
+   Grants count for the user, any of their groups, and any channel they're in. There is no deny: sharing can only widen. New items follow their container (Permissions §5.2), so nothing starts workspace-wide unless its folder is.
+4. **Calendars** use the same rule without folders: grants, built-in kind rules and general access. **Event visibility then filters the result** (Calendar §4.5): private events show as busy blocks to editors who aren't the organiser or an attendee; invitees always see full details.
 5. **Otherwise:** no access.
 
-Every privileged action by an owner or admin on a private object is written to `audit_log`.
+This replaces v1.3's "stop at the first match".
+
+**Admin limits** (Permissions §6):
+- Owners and admins get management rights (rename, archive, delete, manage members), with **no implicit read access** to private channels, DMs or restricted items. Admins can't join private channels.
+- Admins may change email, issue recovery links, disable and delete **members** only. Acting on admins or owners, and inviting or promoting admins, needs an owner.
+- Every recovery link or email change notifies the person (old address plus an in-app banner) and revokes their other pending tokens.
+- Every privileged action on a private object is written to `audit_log`.
 
 ### 2.2 Durable Object SQLite schemas
 
@@ -528,6 +571,13 @@ Presence and typing state are not stored in SQLite (§3.4).
 
 **Deletion redaction.** A `message.deleted` event sets `messages.body`, `attachments`, `mentions` and `reactions` to NULL. In the same transaction it overwrites the `payload` of all earlier events for that message with `{"redacted":true}`. Deleted content is never served through replay.
 
+**Message state and new event types** (Chat §15, §16):
+- **Message state** adds `kind` (`user`, or a system kind such as `joined`, `renamed`, `call_started`, `call_ended`, `missed_call`, `poll_closed`, `pinned` or `welcome`), `format` (rich-text JSON), `body` (plain-text copy), `mentions`, `system_payload`, `reply_count`, `last_reply_at`, `thread_participants`, `also_in_channel`, `forwarded_from` (a live reference, never copied content) and `previews`.
+- **New event types:** `message.pinned` / `message.unpinned`, `poll.created` / `poll.voted` / `poll.closed`, `preview.attached` / `preview.removed`.
+- **Polls** live in the DO's `polls` table (with a per-poll `poll_secret`) and `poll_votes` (`poll_id`, `voter_key`, `option_ids`).
+- **Anonymous poll exception:** for `poll.voted` on an anonymous poll, the event's `actor_id` is the per-poll **`voter_key` = HMAC(poll_secret, user ID)**, never a user ID. The member's identity can't be recovered from the event log, the outbox or exports (`poll_secret` is excluded from exports).
+- **System messages** are written by typed RPCs, for example `postSystemEvent` from the HuddleRoom for `call_started`. They may post into announcement, read-only and archived channels.
+
 **DocRoom / BoardRoom DO** — one per document/whiteboard:
 
 ```sql
@@ -583,11 +633,19 @@ CREATE TABLE online (
 );
 ```
 
+**ReminderScheduler DO** — a single instance, which can be sharded by `hash(userId)` later. It holds `scheduled_triggers` (Platform §11.1):
+- **Trigger kinds:** `reminder`, `event_start` (raises `call_starting`), `focus_start` / `focus_end`, `timeoff_start` / `timeoff_end`, `status_expire`, `dnd_start` / `dnd_end`.
+- **Filling:** a rolling 48-hour expansion of recurring events and per-attendee time zones. The calendar service updates triggers on every change, and an hourly refill job extends the window.
+- **Firing:** one alarm, set to the earliest unfired trigger. Each fire is idempotent (marked fired in the same transaction as enqueueing its effect).
+- **Catch-up:** triggers less than 1 hour overdue fire; older ones are dropped and logged.
+
+**HuddleRoom** keys calls by `context_key` (§3.6).
+
 ### 2.3 Deletion, retention and purge
 
 This implements PRD §10.2.
 
-**Soft delete (Trash).** Deleting a channel, document, whiteboard, folder, file, project or issue sets `deleted_at = now` and `purge_after = now + 30 days`. The object disappears from normal queries, search and previews straight away. An owner or admin restores it by clearing both fields.
+**Soft delete (Trash).** Deleting a channel, document, whiteboard, folder, drive, drive file, calendar, event, project or issue sets `deleted_at = now` and `purge_after = now + 30 days`. The object disappears from normal queries, search and previews straight away. Restoring it clears both fields; who may restore depends on the container (Platform §5): the owner, a drive manager, the calendar owner or an admin.
 
 **Purge pipeline.** A daily Cron Trigger finds rows with `purge_after < now` and inserts `purge_jobs` rows. Each job moves through idempotent stages, delivered on the `purge` Queue with retries and backoff. Failed jobs appear in admin health (§7.1).
 
@@ -605,22 +663,18 @@ This implements PRD §10.2.
 3. Attached files get purge jobs with `run_after = now`.
 4. Vectors are invalidated (Phase 3).
 
-**User deletion.** One D1 batch does the following and writes an audit entry:
+**Cascades for new containers** ([Platform](specs/platform.md) §4 defines each row):
+- **Channel purge** moves the documents in its channel folder to their creators' My files (an admin's if the creator was deleted), keeping explicit shares. It deletes message-owned files and link previews with the messages. It cleans up polls, pins, saved items, `thread_follows`, sidebar sections and grants where the channel is the principal. Huddle records keep their `context_id`.
+- **Group deletion** sends the group drive to Trash, archives the group calendar, removes the group's grants and releases its handle. Expanded attendees stay as individuals.
+- **Calendar deletion** (standalone and external kinds only) deletes its events, attendee rows and triggers.
+- **Drive deletion** sends the drive and its contents to Trash; drive managers or admins restore it.
+- **Event deletion** applies to a series or an occurrence.
+- **File purge** deletes every version.
+- **Comment threads** are deleted with their document.
 
-- Sets `email` and `password_hash` to NULL and `display_name` to "Former member".
-- Sets `status` to `deleted` and increments `session_epoch`.
-- Deletes the user's `sessions`, `mfa_factors`, `notification_preferences`, `follows`, `inbox_items`, user-principal `resource_grants` and `group_members` rows.
-- Transfers `documents.owner_id` to the acting admin.
+**Member lifecycle and personal-data erase.** [Platform](specs/platform.md) §3 defines, per feature, what happens on **disable** (everything kept; sign-in blocked; sockets closed, including calls) and **delete** (personal data erased). §3.1 there is the authoritative erase list. It covers profile fields, passkeys, auth tokens, sessions, preferences, follows, saved items, stars, recent items, time off, event notes and reminders, ICS feeds and subscriptions, inbox items, access requests, and the avatar object in R2. It also re-renders `@handle` text as "Former member" in message copies and the search index. Ownership transfers on delete: My files, organised events and owned calendars go to an admin. Messages keep `sender_id`.
 
-Messages keep `sender_id`. Clients render deleted senders as "Former member". **Disable** only sets `status` to `disabled` and increments `session_epoch`.
-
-**Time-based retention.** The daily Cron Trigger also:
-
-- deletes `audit_log` rows older than the configured retention (default 365 days)
-- deletes resolved `inbox_items` past `purge_after`
-- trims each active ChatChannel DO's event log to its horizon
-- deletes expired invitations, sessions and WebSocket tickets
-- deletes `huddles` rows past `purge_after` (365 days; metadata only).
+**Retention and Trash** for every object are in [Platform](specs/platform.md) §5, including who may restore from each container. The daily cron runs those rules: audit log, resolved inbox items, event-log horizons, expired invitations, sessions, tickets and auth tokens, huddle metadata (365 days), call rings, outside-attendee emails, access requests and link previews. **In-call chat** for document and event calls is kept for the life of its context, not with huddle metadata.
 
 **Platform recovery windows.** D1 Time Travel and Durable Object point-in-time recovery keep up to 30 days of history. Officebox recommends an R2 lifecycle rule that expires noncurrent object versions after 30 days. Purged data is therefore unrecoverable no more than about 30 days after purge, as stated in PRD §10.2.
 
@@ -653,13 +707,15 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 - Messages: the message projection consumer (§3.3) inserts, replaces or deletes rows in `search_index` in the same D1 batch as the `messages` upsert.
 - Documents and whiteboards: once updates have been quiet for 5 seconds (and at most once every 60 seconds), the DO extracts the title and plain text and queues it through its outbox to the `search-projection` Queue. The consumer upserts `document_text` and `search_index` together.
 - File names are indexed when uploaded. File contents are not indexed in Phase 1.
+- When a member is deleted, `@handle` text in the plain-text message copy and in `search_index` is re-rendered as "Former member" (Platform §3).
 
 **Querying.**
 
 1. A CTE builds the requesting user's accessible scopes, following the §2.1 rules:
    - public channels
    - channels from `channel_members`
-   - documents and folders reachable through `resource_grants`, group membership or `general_access`.
+   - documents, whiteboards, drive files and folders reachable under the **union rule** (§2.1): grants on the item, its ancestor folders and its drive, built-in drive roles, the channel-folder rule (members of the channel, or everyone for public channels), and general access along the chain
+   - message-owned files, searchable by file name only within conversations the user can read.
 2. The FTS `MATCH` results are joined to those scopes and ranked by `bm25()`, with `snippet()` for highlights.
 3. Results for deleted or trashed objects never appear, because deletion removes their rows from `search_index`.
 
@@ -674,7 +730,7 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 
 ### 3.1 Connection lifecycle and authentication
 
-1. The client signs in with `POST /auth/session`. The Worker sets two cookies, both `HttpOnly`, `Secure` and `SameSite=Lax`:
+1. The client signs in with `POST /auth/password`, a magic link or a passkey (below). The Worker sets two cookies, both `HttpOnly`, `Secure` and `SameSite=Lax`:
    - `ob_session`: a short-lived (15-minute) signed access token carrying user ID, session ID and `session_epoch`.
    - `ob_refresh`: a 30-day rotating refresh token, scoped to `/auth/refresh` and stored hashed in `sessions`.
 
@@ -688,6 +744,18 @@ CREATE VIRTUAL TABLE search_index USING fts5(
    - The ticket is single-use, valid for 30 seconds and bound to one target. It is passed as `?ticket=` and stored hashed in `ws_tickets`.
    - A logged URL therefore never leaks a reusable credential.
 7. When the DO wakes from hibernation, the constructor runs and state is restored from the attachments.
+
+**Sign-in methods** (Identity §4.4):
+- **Password:** `POST /auth/password`.
+- **Magic link:** single-use and valid for 15 minutes, on any device.
+- **Passkeys:** WebAuthn with **discoverable credentials**.
+  - User verification is **"preferred"**.
+  - `sign_count` is checked, and a backwards count is rejected as a possible clone.
+  - Credentials are bound to the **relying-party ID (the domain)**: a domain change or a restore to a new domain leaves passkeys unusable. Registering on `*.workers.dev` warns about this.
+- **Owners must keep a password**; members may be passkey-only.
+- The WebAuthn library choice needs a spike before M1 (§10).
+
+**Email links are scanner-safe** (Platform §10). Magic-link, password-reset, recovery, invitation, email-confirmation and RSVP links open a **confirmation page**. Only a **POST** from that page uses the token, so mail scanners and link prefetchers can't use it up. Tokens live in `auth_tokens`, hashed. RSVP tokens are per attendee and reusable until the event ends.
 
 ### 3.2 Hibernation
 
@@ -709,6 +777,14 @@ The ChatChannel DO is the source of truth. D1 receives a guaranteed, idempotent 
 | `reaction.add` / `reaction.remove` | `messageId`, `emoji` | Channel members |
 
 Limits: body up to 40 KB, which stays far below the 8 MB DO row limit; up to 20 attachments per message.
+
+**Additions** (Chat §16, §17):
+- `message.send` gains `format` (rich-text JSON), `mentions` (users and groups, plus channel and here flags), `alsoInChannel` (thread replies) and `forwardOf` (a live reference to the source message).
+- New operations: `message.pin` / `message.unpin`, `poll.create` / `poll.vote` / `poll.close` and `preview.remove`.
+- The projected state includes the new message columns (§2.1, §2.2).
+- **Group DMs:** `group_dm` channels (3–8 participants, fixed membership) use `dm_key` like DMs. Converting one to a private channel re-types it, clears `dm_key` and asks for a name.
+- **Mentions of non-members:** in a public channel they notify; in a private channel the composer offers to add the person instead.
+- **Rate limits** follow Platform §8: 10 messages per 10 s per conversation, and `@channel` / `@here` once per 5 minutes.
 
 **Write path:**
 
@@ -751,11 +827,15 @@ Presence is never the source of truth for durable data.
 
 ### 3.5 Connection topology, fan-out and revocation
 
-**At most three WebSockets per tab:**
+**Connection budget** ([Platform](specs/platform.md) §12; replaces v1.3's "at most three"):
 
-1. **Hub socket** (always open) to the user's UserHub DO. It carries inbox and notification events, unread changes for *all* channels, workspace presence and revocation commands.
-2. **Channel socket** to the ChatChannel DO of the channel currently on screen. Switching channels closes the previous one.
-3. **Document socket** to the DocRoom or BoardRoom DO of the document currently open.
+1. **Hub socket** (always open) to the user's UserHub DO. It carries inbox and notification events, unread changes for *all* channels, workspace presence, rings and revocation commands.
+2. **Channel socket** to the ChatChannel DO of the conversation on screen. Switching closes the previous one.
+3. **Document socket** to the DocRoom or BoardRoom DO of the item on screen.
+4. **Call socket** to the HuddleRoom while in a call.
+5. **Embedded whiteboard** sockets, only while "edit in place" is active.
+
+Other embeds (messages, events, document previews, link previews) refresh through hub `activity` events and never open sockets. **Hard cap: 6 sockets per tab.** Opening another closes the least recently used embedded-board socket.
 
 Tabs of the same browser elect a leader with `BroadcastChannel` and share one hub socket.
 
@@ -777,7 +857,12 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 
 **Keepalive.** Every DO sets `setWebSocketAutoResponse` for application ping/pong. Keepalives then neither wake the object nor add billed duration. Clients pause document awareness updates while their tab is hidden, so idle open documents can hibernate.
 
-**Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel or document, the Worker calls `closeConnections(userId, reason, scope)`:
+**Role downgrades and inherited-access changes** (Permissions §8, Platform §12):
+- When someone's effective role on an open object drops (for example editor → viewer, a folder or drive grant changes, an item moves, or a channel is made private), the Worker sends `access.changed { userId, object, newRole }`, using `updateRole` through the room registry.
+- The DO updates the socket attachment and sends `{ type: "role", role }`. A DocRoom then treats the socket as read-only; losing all access closes it with `4403`.
+- **Offline edits** that reach the server after access was lost are rejected. The client keeps them locally and offers to export them.
+
+**Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel, document or call context, the Worker calls `closeConnections(userId, reason, scope)`. The room registry kinds are `channel`, `doc` and **`huddle`**, so revocation also closes HuddleRoom sockets and the user's SFU tracks:
 
 - on the user's UserHub, and
 - on every affected ChatChannel, DocRoom or BoardRoom DO.
@@ -794,7 +879,9 @@ Media runs on **Cloudflare Realtime SFU**. Signalling and huddle state run in a 
 ```sql
 CREATE TABLE huddles (
   id TEXT PRIMARY KEY,
-  context_type TEXT NOT NULL CHECK (context_type IN ('channel', 'document', 'project')),
+  context_type TEXT NOT NULL,          -- channel (including DMs) | document | event (project reserved) (Zod)
+  context_key TEXT NOT NULL,           -- channel:<id> | document:<id> | event:<id> | event:<id>:<occurrenceStart>
+  started_message_id TEXT,             -- channel/DM: the "call started" message (in-call chat thread root)
   context_id TEXT NOT NULL,
   started_by TEXT REFERENCES users(id),
   started_at INTEGER NOT NULL,
@@ -805,7 +892,7 @@ CREATE TABLE huddles (
 );
 CREATE INDEX huddles_context ON huddles(context_type, context_id, started_at);
 -- At most one active huddle per context
-CREATE UNIQUE INDEX huddles_active ON huddles(context_type, context_id) WHERE ended_at IS NULL;
+CREATE UNIQUE INDEX huddles_active ON huddles(context_key) WHERE ended_at IS NULL;
 
 CREATE TABLE huddle_participants (
   huddle_id TEXT NOT NULL REFERENCES huddles(id) ON DELETE CASCADE,
@@ -864,6 +951,24 @@ Example: a 30-minute share to 8 viewers at 2 Mbps is about 3.6 GB. The usage pan
 
 **Security.** Media is encrypted in transit with DTLS-SRTP between each client and the SFU, and is decrypted at the SFU for forwarding. It is not end-to-end encrypted, and the PRD says so. The app secret never leaves the Worker.
 
+**Additions** ([Calls](specs/calls.md); its data model, §10, is authoritative):
+- **Contexts:**
+  - channel and DM calls (M4); event calls (M5b; each recurring occurrence has its own `context_key`); document calls (M6)
+  - announcement channels allow calls for anyone who can read them; **archived channels don't**
+  - event calls are open to invitees plus anyone with details-level access to the calendar.
+- **Ringing:**
+  - DM and group-DM calls ring through each participant's UserHub (`call.ring`, `call.ring.cancel`, `call.accepted-elsewhere`), with a **30-second timeout alarm on the caller's UserHub**
+  - DND, focus time and time off suppress rings; unanswered or suppressed rings write a `call_rings` record and a `missed_call` notification
+  - **call waiting:** a person already in a call is rung with "you're in a call", and accepting asks them to leave first
+  - rate limit: 5 rings per 10 minutes to the same person.
+- **One connection per person:** joining from a second device hands the call over, and the old socket closes with `4002 "moved"`.
+- **One call at a time:** the UserHub records `currentCall`, and joining another call needs confirmation.
+- **Moderator hand-over:** if the host leaves, moderation passes to a present channel admin, document owner or event organiser. In DMs and group DMs any participant may stop a share. Otherwise it passes to the earliest remaining participant.
+- **In-call chat:**
+  - channel and DM calls post it as a thread under `started_message_id`, through a typed ChatChannel RPC
+  - document and event calls write `huddle_messages`, keyed to the **context**, through an **outbox**; it's kept for the life of the context and doesn't cascade from `huddles`.
+- **Raise-hand queue and reactions** are relayed through the HuddleRoom and never stored.
+
 ## 4. Collaborative editing design (Yjs on Durable Objects)
 
 ### 4.1 Server architecture
@@ -908,6 +1013,10 @@ The browser's session cookie authenticates the WebSocket upgrade. The Worker val
   - To view a version, the client loads it into a temporary read-only `Y.Doc`.
   - To restore one, the client writes that content into the live document as a new change. Collaborators converge normally and history is kept.
 - **Search projection:** see §2.4.
+- **Comments** (Documents §4.4) are stored in D1 (`comment_threads`, `comments`), not in the Yjs document. Each thread is anchored with **Yjs relative positions** plus the quoted text.
+  - Orphan detection runs on the client when rendering, and on the DocRoom during compaction for notifications.
+  - After a version restore, threads are **re-anchored by matching their stored quote**; otherwise they become orphaned.
+- **Compare versions** is custom work, because Tiptap's snapshot compare is a paid extension: a text diff of two document states rendered from ProseMirror JSON. It may move to Later if it's too large (§10).
 
 ### 4.4 Permissions
 
@@ -918,6 +1027,8 @@ Permissions are resolved by the Worker before the WebSocket reaches the DO. The 
 - No access: connection is rejected.
 
 Link previews and AI retrieval always re-check permissions in the Worker/D1; the DO is not the authority for cross-object access.
+
+**Role downgrades on open sockets:** an `updateRole` call (§3.5) switches an editor's socket to read-only immediately, without reconnecting. Further updates are refused with the permission-denied message.
 
 
 ### 4.5 Present mode
@@ -982,6 +1093,10 @@ The repository includes a `wrangler.jsonc` with:
 - Cron Triggers (daily maintenance: purge, retention, reconciliation, release check).
 - Observability (Workers Logs) enabled. This is needed for generated setup tokens (§6.8).
 - Build-time variable `OFFICEBOX_VERSION`.
+- **v1.4 additions:**
+  - the **ReminderScheduler** Durable Object (§2.2)
+  - Queues: `link-preview-fetch` and `ics-fetch` (outbound fetching, §8.2), and `unread-email`, whose delayed messages (`delaySeconds`) implement the per-recipient offline-email timer (Platform §11)
+  - the admin settings keys listed in Platform §7 (for example `external_invites`, `holiday_regions`, `offline_documents_enabled`, `welcome_post_enabled`, `default_channels`, `screen_share` and `link_previews_enabled`), stored in `installation.settings`.
 
 The Deploy to Cloudflare button copies the repository into the customer's GitHub account, provisions the supported resources and runs the deploy command:
 
@@ -1231,6 +1346,14 @@ CREATE TABLE exports (
 4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`.
 5. It completes setup. All sessions are invalid and users with MFA must re-enrol.
 
+**Coverage** ([Platform](specs/platform.md) §6 is authoritative):
+- **Added:** calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads.
+- **Excluded:**
+  - sessions, `auth_tokens`, `ws_tickets` and MFA secrets
+  - **passkeys** (bound to the domain; members re-register after a restore to a new domain)
+  - ICS feed tokens, and ICS-in subscription URLs (subscriptions are exported without URLs and must be re-entered)
+  - `poll_secret`.
+
 **Testing:** CI exports a fixture installation, restores it into a fresh one and compares them, on every release.
 
 ### 7.6 Email delivery
@@ -1294,6 +1417,16 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
 | ChatChannel event-log trimming, D1 copy reconciliation, version thinning | Daily | §2.2, §3.3, §4.3 |
 | Release manifest check | Daily | §6.7 |
 | Usage panel refresh | Daily | §7.9 |
+| ICS-in refresh (queue a fetch per due subscription) | Hourly | Platform §11 |
+| Scheduled-trigger refill (48-hour window) | Hourly | §2.2, Platform §11.1 |
+| RSVP-response batch per organiser | Hourly | Notifications §3 |
+
+Timers that aren't cron jobs (Platform §11):
+- **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule.
+- **Delayed `unread-email` queue messages.** They're paused and re-enqueued during DND and time off.
+- **Channel DO** poll auto-close.
+- **UserHub:** ring timeout, and the DND-end "while you were away" summary.
+- **HuddleRoom:** call end and hand-over deadline.
 | Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
 
 ### 7.9 Usage, cost and telemetry
@@ -1350,8 +1483,21 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - Markdown is rendered client-side and sanitised with DOMPurify.
   - Links get `rel="noopener noreferrer"`, and `javascript:` URLs are rejected.
 - **Link previews:**
-  - Phase 1 previews only internal Officebox objects, with permission checks.
-  - External unfurling is deferred. When it is added, it will run server-side without cookies, with size and time limits, and with private address ranges blocked. HTML will be parsed, not rendered.
+  - internal Officebox objects are always previewed, with permission checks
+  - **external link previews ship at launch** (Chat §11) through the outbound-fetch rules below.
+- **Outbound fetching** ([Platform](specs/platform.md) §9) covers link previews, ICS-in and preview images:
+  - HTTPS only
+  - private, loopback, link-local and metadata IP ranges blocked after DNS resolution and on every redirect; at most 3 redirects
+  - timeouts of 5 s for previews and 10 s for ICS
+  - streaming byte caps: 1 MB HTML, 5 MB ICS, 1 MB images
+  - content-type checks, no cookies, a fixed user agent, and queued with per-user and per-workspace rate limits
+  - preview images stored at original size, up to 1 MB, with **no server-side resizing**
+  - ICS-in URLs encrypted with a Worker secret and masked in the UI.
+- **Outside event invitations** (Calendar §8):
+  - a fixed template, "*Name* invited you via Officebox (*Workspace*)", with title, description and location as escaped plain text
+  - an opt-out link
+  - 50 outside recipients per member per day; admins can turn them off or restrict them to admins.
+- **Rate limits and quotas** are set out in Platform §8.
 - **First-run setup:** protected by a one-time setup token with an atomic claim, and disabled after use (§6.8).
 - **Upgrades:** the running application holds no Cloudflare or GitHub credentials. Release tags are signature-verified against a pinned key before a sync PR is opened (§6.4).
 - **Secrets:** provider keys in the AI Gateway Secrets Store. Email, Realtime and TURN credentials as Worker secrets. No provider keys in D1 or browser code.
@@ -1369,6 +1515,8 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - Every file response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
 - **Previews:** images and PDFs render in the browser, with PDFs in a sandboxed frame. Office documents are not converted server-side in Phase 1.
 - **Malware scanning** is out of scope (PRD §14), and the documentation says so.
+- **Avatars** accept PNG, JPEG or WebP only, and are cropped on the client (Identity §4.7).
+- **Message-owned vs drive files:** chat attachments belong to their message and are deleted with it. "Save to folder" creates an independent, versioned drive file (Documents §6).
 
 ### 8.4 Realtime, huddles and devices
 
@@ -1407,6 +1555,13 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Search test: results match permitted messages and documents only. Deleting or trashing removes results. **Rebuild search index** reproduces the index.
 - Revocation test: disabling a user, or removing them from a private channel or document, closes their open sockets within 5 seconds.
 - Fan-out test: a 100-message burst in a busy channel produces at most one UserHub call per online member per consumer batch, and offline members get none.
+- Permission matrix test (Permissions §11): every action × role × object type in Permissions §4, including the union rule, channel-made-private warnings and private-event visibility. It runs in CI.
+- Lifecycle matrix test (Platform §15): disable and delete for every feature, including closing call sockets and erasing personal data.
+- Cascade tests: channel, group, calendar, drive and event deletions follow Platform §4, including channel purge moving folder documents to their creators.
+- Export exclusions: no `auth_tokens`, passkeys, ICS tokens or URLs, or `poll_secret` in an export; anonymous votes appear only as voter keys.
+- SSRF tests: previews and ICS fetches refuse private IPs, including after redirects and DNS rebinding.
+- Scanner-safe links: a GET of a magic, reset, recovery, invitation or RSVP link changes nothing; only the confirmation POST does.
+- Timer catch-up: after simulated downtime, ReminderScheduler triggers less than 1 hour overdue fire once, older ones are dropped, and no trigger fires twice.
 - Compaction test: a long editing session compacts on the size and count thresholds. A document with a snapshot over 4 MB loads correctly from chunks. Hourly versions appear and restore correctly.
 
 ### 9.2 Performance targets
@@ -1457,6 +1612,13 @@ Decided in v1.3 (from the review):
 - Storage: protective mode and trimming of the D1 search copy (§7.7).
 
 To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
+
+**New in v1.4:**
+- **WebAuthn library spike before M1:** confirm a maintained library (for example SimpleWebAuthn) runs in Workers, or implement verification with WebCrypto.
+- **Holiday dataset before M5:** licence compatible with AGPL, plus the bundle size against the Worker limit.
+- **Size version compare before M6b:** a custom diff of two document states (§4.3); it may move to Later.
+- **ReminderScheduler load:** confirm a single instance handles a 100-member workspace's 48-hour trigger window, or shard it.
+- **Excalidraw Yjs binding:** maintenance cost of the Officebox-owned binding (§4.2).
 
 **Validated by the realtime spike** ([`spikes/realtime`](spikes/realtime/README.md)): the channel DO write path, dedupe, replay, redaction, outbox to D1 with retry, revocation, Yjs sync with a stock `y-websocket` client, viewer enforcement, compaction, snapshot chunking, and cookie and ticket authentication. Three implementation notes came out of it:
 - The outbox drain must chunk by size: queue messages are limited to 128 KB and each `sendBatch` to 256 KB.
@@ -1538,5 +1700,13 @@ The SFU client matches the documented Realtime API. Two implementation notes:
 | R2 storage | 10–50 GB typical | *(confirm current free tier and price)* | Depends entirely on files |
 | Queues operations | ~150,000 | *(confirm current allowance)* | About 3 operations per message |
 | Realtime SFU egress | audio ~1 GB, screen sharing ~5 GB, video varies | 1,000 GB | Then $0.05/GB |
+
+**Not yet modelled (v1.4):**
+- ReminderScheduler alarms: low thousands of triggers per 48 hours at 100 members
+- hourly ICS-in fetches (at most 50 subscriptions per workspace by default)
+- calendar change fan-out through UserHub
+- delayed `unread-email` queue messages, one per unread conversation per offline recipient.
+
+All are expected to be small next to chat traffic. The load test should include them.
 
 **Conclusion:** a 25-person team should fit within the Workers Paid allowances. Even at four times these figures, Durable Object request overage would be under $1 a month. These are estimates. The Phase 1 load test (§10) replaces them with measurements, and the usage panel (§7.9) shows each installation's real figures.
