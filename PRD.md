@@ -1,7 +1,3 @@
-I've drafted both documents below. The PRD is a full rewrite around the Cloudflare-native, self-owned model. The TDD is the companion engineering reference.
-
----
-
 Officebox — Product Requirements Document (PRD)
 
 Status: Working baseline
