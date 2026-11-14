@@ -11,7 +11,8 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 | Document | Answers | Owner of truth for |
 |---|---|---|
 | [`PRD.md`](PRD.md) | **Why and what**: product promise, principles, scope, phases | Product direction and decisions (Appendix A) |
-| [`specs/*.md`](specs/) | **Exactly how a feature behaves**: decisions, rules, data, API, acceptance criteria | Feature behaviour |
+| [`specs/*.md`](specs/) (feature specs) | **Exactly how a feature behaves**: decisions, rules, data, API, acceptance criteria | Feature behaviour and feature tables |
+| [`specs/permissions.md`](specs/permissions.md), [`specs/notifications.md`](specs/notifications.md), [`specs/platform.md`](specs/platform.md) (cross-cutting specs) | **Rules every feature follows**: access, notifications and attention, lifecycle, retention, export, settings, limits, timers, schema reconciliation | Cross-cutting rules |
 | [`TDD.md`](TDD.md) | **How it's built**: architecture, schemas, protocols, security, operations | Technical design |
 | [`PLAN.md`](PLAN.md) | **In what order**: milestones, slices, definition of done | Delivery sequence |
 | [`spikes/`](spikes/) | **What we proved**: throwaway prototypes and findings | Reference only, never imported |
@@ -28,7 +29,13 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 - [Notifications & Attention](specs/notifications.md)
 - [Platform Rules](specs/platform.md): lifecycle, cascades, retention, export, admin settings, limits, outbound fetching, email links, timers, connection budget, provisioning, schema
 
-**When documents disagree:** a spec overrides the PRD on feature detail, and the TDD governs implementation. Don't silently pick one. Flag the conflict in your PR and fix the losing document in the same PR.
+**Precedence when documents disagree:**
+1. **Cross-cutting specs override feature specs** on cross-cutting rules (permissions, notifications, lifecycle, retention, export, settings, limits, timers).
+2. **Feature specs override the PRD** on feature detail.
+3. **Data models:** spec data-model sections are authoritative for **feature tables**; the TDD is authoritative for **core tables**. The two are reconciled in platform §14 Schema reconciliation.
+4. The **TDD governs implementation** (architecture, protocols, operations) wherever no spec says otherwise.
+
+Don't silently pick one. Flag the conflict in your PR and fix the losing document in the same PR.
 
 ## 3. Workflow
 

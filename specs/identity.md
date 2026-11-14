@@ -45,13 +45,16 @@ The permission engine that every feature relies on is specified in [Permissions]
 | @group mentions | **Yes.** Notifies group members who can see the conversation. |
 | Directory | **Everyone sees everyone's contact details**, plus region and working hours |
 | Guests | **Phase 2** (the role value is reserved in the schema) |
+| What M1 creates | **Only identity objects**: users, handles, groups, invitations, sessions, passkeys, auth tokens and settings. `channels` and `channel_members` are **not** created in M1. `#general`, default channels and the welcome post arrive in **M3a**; personal, workspace and group calendars in **M5a**; My files, group drives, the Channels drive and channel folders in **M6a**. Each milestone provisions its own objects for existing people and groups with an idempotent backfill job (platform §13 Provisioning and backfill). |
+| Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** access to a group drive or folder, **needs an owner**. It's audited (permissions §6 Admin powers). |
+| Recovery links without email | Admins may issue them for members, **loudly flagged**: the member sees a notice on the **sign-in page** ("An admin reset your account on …"), and **every owner sees it flagged** on the member list until an owner acknowledges it. |
 
 ## 3. Users and roles
 
 | Role | Can |
 |---|---|
 | **Owner** | Everything an admin can, plus: invite and promote admins; change email, issue recovery links, disable, delete and sign out **admins and owners**; transfer ownership; installation settings (upgrades, export, email, policies). At least one active owner must exist. |
-| **Admin** | Invite **members**; for **members only**: disable, re-enable, delete, change email, issue recovery links, sign out all sessions. Manage groups and group managers; set default channels; workspace settings except owner-only ones (platform §7 Admin settings); view the audit log. |
+| **Admin** | Invite **members**; for **members only**: disable, re-enable, delete, change email, issue recovery links, sign out all sessions. Manage groups and group managers (but **adding themselves** to a group needs an owner); set default channels; workspace settings except owner-only ones (platform §7 Admin settings); view the audit log. |
 | **Member** | Use the workspace, edit their own profile, manage their own sign-in methods and devices. |
 | **Group manager** | A member (or admin) who manages one group's membership. This is a property of group membership, not a workspace role. |
 | *Guest* | Phase 2 |
@@ -63,12 +66,12 @@ Admins can't read private content they haven't been given access to, and can't a
 ### 4.1 First-run setup
 
 - Protected by the setup token: the deploy secret, or a one-time token generated into Workers Logs (TDD §6.8). The claim is atomic, and `/setup` returns 404 afterwards.
-- Setup collects the workspace name and the owner's name, @handle, email and password. The owner can add a passkey straight away.
-- Setup creates (platform §13 Provisioning and backfill):
-  - `#general` (the default channel) and its channel folder
-  - the **workspace calendar**
-  - the **Channels drive**
-  - the owner's **personal calendar** and **My files** drive.
+- Setup collects the workspace name and the owner's name, **@handle**, email and password. The owner can add a passkey straight away.
+- **In M1, setup creates only identity objects:** the installation row, the owner's user and handle, and default settings.
+- Objects owned by later features are created when those features ship, together with a backfill for workspaces set up earlier (platform §13 Provisioning and backfill):
+  - **M3a:** `#general` (the default channel), with the owner as channel admin
+  - **M5a:** the workspace calendar and the owner's personal calendar
+  - **M6a:** the Channels drive, `#general`'s channel folder and the owner's My files drive.
 - **Restore from export** is offered as an alternative path (PRD §13, TDD §7.5).
 
 ### 4.2 Invitations
@@ -87,15 +90,15 @@ Admins can't read private content they haven't been given access to, and can't a
 
 The flow runs in this order:
 
-1. **Create the account.** The email is shown and fixed. The invitee enters a display name and **@handle**, suggested from their name. They then either set a **password**, **register a passkey**, or both. At least one is required (owners always need a password). Creating the account also creates the member's **personal calendar** and **My files** drive (platform §13 Provisioning and backfill).
+1. **Create the account.** The email is shown and fixed. The invitee enters a display name and **@handle**, suggested from their name. They then either set a **password**, **register a passkey**, or both. At least one is required (owners always need a password). The member's personal calendar (M5a) and My files drive (M6a) are created by those milestones, at account creation once they exist, and by their backfill for earlier members (platform §13 Provisioning and backfill).
 2. **Profile setup.**
    - avatar (optional)
    - **time zone**, pre-filled from the browser
    - **working hours**, default Mon–Fri 09:00–17:00 local
    - **region** for public holidays, pre-filled from the time zone
    - job title, team, pronouns, phone and location (all optional).
-3. **Auto-join default channels.** Admins choose these from **public channels only** **(default)**; `#general` is always included.
-4. **Welcome post.** A system message in `#general`: "*Sam Lee* joined the workspace".
+3. **Auto-join default channels** (from M3a). Admins choose these from **public channels only** **(default)**; `#general` is always included. Members who joined before chat existed are added by the M3a backfill.
+4. **Welcome post** (from M3a, if `welcome_post_enabled`). A system message in `#general`: "*Sam Lee* joined the workspace". The M3a backfill doesn't post welcome messages for earlier members **(default)**.
 5. **Welcome tour.** Four or five dismissible tips covering chat, calls, calendar and documents. They can be replayed from Help, and dismissal is stored per member.
 
 An invite opened by someone already signed in as another member shows "You're signed in as X. Sign out to accept."
@@ -109,6 +112,7 @@ An invite opened by someone already signed in as another member shows "You're si
 - **Passwords:**
   - at least 10 characters, checked against a bundled common-password list, no composition rules **(default)**
   - PBKDF2-SHA256 at 600k iterations in a versioned format (TDD §8.1).
+  - **To verify in the M0 foundation spike:** local workerd accepts 600k iterations (checked), but production Workers may cap PBKDF2 at 100k. If the cap holds, the fallback is **100k iterations plus a server-side pepper** (an HMAC with a Worker secret applied before PBKDF2), or **Argon2id in WASM** if bundle size and CPU time allow. The versioned hash format lets either be adopted, and hashes are upgraded at next sign-in.
 - **Magic links:**
   - single-use, valid for **15 minutes**, open on **any device**
   - sent only to active members with an email
@@ -119,18 +123,22 @@ An invite opened by someone already signed in as another member shows "You're si
   - removing the last sign-in method is blocked: a member always keeps a password or at least one passkey
   - **owners must keep a password**: an owner can't remove their password, and promoting a passkey-only member to owner requires them to set one first
   - user verification is **"preferred"** **(default)**
-  - **clone detection:** a `sign_count` that goes backwards rejects the sign-in, and the member and admins are notified.
+  - **clone detection:** a `sign_count` that goes backwards rejects the sign-in. The member and admins get a `security_notice` (notifications §3 Notification events).
 - **Passkeys and the domain (relying-party ID):**
   - Passkeys are bound to the domain the workspace uses when they're registered.
   - **Changing the workspace's domain** (for example from `*.workers.dev` to a custom domain, PRD §13) or **restoring to another installation** leaves existing passkeys unusable.
   - **Registering a passkey on a `*.workers.dev` domain shows a warning:** "If this workspace moves to a custom domain, you'll need to add this passkey again."
   - **Recovery:** members with a password sign in with it and add new passkeys. **Passkey-only members** need an admin recovery link (§4.6). The admin guide for domain changes and restores says so, and the restore flow lists passkey-only members who will need one (platform §6 Export coverage).
-- **Rate limits:** progressive delays after **5 failed attempts per minute per IP** and **10 per hour per account** (TDD §8.1). There is no hard lockout. Further limits are in platform §8 Rate limits and quotas.
+- **Rate limits:** progressive delays after **5 failed attempts per minute per IP** and **10 per hour per account** (TDD §8.1). There is no hard lockout.
+  - **Delay schedule per account (default):** attempts 1–5 are immediate; then each further failed attempt waits 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s (the cap). A successful sign-in resets it.
+  - Further limits are in platform §8 Rate limits and quotas.
 - **Disabled and deleted members** can't sign in. They see a generic "can't sign in" message.
 
 ### 4.5 Sessions
 
 - `HttpOnly`, `Secure`, `SameSite=Lax` cookies: a 15-minute access token and a refresh token that rotates, with reuse detection (TDD §3.1).
+- **Grace window (default 30 s):** if two tabs refresh with the same refresh token at once, both get the **same successor** token within 30 seconds of the rotation. Reuse of a token older than that still revokes the session.
+- **Every authenticated request checks `session_epoch` and user status**, not only WebSocket upgrades. The check can be cached per isolate for at most **60 seconds** **(default)**, so a disabled member loses REST access within a minute and sockets within seconds.
 - **30-day sliding expiry.** Each refresh extends the session.
 - **My devices** (this is PRD §6's "login activity visibility"):
   - a list of active sessions showing browser and OS, approximate location if available, created and last-seen times, and which one is the current device
@@ -147,7 +155,10 @@ An invite opened by someone already signed in as another member shows "You're si
   - It is valid for 24 hours **(default)**.
   - It lets the member set a password or register a new passkey, and signs out their existing sessions.
   - Issuing one **revokes the person's other pending magic-link, reset and recovery tokens**.
-  - **The person is notified:** an email to their current address (if email is configured), "*Admin Name* issued a recovery link for your account on *date*", and an in-app banner at their next sign-in.
+  - **The person is notified:** an email to their current address (if email is configured), "*Admin Name* issued a recovery link for your account on *date*", and a `security_notice` inbox item.
+  - **Loudly flagged, because without email the member can't be told in advance:**
+    - The **sign-in page** shows the notice to that member on their next sign-in attempt, before and after signing in: "An admin reset your account on *date*. If this wasn't expected, contact an owner." This uses `users.pending_security_notice`, so it shows even if the link holder changed the password.
+    - **Every owner sees the member flagged** on the member list ("Recovery link issued by *Admin* on *date*") until an owner acknowledges it.
   - Issuing one is audited.
 - **All owners locked out:** owner recovery through the `RECOVERY_TOKEN` secret (TDD §8.1).
 
@@ -181,13 +192,13 @@ An invite opened by someone already signed in as another member shows "You're si
 ### 4.9 Groups
 
 - Admins create, rename and delete groups. Each group has a **name**, an **@handle**, a description and **managers**.
-- **Group managers** add and remove members of their group. Admins can manage any group.
+- **Group managers** add and remove members of their group. Admins can manage any group, but **an admin adding themselves** to a group needs an owner (audited), because it would give them everything shared with the group (permissions §6 Admin powers).
 - **Uses:**
   - @group mentions (notify members who can see the conversation)
   - permission grants on **documents, whiteboards, folders, files, drives and calendars**. Groups have **no grants on channels**; "invite this group" to a channel adds its current members individually (permissions §3.3 Principals).
   - group calendars and group drives
   - "invite this group" shortcuts.
-- **Creating a group** also creates its **group calendar** and **group drive** (platform §13 Provisioning and backfill). Renaming the group renames both.
+- **Group calendar and group drive:** created with each new group once calendar (M5a) and documents (M6a) exist, and backfilled for groups created earlier (platform §13 Provisioning and backfill). Renaming the group renames both.
 - **Deleting a group** removes its grants (audited) and handles its calendar and drive as set out in platform §4 Deletion cascades.
 - Group managers' membership changes are audited, because they can widen access to everything shared with the group (permissions §5 Containers and inheritance).
 
@@ -206,8 +217,8 @@ An invite opened by someone already signed in as another member shows "You're si
 
   **Admins can do these for members only; for admins and owners, an owner must act** (permissions §6 Admin powers). What disabling and deleting do in each feature is set out in platform §3 Member lifecycle.
 - **Email change:**
-  - When email is configured, the new address must be confirmed through a link sent to it before it takes effect.
-  - The **old address is notified**: "Your Officebox email was changed to *new* by *Admin Name* on *date*". An in-app banner shows at the person's next sign-in.
+  - When email is configured, the new address must be confirmed before it takes effect. The pending address is held in an `email_change` token's payload. The link opens a confirmation page (GET), and only its POST applies the change (platform §10 Email links).
+  - The **old address is notified**: "Your Officebox email was changed to *new* by *Admin Name* on *date*". The person also gets a `security_notice` inbox item and the sign-in banner (`pending_security_notice`).
   - **All pending magic-link, password-reset and recovery tokens are revoked.**
   - It's audited.
 - **Ownership:** transfer it, or add more owners. The last owner can't be demoted, disabled or deleted.
@@ -215,7 +226,7 @@ An invite opened by someone already signed in as another member shows "You're si
 - **Policies:**
   - allowed invite domains
   - whether magic-link sign-in is enabled (default on when email is configured)
-  - the minimum password length (raise only).
+  - the minimum password length (raise only; **owners only**, platform §7 Admin settings).
 - **Audit log** entries for:
   - setup, invitations, role changes, disable and delete
   - email changes, recovery links, ownership changes
@@ -274,8 +285,9 @@ CREATE TABLE passkeys (
 CREATE TABLE auth_tokens (                                 -- magic links, password resets, recovery links
   token_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('magic_link', 'password_reset', 'recovery')),
-  issued_by TEXT REFERENCES users(id),                     -- admin, for recovery links
+  kind TEXT NOT NULL,                                      -- magic_link | password_reset | recovery | email_change (Zod-validated)
+  issued_by TEXT REFERENCES users(id),                     -- admin or owner, for recovery links and email changes
+  payload TEXT,                                            -- JSON; email_change: { "newEmail": "..." }
   expires_at INTEGER NOT NULL,
   used_at INTEGER,
   created_at INTEGER NOT NULL
@@ -284,8 +296,11 @@ CREATE TABLE auth_tokens (                                 -- magic links, passw
 -- invitations: (email NOT NULL is in the baseline table); add groups
 ALTER TABLE invitations ADD COLUMN group_ids TEXT;         -- JSON array
 
--- security notices for admin-initiated actions
-ALTER TABLE users ADD COLUMN pending_security_notice TEXT; -- JSON: in-app banner shown at next sign-in (recovery link issued, email changed)
+-- security notices for admin-initiated actions (one mechanism: this banner + the security_notice inbox item)
+ALTER TABLE users ADD COLUMN pending_security_notice TEXT; -- JSON: shown on the sign-in page and after sign-in (recovery link issued, email changed)
+ALTER TABLE users ADD COLUMN admin_reset_at INTEGER;        -- recovery link issued without email: flagged to owners
+ALTER TABLE users ADD COLUMN admin_reset_by TEXT;
+ALTER TABLE users ADD COLUMN admin_reset_acknowledged_by TEXT;
 
 -- groups: add handle and managers
 ALTER TABLE groups ADD COLUMN handle TEXT;               -- copy of the authoritative handles row
@@ -294,6 +309,8 @@ ALTER TABLE group_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (
 -- sessions: device info for "My devices"
 ALTER TABLE sessions ADD COLUMN device_label TEXT;         -- e.g. "Chrome on macOS"
 ALTER TABLE sessions ADD COLUMN approx_location TEXT;      -- from request.cf (city/country), if available; deleted with the session
+ALTER TABLE sessions ADD COLUMN previous_refresh_hash TEXT; -- refresh grace window: the token just rotated away
+ALTER TABLE sessions ADD COLUMN rotated_at INTEGER;         -- when it was rotated (grace window 30 s)
 ```
 
 Settings keys (defined in platform §7 Admin settings): `default_channels`, `welcome_post_enabled`, `allowed_invite_domains`, `magic_link_enabled`, `min_password_length`.
@@ -302,24 +319,27 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 
 | Method and path | Who | Purpose |
 |---|---|---|
-| `POST /setup` | Setup token | Create workspace and owner |
+| `POST /setup` | Setup token | Create workspace and owner (name, @handle, email, password) |
+| `GET /me` | Member | Current user: profile, role, preferences summary, pending security notice |
 | `POST /auth/password` | Public | Sign in with password (replaces TDD §3.1's `POST /auth/session`) |
 | `POST /auth/magic-link` | Public | Request a magic link |
 | `GET /auth/magic-link/:token` · `POST /auth/magic-link/:token` | Public | GET shows the confirmation page (doesn't use the token); POST signs in |
 | `POST /auth/passkey/options` · `POST /auth/passkey/verify` | Public | WebAuthn sign-in |
-| `POST /auth/refresh` · `POST /auth/sign-out` | Session | Rotate, or sign out |
+| `POST /auth/refresh` · `POST /auth/sign-out` | Session | Rotate (with the 30 s grace window), or sign out |
+| `POST /auth/ws-ticket` | Member | One-time WebSocket ticket for non-browser clients (realtime API, TDD §3.1; listed here for completeness) |
 | `GET /me/sessions` · `DELETE /me/sessions/:id` · `POST /me/sessions/sign-out-others` | Member | My devices |
 | `POST /me/passkeys/options` · `POST /me/passkeys` · `PATCH/DELETE /me/passkeys/:id` | Member | Manage passkeys |
 | `PUT /me/password` | Member | Set or change password |
 | `GET/PATCH /me/profile` · `PUT /me/avatar` · `PUT /me/status` | Member | Profile and status |
 | `POST /auth/forgot` · `GET /auth/reset/:token` · `POST /auth/reset/:token` | Public | Password reset by email (GET shows the form; POST uses the token) |
 | `GET /auth/recover/:token` · `POST /auth/recover/:token` | Recovery link | Set a password or passkey (GET shows the form; POST uses the token) |
-| `POST /me/email/confirm/:token` | Public | Confirm an admin-initiated email change (when email is configured) |
+| `GET /me/email/confirm/:token` · `POST /me/email/confirm/:token` | Public | Confirm an email change (GET shows the confirmation page; POST applies it) |
 | `GET /invitations/:token` · `POST /invitations/:token/accept` | Public | Accept an invitation |
 | `GET/POST /admin/invitations` · `POST …/:id/resend` · `DELETE …/:id` | Admin | Manage invitations |
 | `GET /members` · `GET /members/:id` | Member | Directory |
 | `PATCH /admin/members/:id` (role, email, status) · `POST …/:id/recovery-link` · `DELETE …/:id` | Admin (members only); owner (admins and owners) | Administer members |
-| `GET/POST /groups` · `PATCH/DELETE /groups/:id` · `PUT/DELETE /groups/:id/members/:userId` | Admin / manager | Groups |
+| `POST /admin/members/:id/acknowledge-reset` | Owner | Clear the owners' "recovery link issued" flag |
+| `GET/POST /groups` · `PATCH/DELETE /groups/:id` · `PUT/DELETE /groups/:id/members/:userId` | Admin / manager (an admin adding themselves needs an owner) | Groups |
 | `GET /handles/:handle/available` | Member | Handle check |
 
 ## 7. Screens
@@ -345,10 +365,13 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 - **Domain change or restore.** Passkeys stop working (§4.4). Members with a password sign in and re-register passkeys; passkey-only members need an admin recovery link.
 - **Admin acting on an admin or owner.** The action is refused with "An owner must do this."
 - **Email changed while a magic link is outstanding.** The old link no longer works (tokens revoked).
+- **Two tabs refresh at once.** Both receive the same successor token within the 30-second grace window; neither is signed out.
+- **Recovery link issued with no email configured.** The member sees the notice on the sign-in page; owners see the flag on the member list until acknowledged.
 
 ## 9. Acceptance criteria
 
-- **Setup:** a fresh deploy can't be claimed without the token. Setup creates the owner, `#general` and its folder, the workspace calendar, the Channels drive, and the owner's personal calendar and My files drive.
+- **Setup (M1):** a fresh deploy can't be claimed without the token. Setup creates the owner (with handle) and default settings, and nothing that belongs to later milestones.
+- **Provisioning (later milestones):** M3a, M5a and M6a each have a test that a workspace set up before them gets its `#general` and default-channel memberships, calendars, and drives and folders from the backfill, and that running the backfill twice changes nothing.
 - **Invitations:**
   - link and email invitations both work end to end, including when email isn't configured
   - expired, revoked and used invitations are refused
@@ -369,23 +392,27 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
   - a session unused for 30 days is rejected; one used on day 29 is extended
   - "sign out" for a single session and for all other devices works
   - changing the password signs out other sessions
-  - disabling a member closes their open connections within 5 seconds.
-- **Rate limits:** the 6th failed password attempt within a minute from one IP, and the 11th within an hour for one account, are delayed. The account isn't locked: a correct password after the delay succeeds.
+  - two concurrent refreshes with the same token within 30 seconds both succeed with the same successor; reusing a token after the grace window revokes the session
+  - disabling a member closes their open connections within 5 seconds, and their REST requests fail within 60 seconds.
+- **Rate limits:** the 6th failed password attempt within a minute from one IP, and the 11th within an hour for one account, are delayed. The per-account delay follows the schedule in §4.4 (1 s, 2 s, 4 s … capped at 30 s), checked with an injected clock. The account isn't locked: a correct password after the delay succeeds.
 - **Admin powers:**
   - an admin can disable, delete, change the email of and issue a recovery link for a **member**
   - the same actions on an **admin or owner** return 403 for an admin and succeed for an owner
   - the last owner can't be demoted, disabled or deleted.
 - **Notifications of admin actions:**
   - issuing a recovery link or changing an email sends an email to the person's **old** address (when email is configured)
-  - it shows an in-app banner at their next sign-in
+  - it creates a `security_notice` inbox item and the sign-in banner
+  - with email **not** configured, the recovery notice appears on the sign-in page for that member, and the member is flagged to every owner until acknowledged
   - it revokes their pending magic-link, reset and recovery tokens, which then fail.
 - **Recovery link flow:** the link lets the member set a password or add a passkey, signs out their other sessions, and can't be used twice.
 - **Directory:** search by name, handle, email, title, team and group returns the right members; the Deactivated filter lists disabled members only; region and working hours are shown.
 - **Handles:** handles are unique across people and groups; reserved words are refused; a released handle can't be claimed by someone else for 30 days.
 - **Groups:**
   - group managers can manage only their own groups
-  - @group mentions notify only members who can see the message
-  - creating a group creates its calendar and drive.
+  - an admin adding themselves to a group gets 403; an owner adding an admin, or the admin with an owner's approval, succeeds and is audited
+  - @group mentions notify only members who can see the message (from M3a).
+- **Email change:** opening the confirmation link with GET doesn't change the email; the POST does, and only once.
+- **`GET /me`** returns the signed-in member and any pending security notice.
 - **Audit:** every admin action in §4.11 writes an audit entry with actor, target and time.
 
 ## 10. Later
@@ -397,11 +424,6 @@ TOTP two-factor · Google/Microsoft or SSO sign-in · guests · member self-serv
 1. **Team field.** Free text, or chosen from the member's groups (a "primary group")? The second keeps the directory consistent.
 2. **Allowed invite domains.** Off by default, or on and set to the owner's domain at setup?
 3. **Welcome post wording and channel.** Always `#general`, or configurable?
-4. **WebAuthn library.** We need to confirm a maintained library (for example SimpleWebAuthn) runs in Workers. Otherwise we implement verification directly with WebCrypto. Passkeys ship at launch, so this needs a short spike **before M1 starts**.
+4. **WebAuthn library and PBKDF2 limit.** Both are checked in the **M0 foundation spike** (PLAN M0): whether a maintained library (for example SimpleWebAuthn) runs in Workers, otherwise verification is implemented directly with WebCrypto; and whether production caps PBKDF2 iterations (§4.4 fallback).
 
-**PRD, TDD and PLAN changes needed** (to apply when those docs are updated):
-- PRD §6: passkeys, magic links and @handles are launch features, not "future considerations"; owners must keep a password; owner-only admin actions with notification.
-- TDD §3.1: the sign-in endpoint is `POST /auth/password` (not `POST /auth/session`); magic, reset and recovery links use GET-to-confirm, POST-to-consume.
-- TDD §2.1: `users.role` includes `guest`; `invitations.email` is NOT NULL; the `handles` table and the other additions in §5.
-- TDD §8.1: passkey relying-party ID rule, user-verification policy and `sign_count` clone detection.
-- PLAN M1: passkeys and magic links move from "Later" to "Must"; add the WebAuthn spike.
+**Still pending in other documents:** TDD §3.1 and §8.1 should add the refresh grace window, the per-request `session_epoch` check, the `email_change` token kind and the PBKDF2 fallback.

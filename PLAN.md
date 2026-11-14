@@ -2,7 +2,7 @@
 
 **Status:** Draft for review
 **Date:** 14 November 2026
-**Inputs:** [PRD](PRD.md) v1.3, [TDD](TDD.md) v1.3, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
+**Inputs:** [PRD](PRD.md) v1.4, [TDD](TDD.md) v1.4, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
 **Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md).
 **Cross-cutting specs:** [Permissions](specs/permissions.md) · [Notifications & Attention](specs/notifications.md) · [Platform Rules](specs/platform.md) (lifecycle, cascades, retention, export, settings, limits, timers, schema).
 
@@ -46,7 +46,7 @@ officebox/
 └── PRD.md  TDD.md  PLAN.md
 ```
 
-**Recommended stack.** These need your confirmation (§8).
+**Stack** (confirmed, §8).
 
 | Concern | Choice | Why |
 |---|---|---|
@@ -113,6 +113,12 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - light and dark theme tokens and the accessibility baseline (focus rings, landmarks, reduced motion)
   - API client and error handling
 - **Shared package:** Zod schema conventions, message envelope `{ type, id?, ... }`, error codes.
+- **Foundation spike.** Short, throwaway checks on production Cloudflare, before M1 code depends on them. Each result is recorded in TDD §10.
+  - **PBKDF2 limit:** does production Workers cap PBKDF2 iterations (local workerd accepts 600k)? If it caps at 100k, adopt the fallback in Identity §4.4 (100k plus a server-side HMAC pepper, or Argon2id in WASM).
+  - **WebAuthn:** does a maintained library (for example SimpleWebAuthn) run in Workers, or do we verify with WebCrypto ourselves?
+  - **Rate Limiting binding:** which periods and what consistency it really offers, so each limit in platform §8 is assigned to the binding, a D1 counter or a Durable Object.
+  - **Queue delays:** the maximum `delaySeconds`, which affects the unread-email and DND timers (platform §11).
+  - **PDF preview under `Content-Security-Policy: sandbox`:** does Chrome's built-in PDF viewer render it (TDD §8.3)?
 
 **Exit criteria:**
 - A fresh Cloudflare account deploys from the button and shows the app shell. `/health` is green.
@@ -138,9 +144,9 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 - **Password reset** when email is configured.
 - **Profiles:** display name, avatar (R2), **time zone**, **working hours** and **location/region** (the calendar needs all three), and status text with an emoji.
 - **Roles and groups:** owner, admin and member; admin-managed groups (PRD §10.1).
-- **Members administration:** list, invite, change role, disable, delete (anonymise), and transfer document ownership.
-- **Permission engine** in `packages/shared` plus Worker services, implementing [specs/permissions.md](specs/permissions.md). It uses the union rule across item, folders, drive and general access, includes the admin-power limits, and has its own matrix test suite. Every feature calls it.
-- **Provisioning** of the objects other features expect (personal calendar, My files and so on), as set out in platform §13.
+- **Members administration:** list, invite, change role, disable, delete (anonymise). Content transfer for deleted members arrives with the features that own the content.
+- **Permission engine** in `packages/shared` plus Worker services, implementing [specs/permissions.md](specs/permissions.md). It uses the union rule across item, folders, drive and general access, and includes the admin-power limits. Its **matrix test grows per milestone**: M1 covers workspace roles, groups and profiles; channels, calls, calendars and documents are added by their milestones.
+- **Only identity objects are created in M1** (users, handles, groups, invitations, sessions, passkeys, settings). `#general` and default channels arrive in M3a, calendars in M5a, and drives and folders in M6a. Each of those milestones provisions its objects with an idempotent backfill for existing people and groups (platform §13).
 - **Security:**
   - CSRF header and `Origin` checks, the CSP and security headers
   - rate limits on sign-in, setup, invitations and reset
@@ -153,7 +159,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 
 **Exit criteria:**
 - These end-to-end tests pass: setup with a token, invite by link with no email configured, invite by email, password reset, disable user, and an expired invitation being refused.
-- The permission engine passes a matrix test across every role and resource type.
+- The permission engine passes its M1 matrix test (workspace roles, groups, profiles).
 
 ### M2 — Realtime backbone
 
@@ -197,11 +203,12 @@ Delivered in three slices, each releasable on its own.
   - permalinks to messages
 - **Unread state:** read cursors, unread and mention badges, and mark as read.
 - **Presence in chat:** typing indicators and member presence.
+- **Editing:** edit and delete messages, with redaction (TDD §2.2), in M3a per Chat §18.
+- **Provisioning:** `#general`, default-channel auto-join and the welcome post, with a backfill for members who joined before M3a (platform §13).
 
 **M3b — Rich conversation:**
 - **Threads:** a reply pane, "also send to channel", and thread followers.
 - **Reactions:** quick reactions and a full emoji picker.
-- **Editing:** edit and delete messages, with redaction (TDD §2.2).
 - **Files:**
   - upload through the Worker into R2 (multipart above 50 MB)
   - drag-and-drop and paste

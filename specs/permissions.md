@@ -29,7 +29,13 @@ It replaces TDD §2.1's "stop at first match" resolution with a **union** rule.
 | Private channel membership | **Any member can add people; channel admins remove them.** This corrects PRD §10.1. |
 | Admin powers over people | Admins act on **members only**. Recovery, email change, disable and delete on **admins or owners need an owner**. **Only owners invite or promote admins.** |
 | Notice of admin actions | Every recovery link or email change **notifies the person** (email to the old address and an in-app banner) and **revokes their pending sign-in, reset and recovery tokens**. |
-| Admins and private content | Admins see that private objects **exist** but can't read them. They **can't add themselves to private channels**; they can archive, delete and remove members. |
+| Admins and private content | Admins see that private objects **exist** but can't read them. They **can't add themselves to private channels**; they can archive, delete and remove members. In private channels they **are** members of (added by a member), admins can delete messages. |
+| Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** a role on a group drive or folder, **needs an owner**. Audited. |
+| Recovery links without email | Allowed for members, **loudly flagged**: a notice on the member's **sign-in page** and a flag on the member list for **every owner** until acknowledged (Identity §4.6). |
+| Comment moderation | Document **owners, editors and admins** can remove others' comments |
+| Document calls | **Anyone who can open the document** (viewers included) can start one |
+| Orphaned private events | An **owner or admin** can delete a private event whose organiser is disabled or deleted, **without seeing its details** |
+| Restore from Trash | **Canonical rule:** the item's **owner**, the **person who deleted it**, **drive managers** of its drive, and **admins** |
 | Group calendars | **Viewable by every member** |
 | Private events | Calendar editors see a **busy block they can't open or edit**. Only the organiser and attendees see and edit details. |
 | Personal calendars | **Free/busy** to others |
@@ -84,7 +90,7 @@ Legend: ✓ allowed · — not allowed · *(cond.)* allowed under the stated con
 | Add members | n/a | n/a | ✓ | ✓ | n/a | ✓ | Public ✓; **private —** |
 | Remove members | — | — | — | — | — | ✓ | ✓ (private too, without reading) |
 | Rename, topic, posting policy, posters | — | — | — | — | — | ✓ | ✓ |
-| Delete any message | — | — | — | — | — | ✓ | **Public only.** Private-channel messages they can't read can't be moderated. |
+| Delete any message | — | — | — | — | — | ✓ | **Public channels**, and **private channels they're a member of**. Private-channel messages they can't read can't be moderated. |
 | Pin and unpin | ✓ | — | ✓ | ✓ | — | ✓ | as for posting |
 | Archive / unarchive | — | — | — | — | — | ✓ | ✓ |
 | Convert public → private | — | — | — | — | — | ✓ | ✓ |
@@ -97,7 +103,7 @@ Legend: ✓ allowed · — not allowed · *(cond.)* allowed under the stated con
 
 | Object | Read | Create | Edit | Delete |
 |---|---|---|---|---|
-| Message | Anyone who can read the conversation | Anyone who can post (threads: anyone who can reply) | Author | Author; channel admins (in their channel); workspace admins (public channels only) |
+| Message | Anyone who can read the conversation | Anyone who can post (threads: anyone who can reply) | Author | Author; channel admins (in their channel); workspace admins (public channels, and private channels they're a member of) |
 | Thread | As message | As reply | — | Deleting the root leaves a placeholder |
 | Poll | As message | Anyone who can post | — | Creator closes or deletes it; moderators as for messages. **Voter identity is never readable by anyone** (Chat §9). |
 | Pin | Anyone who can read | Anyone who can post | — | Anyone who can post; channel admins |
@@ -114,12 +120,12 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Comment and reply; react to comments | ✓ | ✓ | ✓ | — | — |
 | Edit content; upload a new file version | ✓ | ✓ | — | — | — |
 | Resolve or reopen comment threads | ✓ | ✓ | Own threads | — | — |
-| Delete any comment (moderation) | ✓ | — | — | — | — |
+| Delete any comment (moderation) | ✓ | ✓ | — | — | — (admins ✓, on documents they can access; audited) |
 | Restore an old version | ✓ | ✓ | — | — | — |
 | Share (add grants up to their own role; change general access) | ✓ | ✓ **(default)** | — | — | — |
 | Move within or between drives they can edit | ✓ | ✓ | — | — | — |
 | Delete (to Trash) | ✓ | — (folders: editors can delete items they created **(default)**) | — | — | — |
-| Restore from Trash | ✓; drive managers; admins | — | — | — | — |
+| Restore from Trash | ✓ — plus the person who deleted it, drive managers of its drive, and admins (canonical rule) | — (unless they deleted it) | — | — | — |
 | Transfer ownership | ✓; admins (for leavers) | — | — | — | — |
 | Approve access requests | ✓ | ✓ | — | — | — |
 
@@ -130,9 +136,9 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Drive | See it exists | Read contents | Add or edit contents | Manage (rename, access, delete) |
 |---|---|---|---|---|
 | My files | Owner only | Owner, plus anyone an item is shared with (that item only) | Owner | Owner (admins for leavers) |
-| Group drive | **Every member** (name only) | Group members, plus explicit shares | Group members (editor by default) | Group managers and admins |
+| Group drive | **Every member** (name only) | Group members, plus explicit shares | Group members (editor by default) | Group managers and admins (an admin **granting themselves** a role needs an owner) |
 | Shared drive | Those with a grant on the drive, or on something inside it | Per drive grants | Editors and managers | Drive managers |
-| Channels drive | Every member (but private-channel folders are hidden from non-members) | Per channel folder: channel members, or everyone for public channels (viewer) | **Channel members (editor)** | Admins (the drive); channel folders follow their channel |
+| Channels drive | Every member (but private-channel folders are hidden from non-members) | Per channel folder: channel members, or everyone for public channels (viewer) | **Channel members (editor)** | **Admins manage the drive.** Channel folders follow their channel; the drive itself grants no content access. |
 
 **DM files** have no folder. They live only in the conversation's Files view.
 
@@ -161,6 +167,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 
 - **Event calls:** invitees, plus anyone whose effective view of the event is "full details". Free/busy viewers can't join.
 - **Moving an event between calendars** needs editor on both calendars and organiser rights **(default)**.
+- **Orphaned private events:** if the organiser of a private event is disabled or deleted, an **owner or admin** can delete it. They see only a busy block and the attendee count, never the details. Audited.
 
 **Time off:**
 - Every member sees **the dates** of anyone's time off, shown as "Away".
@@ -173,12 +180,12 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 |---|---|---|---|
 | Channel | Anyone who can read the channel, including announcement channels ([Chat](chat.md) owns this) | Anyone who can read the channel | Host (the starter), channel admins |
 | DM / group DM | A participant | Participants | Host |
-| Document / whiteboard | Commenter or above **(default)** | Anyone with access to the document | Host, document owner |
+| Document / whiteboard | **Anyone who can open it** (viewer or above) | Anyone with access to the document | Host, document owner |
 | Calendar event | Organiser or attendee | Invitees, plus full-details viewers (§4.4) | Host, event organiser |
 
 - Archived channels can't host calls.
 - If the host leaves, moderation passes to a moderator who is present (channel admin, document owner or event organiser). Otherwise, in DM and group-DM calls, any participant may stop a screen share. Otherwise, moderation passes to the earliest remaining participant **(default)**. [Calls](calls.md) §6.7 says the same.
-- Losing access to the context removes the person from an active call: the call's socket closes and its SFU tracks are closed (platform §3 Member lifecycle).
+- Losing access to the context removes the person from an active call: the call's socket closes with code **4403** and its SFU tracks are closed (platform §3 Member lifecycle). Disabling a member closes it with 4401.
 
 ### 4.6 Profiles, directory and groups
 
@@ -191,7 +198,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Invite with role member | — | — | — | ✓ | ✓ |
 | Invite with role admin | — | — | — | — | ✓ |
 | Create, rename or delete groups; appoint managers | — | — | — | ✓ | ✓ |
-| Add or remove group members | — | — | Own group | ✓ | ✓ |
+| Add or remove group members | — | — | Own group | ✓ (adding **themselves** needs an owner) | ✓ |
 | View the audit log | — | — | — | ✓ | ✓ |
 
 ## 5. Containers and inheritance
@@ -254,7 +261,11 @@ effective role(user, item) = max(
 | Transfer content of leavers (My files, organised events, owned calendars) | ✓ | ✓ |
 | Archive, delete or remove members of **any** channel, including private ones (without reading) | ✓ | ✓ |
 | Join or read **private channels, DMs or restricted items** they haven't been given | **—** | **—** |
+| Delete messages in private channels they're a member of (added by a member) | ✓ | ✓ |
 | Moderate messages in private channels they're not in | — | — |
+| Add **themselves** to a group, or grant **themselves** a role on a group drive or folder | — (needs an owner) | ✓ |
+| Delete a private event whose organiser is disabled or deleted (without seeing details) | ✓ | ✓ |
+| Restore items from Trash | ✓ | ✓ |
 | See that private objects exist (name, member count, size), in admin views only | ✓ | ✓ |
 | Manage groups and group managers | ✓ | ✓ |
 | Workspace settings | ✓ (except owner-only: platform §7 Admin settings) | ✓ |
@@ -262,12 +273,18 @@ effective role(user, item) = max(
 **Notification and token revocation:**
 - When anyone issues a **recovery link** for a person or **changes their email**:
   - an email goes to the person's **current (old) address** (if email is configured): "Your Officebox email was changed by *Admin Name* on *date*" or "*Admin Name* issued a recovery link for your account"
-  - an **in-app banner** shows at their next sign-in, on any device
+  - a **notice on the sign-in page** and after sign-in, on any device (`users.pending_security_notice`), plus a `security_notice` inbox item
+  - **without email configured**, the recovery link is also **flagged to every owner** on the member list until an owner acknowledges it (Identity §4.6)
   - all their **pending magic-link, password-reset and recovery tokens are revoked**, except the newly issued recovery link
   - an audit entry is written.
 - Using a recovery link also signs out all the person's existing sessions (Identity §4.6).
 
-**Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents through Officebox. An admin could sign in as an ordinary **member** by issuing them a recovery link. Officebox tells the member and audits it, so this can't happen silently. The Cloudflare account owner has direct technical access to all stored data (PRD §10.1).
+**Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents through Officebox. Three things are stated plainly:
+- **Recovery links.** An admin could sign in as an ordinary **member** by issuing them a recovery link. Officebox emails the member (if email is configured), shows a notice on their sign-in page, flags it to every owner when email isn't configured, and audits it. The member may only find out at their next sign-in, so this is visible, not prevented.
+- **Deleted members' files.** Deleting a member hands their private My files to an admin, who can then read them (platform §3 Member lifecycle).
+- **Groups.** An admin can't add themselves to a group or grant themselves group-drive access without an owner, because that would expose everything shared with the group.
+
+The Cloudflare account owner has direct technical access to all stored data (PRD §10.1).
 
 ## 7. Access requests and no-access screens
 
@@ -294,7 +311,12 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 | Calendar | Calendar owner (personal: the member; group: group managers; workspace: admins) |
 | Event | The organiser |
 
-- A request goes to approvers' inboxes (notifications §3 Notification events: `access_request`). Approvers grant a role up to their own, or decline.
+- A request goes to approvers' inboxes (notifications §3 Notification events: `access_request`).
+- **What approving does:**
+  - documents, whiteboards, files, folders and drives: the approver grants a role up to their own
+  - **calendars:** the approver grants a calendar role (viewer, editor, or freebusy)
+  - **events have no grants:** the organiser approves by **adding the requester as an attendee**, which gives them full details (§4.4).
+- Approvers can also decline.
 - **One open request per requester per object.** Repeats update the existing one.
 - Requests are rate-limited (platform §8 Rate limits and quotas) and **expire after 30 days (default)**.
 - The requester is notified of the outcome (notifications §3 Notification events: `access_request_decided`).
@@ -305,8 +327,8 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 |---|---|
 | HTTP routes | Every route that reads or writes user content calls the engine. No ad-hoc checks (AGENTS §4.1). |
 | WebSocket upgrades | The Worker resolves the role before forwarding (TDD §3.1). The DO stores it in the socket attachment. |
-| Revocation | Total loss of access closes sockets with `4403` through the UserHub room registry (TDD §3.5). The registry covers ChatChannel, DocRoom, BoardRoom **and HuddleRoom**. |
-| **Role downgrade on open sockets** | When a person's effective role on an open document, whiteboard or channel drops (for example editor → viewer, or they leave a group), the Worker calls `updateRole(userId, role)` on the affected DOs through the room registry. The DO updates the attachment and sends `{ type: "role", role }`. A DocRoom then rejects that socket's updates (read-only) and the client switches to view mode; dropping to no access closes the socket (`4403`). Upgrades take effect on the next connect. |
+| Revocation | Total loss of access is `updateAccess(userId, null)`: sockets close with `4403` through the UserHub room registry (TDD §3.5). Disabling a member closes everything with `4401`. The registry covers ChatChannel, DocRoom, BoardRoom **and HuddleRoom**, and is persisted (platform §12). |
+| **Access change on open sockets** | When a person's effective role on an open document, whiteboard, channel or call context changes (for example editor → viewer, or they leave a group), the Worker calls **`updateAccess(userId, role | null)`** on the affected DOs through the room registry. The DO updates the attachment and sends **`{ type: "access.changed", role }`**. A DocRoom then rejects that socket's updates (read-only) and the client switches to view mode without reconnecting. When `role` is **null** (all access lost), the DO closes the socket with **4403**. This is the only name for the mechanism (platform §12, TDD §3.5). |
 | Search, previews, embeds, forwards, notifications, AI | Filtered through the engine at read time (TDD §2.4, §5.3) |
 | Offline edits | Queued offline edits are rejected if the role no longer allows editing when they reach the server. The client keeps them locally and offers "Copy your changes" **(default)**. |
 
@@ -328,7 +350,7 @@ channel_members.role           IN ('admin', 'member');  channel_members.can_post
 
 - `manager` is valid only for drives, and `freebusy` only for calendars. This is enforced by the engine and Zod, not a CHECK.
 - **Defaults:** `folders.general_access` defaults to `restricted`, not `workspace_view` as in TDD §2.1. Personal calendars use `workspace_freebusy`; group calendars use `workspace_view`.
-- **Access requests:** `access_requests` gains `expires_at` and a unique index on `(object_type, object_id, requester_id) WHERE state = 'pending'`.
+- **Access requests:** `access_requests` gains `expires_at` and a unique index on `(object_type, object_id, requester_id) WHERE state = 'pending'`. `object_type` includes `event`; approving an event request adds an `event_attendees` row rather than a grant.
 
 ## 10. API
 
@@ -339,19 +361,27 @@ The engine is internal. It's exposed only through:
 
 ## 11. Acceptance criteria
 
-- **Matrix test.** An automated test enumerates every object type × role × action in §4 and checks the engine's answer. It runs in CI, and a change to §4 must update the test.
+- **Matrix test.** An automated test enumerates every object type × role × action in §4 and checks the engine's answer. It runs in CI, and a change to §4 must update the test. **It grows per milestone:** M1 covers workspace roles, groups and profiles; M3a adds channels, DMs and messages; M4 adds calls; M5a adds calendars and events; M6a adds documents, folders, drives and files.
 - **Union:** a viewer grant on a folder plus an editor grant on an item inside gives editor. An item can't be restricted below its folder.
 - **New items:** a document created in My files is private; one created in a channel folder is editable by channel members; none starts workspace-wide.
 - **Channel made private:** non-members lose access to messages, attachments and the folder within 5 seconds, open sockets included. Items with explicit wider shares keep them, and those items were listed in the conversion dialog.
 - **Admin powers:**
   - an admin can't issue a recovery link, change the email of, disable or delete an admin or owner; an owner can
   - an admin can't invite or promote an admin
-  - a recovery link or email change sends an email to the old address, shows a banner, and revokes pending tokens.
-- **Admins and private content:** an admin can't join or read a private channel or DM. They can remove members from it and archive it.
+  - a recovery link or email change sends an email to the old address, shows the sign-in notice, and revokes pending tokens
+  - without email configured, a recovery link flags the member to every owner until acknowledged
+  - an admin adding themselves to a group, or granting themselves a group-drive role, gets 403; an owner can do it for them.
+- **Admins and private content:** an admin can't join or read a private channel or DM. They can remove members from it and archive it. An admin who was added to a private channel by a member can delete messages in it.
+- **Comments:** an editor can delete another person's comment; a commenter can't.
+- **Document calls:** a viewer can start a call on a document.
+- **Trash:** the item's owner, the person who deleted it, a drive manager and an admin can each restore it; an editor who didn't delete it can't.
+- **Orphaned private event:** after its organiser is disabled, an admin can delete it, and the API never returns its details to them.
+- **Event access request:** approving adds the requester as an attendee; they then see full details.
 - **Calendar:**
   - a calendar editor sees a private event as an unopenable busy block, and API attempts to edit it fail
   - a free/busy viewer sees `public` events in full
   - a free/busy viewer can't join an event call; an invitee can.
+- **Access change:** a socket whose role becomes null is closed with 4403; one whose role drops receives `access.changed`.
 - **Time off:** type and note are absent from every API response except the member's own, including for admins.
 - **Role downgrade:** an editor downgraded to viewer while connected has their next update rejected and their client switches to view mode, without a reconnect.
 - **No-access screens:** a no-access screen for an item in a private space doesn't reveal its title. Messages in private channels have no request option.
@@ -365,10 +395,6 @@ Guest role (Phase 2) · custom roles · deny rules · per-item narrowing below t
 
 1. **Editors sharing:** can editors share and change general access, or only owners? The default above allows editors.
 
-Resolved in the reconciliation pass: calls in announcement channels can be started by anyone who can read the channel (Chat owns this), and host powers pass to a present moderator, otherwise any participant in DM calls, otherwise the earliest remaining participant (§4.5, Calls §6.7).
+Resolved: calls in announcement channels can be started by anyone who can read the channel (Chat owns this); host powers pass to a present moderator, otherwise any participant in DM calls, otherwise the earliest remaining participant (§4.5, Calls §6.7); comment moderation, document calls, admin moderation in private channels, orphaned private events, Trash restore and admin self-access were decided after the second review.
 
-**PRD and TDD changes needed** (to apply when the docs are updated):
-- PRD §10.1: private channel membership ("any member adds, channel admins remove"); document defaults now follow the container; group principals don't apply to channels; owner-only admin actions; time-off privacy.
-- TDD §2.1: union resolution replaces "stop at first match"; the new value lists in §9; `folders.general_access` defaults to `restricted`.
-- TDD §2.4: the search scope CTE must walk drive and folder inheritance and the channel folder rule.
-- TDD §3.5: `updateRole` on room-registered DOs; HuddleRoom joins the room registry.
+**Still pending in other documents:** TDD §2.1 and §3.5 and PRD §10.1 should use the decisions above (comment moderation by editors, viewers starting document calls, admin moderation in private channels they're in, the canonical Trash restore rule, admin self-access needing an owner, `updateAccess` / `access.changed`).
