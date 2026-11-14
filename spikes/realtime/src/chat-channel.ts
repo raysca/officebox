@@ -39,6 +39,7 @@ export interface MessageState {
   senderId: string;
   parentId: string | null;
   body: string | null;
+  mentions: string[];
   reactions: Record<string, string[]>;
   createdAt: number;
   editedAt: number | null;
@@ -85,6 +86,7 @@ export class ChatChannel extends DurableObject<Env> {
         sender_id TEXT NOT NULL,
         parent_id TEXT,
         body TEXT,
+        mentions TEXT NOT NULL DEFAULT '[]',
         reactions TEXT NOT NULL DEFAULT '{}',
         created_at INTEGER NOT NULL,
         edited_at INTEGER,
@@ -136,6 +138,8 @@ export class ChatChannel extends DurableObject<Env> {
     this.ctx.acceptWebSocket(server, [userId]);
     const attachment: Attachment = { userId, role, connId: crypto.randomUUID() };
     server.serializeAttachment(attachment);
+    // Let the user's hub know this room has their socket, so revocation can reach it (TDD §3.5).
+    await this.env.USER_HUB.get(this.env.USER_HUB.idFromName(userId)).registerRoom("channel", channelId);
 
     server.send(
       JSON.stringify({
@@ -210,6 +214,11 @@ export class ChatChannel extends DurableObject<Env> {
 
   private handleSend(ws: WebSocket, att: Attachment, msg: Record<string, unknown>): Promise<void> | void {
     const { clientId, body, parentId } = msg;
+    const mentions = msg.mentions ?? [];
+    if (!Array.isArray(mentions) || mentions.length > 50 || mentions.some((m) => typeof m !== "string" || m.length > 64)) {
+      return this.sendError(ws, "bad_request", "mentions must be up to 50 user IDs", clientId as string);
+    }
+    const uniqueMentions = [...new Set(mentions as string[])];
     if (typeof clientId !== "string" || clientId.length === 0 || clientId.length > 64) {
       return this.sendError(ws, "bad_request", "clientId must be a 1–64 character string");
     }
@@ -228,15 +237,23 @@ export class ChatChannel extends DurableObject<Env> {
       if (existing) return { duplicate: true, seq: Number(existing.seq), id: String(existing.message_id) };
       const now = Date.now();
       const id = crypto.randomUUID();
-      const seq = this.appendEvent("message.created", id, att.userId, clientId, { body, parentId: parentId ?? null }, now);
+      const seq = this.appendEvent(
+        "message.created",
+        id,
+        att.userId,
+        clientId,
+        { body, parentId: parentId ?? null, mentions: uniqueMentions },
+        now,
+      );
       this.sql.exec(
-        `INSERT INTO messages (id, seq, sender_id, parent_id, body, reactions, created_at, last_event_seq)
-         VALUES (?, ?, ?, ?, ?, '{}', ?, ?)`,
+        `INSERT INTO messages (id, seq, sender_id, parent_id, body, mentions, reactions, created_at, last_event_seq)
+         VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
         id,
         seq,
         att.userId,
         (parentId as string | undefined) ?? null,
         body as string,
+        JSON.stringify(uniqueMentions),
         now,
         seq,
       );
@@ -413,6 +430,7 @@ export class ChatChannel extends DurableObject<Env> {
           senderId: m.senderId,
           parentId: m.parentId,
           body: m.body,
+          mentions: m.deletedAt === null ? m.mentions : [],
           reactions: JSON.stringify(m.reactions),
           createdAt: m.createdAt,
           editedAt: m.editedAt,
@@ -507,6 +525,7 @@ function toMessage(row: Row): MessageState {
     senderId: String(row.sender_id),
     parentId: row.parent_id === null ? null : String(row.parent_id),
     body: row.body === null ? null : String(row.body),
+    mentions: JSON.parse(String(row.mentions)),
     reactions: JSON.parse(String(row.reactions)),
     createdAt: Number(row.created_at),
     editedAt: row.edited_at === null ? null : Number(row.edited_at),

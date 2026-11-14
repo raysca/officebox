@@ -1,5 +1,7 @@
 import type { ChatChannel } from "./chat-channel";
 import type { DocRoom } from "./doc-room";
+import type { UserHub } from "./user-hub";
+import type { WorkspacePresence } from "./presence";
 
 /** Full current state of one message, sent from a ChatChannel DO to the D1 copy (TDD §3.3). */
 export interface ProjectionMessage {
@@ -9,6 +11,7 @@ export interface ProjectionMessage {
   senderId: string;
   parentId: string | null;
   body: string | null;
+  mentions: string[];
   reactions: string;
   createdAt: number;
   editedAt: number | null;
@@ -16,10 +19,28 @@ export interface ProjectionMessage {
   lastEventSeq: number;
 }
 
+/** Hub events delivered by the fan-out (TDD §3.5). */
+export interface HubActivity {
+  channels: Array<{ channelId: string; latestSeq: number; changedSeq: number }>;
+  inbox: InboxItem[];
+}
+
+export interface InboxItem {
+  id: string;
+  eventType: "mention" | "dm";
+  channelId: string;
+  seq: number;
+  messageId: string;
+  actorId: string;
+  createdAt: number;
+}
+
 export interface Env {
   DB: D1Database;
   CHAT: DurableObjectNamespace<ChatChannel>;
   DOCS: DurableObjectNamespace<DocRoom>;
+  USER_HUB: DurableObjectNamespace<UserHub>;
+  PRESENCE: DurableObjectNamespace<WorkspacePresence>;
   PROJECTION_QUEUE: Queue<ProjectionMessage>;
   SESSION_SECRET: string;
   DEV_LOGIN?: string;

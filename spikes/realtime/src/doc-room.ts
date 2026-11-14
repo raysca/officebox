@@ -109,7 +109,8 @@ export class DocRoom extends DurableObject<Env> {
     }
     const userId = request.headers.get("x-ob-user");
     const role = request.headers.get("x-ob-role") as DocRole | null;
-    if (!userId || !role || !["owner", "editor", "commenter", "viewer"].includes(role)) {
+    const docId = request.headers.get("x-ob-doc");
+    if (!userId || !docId || !role || !["owner", "editor", "commenter", "viewer"].includes(role)) {
       return new Response("Missing connection identity", { status: 400 });
     }
     const doc = this.loadDoc();
@@ -117,6 +118,7 @@ export class DocRoom extends DurableObject<Env> {
     this.ctx.acceptWebSocket(server, [userId]);
     const attachment: DocAttachment = { userId, role, connId: crypto.randomUUID(), awarenessIds: [] };
     server.serializeAttachment(attachment);
+    await this.env.USER_HUB.get(this.env.USER_HUB.idFromName(userId)).registerRoom("doc", docId);
 
     // Standard y-websocket handshake: server sends sync step 1, plus current awareness.
     const encoder = encoding.createEncoder();

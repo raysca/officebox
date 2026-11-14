@@ -132,3 +132,27 @@ export async function newDoc(
   ]);
   return id;
 }
+
+/** Creates an active user with a unique ID (presence and hubs are shared across tests). */
+export async function newUser(name: string): Promise<string> {
+  const { env } = await import("cloudflare:workers");
+  const id = `${name}-${crypto.randomUUID().slice(0, 8)}`;
+  await env.DB.prepare("INSERT INTO users (id, email, display_name, created_at) VALUES (?, ?, ?, ?)")
+    .bind(id, `${id}@example.com`, name, Date.now())
+    .run();
+  return id;
+}
+
+/** Creates a DM channel between the given users. */
+export async function newDm(...users: string[]): Promise<string> {
+  const { env } = await import("cloudflare:workers");
+  const id = `dm-${crypto.randomUUID().slice(0, 8)}`;
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO channels (id, type, created_by, created_at) VALUES (?, 'dm', ?, ?)").bind(id, users[0], now),
+    ...users.map((u) =>
+      env.DB.prepare("INSERT INTO channel_members (channel_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)").bind(id, u, now),
+    ),
+  ]);
+  return id;
+}

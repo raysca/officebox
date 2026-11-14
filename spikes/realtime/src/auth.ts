@@ -12,6 +12,8 @@ export interface Session {
   uid: string;
   sid: string;
   exp: number;
+  /** users.session_epoch at sign-in; incrementing it revokes every session (TDD §8.1). */
+  ep: number;
 }
 
 export class HttpError extends Error {
@@ -62,7 +64,9 @@ export async function verifySession(token: string, secret: string, now = Date.no
   const ok = await crypto.subtle.verify("HMAC", await hmacKey(secret), sigBytes, enc.encode(payload));
   if (!ok) return null;
   const session = JSON.parse(dec.decode(fromB64url(payload))) as Session;
-  if (typeof session.uid !== "string" || typeof session.exp !== "number" || session.exp < now) return null;
+  if (typeof session.uid !== "string" || typeof session.exp !== "number" || typeof session.ep !== "number" || session.exp < now) {
+    return null;
+  }
   return session;
 }
 
@@ -99,13 +103,16 @@ export async function requireSession(request: Request, env: Env, opts: { stateCh
   const token = getCookie(request, SESSION_COOKIE);
   const session = token ? await verifySession(token, env.SESSION_SECRET) : null;
   if (!session) throw new HttpError(401, "Not signed in");
-  await requireActiveUser(env, session.uid);
+  await requireActiveUser(env, session.uid, session.ep);
   return session;
 }
 
-export async function requireActiveUser(env: Env, userId: string): Promise<void> {
-  const user = await env.DB.prepare("SELECT status FROM users WHERE id = ?").bind(userId).first<{ status: string }>();
+export async function requireActiveUser(env: Env, userId: string, epoch?: number): Promise<void> {
+  const user = await env.DB.prepare("SELECT status, session_epoch FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ status: string; session_epoch: number }>();
   if (!user || user.status !== "active") throw new HttpError(401, "Account is not active");
+  if (epoch !== undefined && epoch !== user.session_epoch) throw new HttpError(401, "Session revoked");
 }
 
 /**
@@ -132,7 +139,7 @@ export async function authenticateUpgrade(request: Request, env: Env, target: st
   const session = token ? await verifySession(token, env.SESSION_SECRET) : null;
   if (!session) throw new HttpError(401, "Not signed in");
   if (request.headers.get("Origin") !== expectedOrigin(request, env)) throw new HttpError(403, "Origin not allowed");
-  await requireActiveUser(env, session.uid);
+  await requireActiveUser(env, session.uid, session.ep);
   return session.uid;
 }
 

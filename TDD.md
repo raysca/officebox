@@ -782,7 +782,7 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 - on the user's UserHub, and
 - on every affected ChatChannel, DocRoom or BoardRoom DO.
 
-Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
+To find every affected DO, each ChatChannel, DocRoom and BoardRoom object registers a new connection with the user's UserHub (`registerRoom(kind, id)`), costing one call per connection. Registrations are hints: stale ones are harmless and are pruned after 24 hours. For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
 
 
 ### 3.6 Huddles: audio, video and screen sharing (Phase 2)

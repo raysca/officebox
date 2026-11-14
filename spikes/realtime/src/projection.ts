@@ -10,17 +10,18 @@ export async function applyProjection(db: D1Database, messages: ProjectionMessag
     statements.push(
       db
         .prepare(
-          `INSERT INTO messages (channel_id, seq, id, sender_id, parent_id, body, reactions, created_at, edited_at, deleted_at, last_event_seq)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO messages (channel_id, seq, id, sender_id, parent_id, body, mentions, reactions, created_at, edited_at, deleted_at, last_event_seq)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (channel_id, seq) DO UPDATE SET
              body = excluded.body,
+             mentions = excluded.mentions,
              reactions = excluded.reactions,
              edited_at = excluded.edited_at,
              deleted_at = excluded.deleted_at,
              last_event_seq = excluded.last_event_seq
            WHERE excluded.last_event_seq > messages.last_event_seq`,
         )
-        .bind(m.channelId, m.seq, m.id, m.senderId, m.parentId, m.body, m.reactions, m.createdAt, m.editedAt, m.deletedAt, m.lastEventSeq),
+        .bind(m.channelId, m.seq, m.id, m.senderId, m.parentId, m.body, JSON.stringify(m.mentions), m.reactions, m.createdAt, m.editedAt, m.deletedAt, m.lastEventSeq),
     );
     maxSeqByChannel.set(m.channelId, Math.max(maxSeqByChannel.get(m.channelId) ?? 0, m.lastEventSeq));
   }

@@ -13,6 +13,7 @@ export async function seed(env: Env): Promise<void> {
         ('dave', 'dave@example.com', 'Dave', 'member', ?1)`,
     ).bind(now),
     db.prepare("UPDATE users SET status = 'disabled' WHERE id = 'dave'"),
+    db.prepare("UPDATE users SET status = 'active' WHERE id IN ('alice', 'bob', 'carol')"),
     db.prepare(
       `INSERT OR IGNORE INTO channels (id, type, name, created_by, created_at) VALUES
         ('general', 'public', 'general', 'alice', ?1),

@@ -242,6 +242,7 @@ describe("D1 copy via outbox and queue (TDD §3.3)", () => {
       senderId: "alice",
       parentId: null,
       body: "v1",
+      mentions: [],
       reactions: "{}",
       createdAt: 1,
       editedAt: null,

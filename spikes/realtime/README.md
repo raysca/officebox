@@ -22,15 +22,21 @@ A throwaway prototype of Officebox's realtime core. It tests the riskiest parts 
 | Compaction at 500 updates or on last disconnect; reload after eviction (§4.3) | `src/doc-room.ts` | compaction tests |
 | Snapshots split into 4 MB chunks under the 8 MB row limit (a 9 MB document) (§4.3) | `src/doc-room.ts` | chunking test |
 | `databaseSize` available for storage monitoring (§7.7) | `stats()` | introspection test |
+| **UserHub:** one hub socket per tab; several tabs count as one presence (§3.5) | `src/user-hub.ts` | `hub.test.ts` › presence |
+| **WorkspacePresence:** online/offline/status broadcasts; heartbeats; expiry of crashed hubs (§3.5) | `src/presence.ts` | presence tests |
+| **Batched fan-out** to online members only: one hub call per consumer batch; offline users cost nothing (§3.5) | `src/fanout.ts` | fan-out tests |
+| Inbox items for mentions and DMs: members only, never the sender, not for deleted messages, idempotent on redelivery (§3.3, PRD §5.3) | `src/fanout.ts` | inbox tests |
+| Unread and mention counts; marking a channel read resolves its inbox items (§3.5, PRD §5.3) | `/api/unread`, `/api/channels/:id/read`, `/api/inbox` | DM test |
+| **Full revocation:** disabling a user closes their hub, channel and document sockets (`4401`), and `session_epoch` kills old cookies (§3.5, §8.1) | `revoke()`, `registerRoom()` | revocation test |
 
-**Results:** 30 of 30 tests pass in the local Workers runtime (Miniflare / workerd). The stock-client check passes against `wrangler dev`.
+**Results:** 40 of 40 tests pass (three consecutive runs) in the local Workers runtime (Miniflare / workerd). The stock-client check passes against `wrangler dev`.
 
 ## Running it
 
 ```sh
 cd spikes/realtime
 npm install --legacy-peer-deps   # see "Tooling notes"
-npm test                         # 30 tests
+npm test                         # 40 tests
 npm run typecheck
 
 # Stock y-websocket client against a local dev server
@@ -57,12 +63,14 @@ Everything in the table works as the TDD describes. In particular:
    - Add this to TDD §4.1.
 2. **Queue size limits need chunking in the outbox drain.** A queue message is limited to 128 KB and a `sendBatch` call to 256 KB. Messages can be up to 40 KB, so a full batch of 100 can exceed the batch limit. The drain chunks by size, and rows are only removed from the outbox once their chunk has been sent.
 3. **Stock clients need a fresh ticket on every reconnect.** Tickets are single-use, so `y-websocket`'s automatic reconnect fails with a used ticket. `y-websocket` rebuilds its URL from `provider.params` on each connect, so a client can set `provider.params.ticket` from a new `POST /auth/ws-ticket` before reconnecting. Officebox's own browser client uses cookies and is unaffected.
-4. **Durable Objects get one alarm each, so timers must share it.** This confirms the TDD's "multiplex timers in `meta`" note. The outbox drain reschedules itself for the earliest pending retry.
+4. **Revocation needs to know which rooms a user is in.** Disabling a user must close their sockets in every channel and document, but nothing central knew which ones. Each channel or document object now registers the connection with the user's UserHub (`registerRoom`), costing one call per connection. `revoke()` closes the user's hub sockets and asks each registered room to close theirs. Registrations are only hints: stale ones are harmless and are pruned after 24 hours. Add this to TDD §3.5.
+5. **The fan-out caches the online list per consumer isolate for 5 seconds.** The cache must be scoped so a user who has just connected can be missed for at most that long. Their hub's welcome and REST unread counts cover the gap.
+6. **Durable Objects get one alarm each, so timers must share it.** This confirms the TDD's "multiplex timers in `meta`" note. The outbox drain reschedules itself for the earliest pending retry.
 
 ### Not covered
 
 - **Billing behaviour.** The spike shows sockets survive eviction, but whether idle hibernation stops billed duration can only be measured on a real deployment.
-- **Production pieces:** the UserHub, WorkspacePresence and HuddleRoom objects, search projection, revision history, multi-tab leader election, and `session_epoch` checks on refresh.
+- **Production pieces:** HuddleRoom, search projection, revision history, multi-tab leader election (each tab opens its own hub socket here), refresh-token rotation, and email/push for offline recipients.
 - **Load and latency** against the TDD §9.2 targets.
 
 ### Tooling notes
