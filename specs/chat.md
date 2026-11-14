@@ -1,7 +1,7 @@
 # Spec: Chat
 
 **Status:** Draft for review
-**Revision:** Revised after independent review (14 Nov 2026)
+**Revision:** Revised after independent review (14 Nov 2026); revised after the second review (channel config in the DO, unread definition, message size caps, in-call chat kind)
 **Feature name:** Chat (marketing name to be decided later)
 **Milestone:** M3 ([PLAN](../PLAN.md)), in slices M3a–M3c (§18) · **Related:** PRD §5.4, §8; TDD §2.2, §3.3–3.5; [Identity & Access](identity.md), [Permissions](permissions.md), [Notifications](notifications.md), [Platform](platform.md)
 
@@ -31,7 +31,7 @@ Real-time team conversation:
 | Read receipts | **None** |
 | Extras in the first release | **Pins, saved items, polls, external link previews** |
 | @channel / @here | **Anyone may use them.** A confirmation appears in channels with more than 20 members. |
-| Notification levels and mute | Per [Notifications §4](notifications.md): All · Mentions · **Mute (direct @you only)** · Nothing |
+| Notification levels and mute | Per [Notifications §4](notifications.md): All · Mentions · **Mute (direct @you only)** · Nothing. **DMs and group DMs: All or Nothing only** **(default)**. |
 | Offline email | Per [Notifications §6](notifications.md): after 10 minutes unread; **no message text for DMs, group DMs or private channels** unless the member opts in |
 | Sidebar | **Starred section, custom sections, unreads-first view, mute and hide** |
 | Public/private conversion | **Public → private only**, by channel admins |
@@ -41,6 +41,9 @@ Real-time team conversation:
 | Forward | **Live reference**, no content copies |
 | Create from message / reply privately | **Copies the text**, at the user's choice; later changes to the source don't affect the copy |
 | Polls | **Multiple choice, anonymous option (truly anonymous), closing time** |
+| Unread | **Top-level messages and "also send to channel" copies** after the read cursor, excluding your own, system and deleted messages (§7) |
+| Message size | **40 KB of text; the stored message state is capped at 100 KB**, so every message fits the queue's 128 KB limit (§4.1) |
+| In-call chat | Thread replies of kind **`call_chat`**: no follows, notifications, offline email or unread counts (§4.7) |
 
 ## 3. Conversations
 
@@ -51,25 +54,27 @@ Real-time team conversation:
 | **Public channel** | `public` | Every member can find and read it | Members who join | Joining and leaving are free |
 | **Private channel** | `private` | Members only; hidden from everyone else | Members | **Members add people; channel admins remove them** ([Permissions §3](permissions.md)) |
 | **Announcement channel** | `public` or `private` with `posting_policy = 'posters'` | As above | **Channel admins, plus people they choose** ("posters") | Everyone can read, react and reply in threads |
-| **DM** | `dm` | The two people | Both | Created on first message; `dm_key` (sorted IDs) keeps it unique |
+| **DM** | `dm` | The two people (or one person: a DM with yourself is allowed, as personal notes **(default)**) | Both | Created (or returned if it exists) by `POST /dms` before the first message; `dm_key` (sorted IDs) keeps it unique |
 | **Group DM** | `group_dm` | 3 to 8 people | All | **Fixed membership** (below) |
 
 - `channels.type` gains the value `group_dm` in the baseline schema ([Platform §14](platform.md)). `dm_key` is set for both `dm` and `group_dm`, and is NULL otherwise.
 - **Group DMs have fixed membership.** "Add people" creates a **new** group DM with the combined members, and the old one stays. Nobody joins later and sees history they weren't part of.
+- **Leaving DMs and group DMs:** members can't leave; they can **hide** the conversation (§3.3), and it reappears on new activity at their level **(default)**.
 - **Convert to private channel:**
   - offered when a group DM would exceed 8 people, or at any time from the group DM's menu
   - asks for a channel name, then **re-types the conversation in place**: `type` becomes `private`, `dm_key` is cleared, the name is set, and the current participants become members. The first converter becomes channel admin.
   - history is kept, because the participants already had it
   - **(default):** re-type rather than copy, so links and threads keep working.
-- **#general** is created at setup. Everyone is in it, and members can't leave it **(default)**. Owners can make it **read-only**, which works like an announcement channel with owners and admins as posters ([Platform §7](platform.md)).
+- **#general** is created at setup (M3a provisioning, [Platform §13](platform.md)). Everyone is in it, and members can't leave it **(default)**.
+- **Read-only #general** is the `general_read_only` setting ([Platform §7](platform.md)), owner-only. Turning it on sets #general's `posting_policy = 'posters'` with **only owners and admins as posters**; turning it off restores `posting_policy = 'everyone'`. It's implemented through the normal posting policy, not a separate mechanism.
 
 ### 3.2 Channel properties and management
 
-- **Properties:** name (unique, lowercase, `a-z0-9-_`, up to 80 characters; DMs and group DMs have none), topic, description, type, **posting policy** (everyone, or admins and posters) and creator.
+- **Properties:** name (unique, lowercase, `a-z0-9-_`, up to 80 characters; DMs and group DMs have none), topic (up to 250 characters **(default)**), description (up to 1,000 characters **(default)**), type, **posting policy** (everyone, or admins and posters) and creator.
 - **Channel roles:** the creator becomes channel admin. Channel admins can rename, edit the topic and description, set the posting policy, manage posters, remove members, archive, and convert public → private.
 - **Workspace admins:**
   - **Public channels:** the same powers as channel admins.
-  - **Private channels:** can **archive, delete and remove members**, but **can't join or read** them unless a member adds them. Message moderation applies only where they can read ([Permissions §6](permissions.md)).
+  - **Private channels:** can **archive, delete and remove members**, but **can't join or read** them unless a member adds them. In private channels they **are a member of**, they can also delete messages ([Permissions §6](permissions.md)).
 - **No remaining channel admin** (the last one left or was removed): the **longest-standing member becomes channel admin automatically** **(default)**, with a system message.
 - **Join and leave:**
   - Public channels: join from the channel browser, or by being added. A non-member mentioned in a public channel can open it without joining (§6).
@@ -78,6 +83,18 @@ Real-time team conversation:
 - **Archive:** the channel becomes read-only, stays searchable and is hidden from the sidebar; it can be unarchived. No new calls can start in an archived channel. **Delete** (workspace admins only) moves it to Trash for 30 days. What happens to the channel folder, calendar, pins, polls and huddle records is defined in [Platform §4](platform.md).
 - **Convert public → private:** channel admin only. Current members stay; non-members lose access to the conversation, including in search. Private → public isn't possible. The channel folder follows (Documents §3.3).
 
+### 3.4 Channel configuration in the DO
+
+The ChatChannel DO enforces posting rights itself, so it needs the channel's current configuration from D1:
+
+- **`applyConfig(config)`:** a typed-result RPC from the Worker to the ChatChannel DO. `config` holds `{ version, type, postingPolicy, archived, readOnly, posters[], members? }`. `members` is sent only for private channels, DMs and group DMs, which need it for `@here` and DM recipients; public channels resolve membership from D1 at notification time.
+- **Version:** a counter in D1 (`channels.config_version`), incremented on every change. The DO stores the config and version in its `meta` table and ignores an older version.
+- **When:** the Worker calls it after every change to type, posting policy, posters, archive state, read-only #general, or private-channel membership. It also calls it when the DO is first created. A DO with no stored config asks the Worker for it before accepting writes **(default)**.
+- **Open sockets:**
+  - When a member's posting rights change (made or unmade a poster, channel archived, #general made read-only), the DO updates their connection attachment and sends `{ type: "access.changed", role }` with the new role (`member` or `reader`).
+  - When a member loses access (removed from a private channel), the Worker calls `updateAccess(userId, null)` and the DO closes their sockets with code **4403** ([Permissions §8](permissions.md); [Platform §12](platform.md)).
+- The DO rejects a send it isn't allowed to accept with a typed error (`forbidden: posting restricted`), never a thrown exception.
+
 ### 3.3 Sidebar
 
 - **Starred** at the top, then **custom sections** (named, collapsible, per member), then the default **Channels** and **Direct messages** sections.
@@ -85,7 +102,7 @@ Real-time team conversation:
   - drag and drop, **or** a single-pointer alternative: a "Move to…" menu on each conversation and "Move up / Move down" on each section (WCAG 2.5.7)
   - keyboard reordering with Alt+Arrow keys **(default)**.
 - **Unreads-first view:** a toggle that lists only conversations with unread messages, mentions first.
-- **Levels:** each conversation's notification level follows [Notifications §4](notifications.md). **Mute** passes only direct `@you` mentions (no badge otherwise); **Nothing** is complete silence. Muted and Nothing conversations are dimmed.
+- **Levels:** each conversation's notification level follows [Notifications §4](notifications.md). **Mute** passes only direct `@you` mentions (no badge otherwise); **Nothing** is complete silence. DMs and group DMs offer only All or Nothing. Muted and Nothing conversations are dimmed.
 - **Hide** removes a conversation from the sidebar until new activity at its level arrives, or for good for Nothing-level conversations.
 - **Badges:** bold for unread, and a count for mentions and DMs ([Notifications §4](notifications.md)).
 - **Quick switcher** (Cmd/Ctrl+K): jump to any conversation, person or recent item.
@@ -107,7 +124,12 @@ Real-time team conversation:
 - **Attachments:** button, drag-and-drop or paste. Uploads show progress, and a message can be sent while they finish (§10).
 - **Drafts** are saved per conversation (and per thread) on the device. Syncing across devices comes later.
 - **Keys:** Enter sends and Shift+Enter adds a new line **(default)**. Up arrow edits your last message.
-- **Limit:** 40 KB of text per message (TDD §3.3).
+- **Limits:**
+  - 40 KB of text per message (TDD §3.3)
+  - the rich-text JSON (`format`) is capped at **100 KB** **(default)**; larger messages are rejected at send with "This message is too long"
+  - at most **50 distinct reactions** per message **(default)** (§4.4) and **3 previews** (§11).
+
+  With these caps, the full message state the outbox sends to the D1 copy (TDD §3.3) stays under **110 KB**, inside the queue's **128 KB** message limit.
 
 ### 4.2 Display
 
@@ -119,14 +141,15 @@ Real-time team conversation:
 ### 4.3 Editing and deleting
 
 - Authors can **edit anytime**. Edited messages show "(edited)", and no history is visible.
-- Authors can **delete anytime**. Channel admins, and workspace admins **in channels they can read**, can delete any message in their scope. That is audited, and the author is told an admin removed it **(default)**.
+- Authors can **delete anytime**. Channel admins, and workspace admins **in public channels and in private channels they're a member of**, can delete any message in their scope. That is audited, and the author gets a `message_removed` notification ([Notifications §3](notifications.md)) **(default)**.
 - Deleting leaves a "This message was deleted" placeholder if the message has thread replies; otherwise it disappears.
 - The content is redacted from the replay log, the D1 copy and search (TDD §2.2). The message's **files are deleted with it** (§10).
+- **Notifications are retracted:** matching inbox previews are cleared, counts are recalculated, and pending offline emails and toasts for the message are cancelled ([Notifications §3.1](notifications.md)).
 - Live references to it (forwards, embeds) show "This message was deleted". Text copies made with Create from message or Reply privately are **not** affected (§4.5).
 
 ### 4.4 Reactions
 
-Quick reactions (the last 6 used) and the full picker. Hover shows who reacted. Your own reactions are highlighted. Unlimited distinct emoji per message **(default)**.
+Quick reactions (the last 6 used) and the full picker. Hover shows who reacted. Your own reactions are highlighted. At most **50 distinct emoji per message** **(default)**; a 51st distinct emoji is refused, while adding yourself to an existing reaction always works.
 
 ### 4.5 Message actions
 
@@ -136,7 +159,7 @@ Quick reactions (the last 6 used) and the full picker. Hover shows who reacted. 
 | React | Anyone who can read | In announcement channels too |
 | Edit / delete | Author; admins can delete (§4.3) | |
 | **Copy link** | Anyone who can read | Permalink that opens the conversation at the message (or the thread) |
-| **Forward** | Anyone who can read | **A live reference, not a copy.** Shows the original as it is now: edits apply, and deletion shows "deleted". Recipients without access see "A message you don't have access to" ([Permissions §7](permissions.md)). Forwarding from a private conversation to people outside it shows a warning first: "Most recipients can't see this message". |
+| **Forward** | Anyone who can read | **A live reference, not a copy.** Shows the original as it is now: edits apply, and deletion shows "deleted". Recipients without access see "A message you don't have access to" ([Permissions §7](permissions.md)). Forwarding from a private conversation to people outside it shows a warning first: "Most recipients can't see this message". Forwarding uses the REST endpoint only (§17); `message.send` has no forward field. |
 | **Create from message** | Anyone who can read | **Document** (title from the message, body **copied** from it, link back) or **calendar event** (title and description copied). **Task** arrives with projects (Phase 2). The person creating it chooses to copy the content; later edits or deletion of the source don't change the copy. |
 | **Reply privately** | Anyone who can read | Opens a DM with the author with the message text **copied** as a quote (the user can edit or remove it before sending) |
 | Pin / unpin | Channel members, or posters in announcement channels **(default)** | |
@@ -159,6 +182,16 @@ System messages are messages with `sender_id = 'system'` and a `kind`:
 
 - System messages may be posted into announcement channels, read-only #general and archived channels; posting policy doesn't apply to them.
 - `call_started` is the thread root for in-call chat (Calls §6.4). The HuddleRoom DO posts it through a typed ChatChannel RPC that returns a result, not a thrown denial (AGENTS §4.1).
+- **Message kinds:** `messages.kind` is `user`, `call_chat` (§4.7) or one of the system kinds above.
+
+### 4.7 In-call chat messages
+
+In channel and DM calls, in-call chat (Calls §6.4) is stored as **thread replies under the `call_started` message**, with `kind = 'call_chat'`:
+- They create **no thread follows** (nobody auto-follows by sending one).
+- They raise **no `thread_reply` notifications**, no offline email, and **no unread counts**, in the channel or the Threads view.
+- They're shown in the call's chat panel while the call runs, and afterwards in the thread under the call's start message, collapsed by default.
+- The HuddleRoom writes them through the typed ChatChannel RPC. They're **exempt from the per-conversation send limit** and have their own limit instead ([Platform §8](platform.md)).
+- They can be edited, deleted and searched like other messages.
 
 ## 5. Threads
 
@@ -185,14 +218,24 @@ Recipients, levels, DND and email follow [Notifications](notifications.md) §3�
 | `@channel` | All channel members |
 | `@here` | Channel members online when it's sent |
 
+- **Editing to add a mention:** an edit that adds `@person`, `@group`, `@channel` or `@here` notifies **only the newly mentioned** people **(default)**. Removing a mention doesn't retract an existing notification.
+
 - **@channel / @here:** anyone may use them. In channels with more than 20 members the composer asks "This will notify *N* people. Send?". Rate-limited per [Platform §8](platform.md).
 - **Time off and DND:** messaging someone on time off or in DND shows their status ([Notifications §5.4](notifications.md)). DMs offer **Notify anyway** ([Notifications §5.2](notifications.md)).
 
 ## 7. Unread state
 
-- A per-member **read cursor** per conversation (`last_read_seq`), advanced when the conversation is visible and focused. **Unread counts** come from the D1 copy (TDD §3.5).
+- A per-member **read cursor** per conversation (`last_read_seq`), advanced when the conversation is visible and focused.
+- **What counts as unread:** messages with `seq > last_read_seq` that are
+  - **top-level messages**, or thread replies posted with **"also send to channel"** (counted once, in the channel)
+  - **not** the member's own
+  - **not** system messages (no system kind counts as unread, including `member_joined`) **(default)**
+  - **not** deleted
+  - **not** thread replies (those are counted per followed thread, below) or `call_chat` messages.
+- **Unread counts** come from the D1 copy (TDD §3.5). The copy lags the DO by a few seconds, so acceptance tests either wait for the copy to converge (projected seq ≥ the last sent seq) or compute the count from the DO's history **(default)**.
+- **Writing the cursor:** the client debounces cursor moves (at most one write every 2 seconds, plus on blur and when leaving the conversation) **(default)** and calls `PUT /channels/:id/read` with `{ seq }`. The server only moves the cursor forward, so a late or duplicate write is harmless.
 - Opening a conversation marks it read up to what was shown. Matching inbox items resolve automatically, and any pending offline email is cancelled ([Notifications §6](notifications.md)).
-- **Thread read state** is tracked separately per followed thread (`thread_follows.last_read_seq`).
+- **Thread read state** is tracked separately per followed thread (`thread_follows.last_read_seq`), with the same rules (own, deleted and `call_chat` replies don't count).
 - Unread state syncs across a member's devices through the hub.
 
 ## 8. Pins and saved items
@@ -275,10 +318,10 @@ Recipients, levels, DND and email follow [Notifications](notifications.md) §3�
 ## 14. Moderation and administration
 
 - **Channel admins** remove messages, members and posters in their channel. **Workspace admins** can do the same in public channels and in private channels they belong to. In other private channels they can only archive, delete and remove members (§3.2).
-- Every admin removal is audited. The author is told their message was removed by an admin **(default)**.
+- Every admin removal is audited. The author gets a `message_removed` notification ([Notifications §3](notifications.md)) **(default)**.
 - Workspace settings, owned by [Platform §7](platform.md):
   - external link previews on or off, plus blocked domains
-  - read-only #general (owners)
+  - read-only #general (`general_read_only`, owners; §3.1)
   - default channels (Identity §4.11; public channels only, **(default)**).
 
 ## 15. Data model (additions)
@@ -289,11 +332,14 @@ Recipients, levels, DND and email follow [Notifications](notifications.md) §3�
 - `preview.attached` / `preview.removed`
 
 Message state adds:
-- `kind` (`user` or a system `kind`, §4.6), `format` (rich-text JSON) plus `text` (plain)
+- `kind` (`user`, `call_chat` or a system `kind`, §4.6), `format` (rich-text JSON, at most 100 KB) plus `text` (plain)
 - `reply_count`, `last_reply_at`, `thread_participants`
 - `also_in_channel`
 - `forwarded_from` (message reference: `{ channelId, messageId }`)
-- `previews` (JSON array of `url_hash`).
+- `previews` (JSON array of `url_hash`, at most 3)
+- reactions capped at 50 distinct emoji (§4.4).
+
+The DO's `meta` table also stores the channel configuration and its version (§3.4).
 
 Polls: a `polls` table in the DO (`id`, `message_id`, `options`, `multiple`, `anonymous`, `closes_at`, `poll_secret`, `closed_at`) and `poll_votes` (`poll_id`, `voter_key`, `option_ids`). For non-anonymous polls `voter_key` is the user ID; for anonymous polls it's the HMAC key (§9).
 
@@ -302,13 +348,15 @@ Polls: a `polls` table in the DO (`id`, `message_id`, `options`, `multiple`, `an
 -- channels (baseline per Platform §14): type IN ('public','private','dm','group_dm'); dm_key set for dm and group_dm
 ALTER TABLE channels ADD COLUMN topic TEXT;
 ALTER TABLE channels ADD COLUMN description TEXT;
-ALTER TABLE channels ADD COLUMN posting_policy TEXT NOT NULL DEFAULT 'everyone' CHECK (posting_policy IN ('everyone', 'posters'));
+ALTER TABLE channels ADD COLUMN posting_policy TEXT NOT NULL DEFAULT 'everyone';   -- 'everyone' | 'posters' (Zod-validated)
+ALTER TABLE channels ADD COLUMN config_version INTEGER NOT NULL DEFAULT 0;         -- §3.4; incremented on every config change
 ALTER TABLE channel_members ADD COLUMN can_post INTEGER NOT NULL DEFAULT 0;   -- poster in announcement channels
 ALTER TABLE channel_members ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
--- channel_members.notify_level values: 'default','all','mentions','mute','nothing' (Notifications §7)
+-- channel_members.notify_level values: 'default','all','mentions','mute','nothing' (Notifications §7);
+--   DMs and group DMs accept only 'default','all','nothing'. There is no per-conversation email delay (Notifications §6).
 
 -- messages (D1 copy, TDD §2.1): add
-ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';  -- 'user' | 'call_chat' | system kinds (§4.6)
 ALTER TABLE messages ADD COLUMN format TEXT;            -- rich-text JSON; body becomes the plain-text copy ("text")
 ALTER TABLE messages ADD COLUMN reply_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE messages ADD COLUMN previews TEXT;          -- JSON array of url_hash
@@ -317,6 +365,7 @@ ALTER TABLE messages ADD COLUMN also_in_channel INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE messages ADD COLUMN system_payload TEXT;   -- JSON payload for system messages (§4.6); NULL for user messages
 
 -- thread follows: replaces the TDD `follows` table for threads (follows remains for other object types)
+-- muted = 1: the thread stays in the Threads view with its unread count, but raises no thread_reply notifications
 CREATE TABLE thread_follows (user_id TEXT NOT NULL, channel_id TEXT NOT NULL, root_message_id TEXT NOT NULL,
   last_read_seq INTEGER NOT NULL DEFAULT 0, muted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, root_message_id));
 CREATE TABLE saved_items (user_id TEXT NOT NULL, message_id TEXT NOT NULL, channel_id TEXT NOT NULL,
@@ -334,9 +383,11 @@ CREATE TABLE message_previews (channel_id TEXT NOT NULL, message_id TEXT NOT NUL
 ## 16. Realtime protocol (additions)
 
 - **Client → channel DO:**
-  - `message.send` gains `format`, `mentions`, `alsoInChannel` and `forwardOf`
+  - `message.send` gains `format`, `mentions` and `alsoInChannel` (forwarding is REST-only, §4.5)
   - new: `message.pin`, `message.unpin`, `poll.create`, `poll.vote`, `poll.close`, `preview.remove`.
 - **Channel DO → clients:** events as today, including the new types and system `kind`s.
+- **Channel DO → clients:** `access.changed { role }` when a member's posting rights change (§3.4).
+- **Worker → channel DO (RPC):** `applyConfig(config)` and `updateAccess(userId, role | null)` (§3.4).
 - **Hub → client:** `activity` gains thread updates for followed threads (M2).
 
 ## 17. API
@@ -348,11 +399,13 @@ CREATE TABLE message_previews (channel_id TEXT NOT NULL, message_id TEXT NOT NUL
 | `POST /channels/:id/join` · `POST /channels/:id/leave` · `PUT/DELETE /channels/:id/members/:userId` · `PUT /channels/:id/members/:userId/role` · `PUT /channels/:id/posters/:userId` | Membership and roles |
 | `POST /dms` (`{ userIds }` → existing or new DM / group DM) · `POST /dms/:id/convert` (`{ name }`) | DMs and group DMs |
 | `GET /channels/:id/messages?before=&after=&around=` | History (served by the DO via the Worker) |
-| `GET /search/messages?q=` | Search with filters |
+| `GET /search?q=&types=messages,files` | Search with filters (one endpoint for messages and file names; other types per their specs) |
+| `GET /channels/:id/members?cursor=` | Channel member list |
+| `GET /me/threads?cursor=` | Threads view: followed threads with unread counts |
 | `GET /channels/:id/pins` · `GET /me/saved` · `PUT/DELETE /me/saved/:messageId` · `PATCH /me/saved/:messageId` (state) | Pins and saved items |
 | `GET/PUT /me/sidebar` | Sidebar sections, starred, unreads-first |
 | `PUT /channels/:id/read` (`{ seq }`) · `PUT /threads/:rootId/read` | Read cursors |
-| `PUT /channels/:id/notify-level` · `PUT/DELETE /threads/:rootId/follow` · `PUT /channels/:id/hidden` | Levels, follows, hide |
+| `PUT /channels/:id/notify-level` · `PUT/DELETE /threads/:rootId/follow` (`{ muted? }`) · `PUT /channels/:id/hidden` | Levels (DMs: All or Nothing), follows and muted follows, hide |
 | `POST /uploads` (start multipart) · `PUT /uploads/:id/parts/:n` · `POST /uploads/:id/complete` | File uploads (message-owned) |
 | `GET /files/:id` · `POST /files/:id/save-to-folder` (`{ folderId }`) | Download; Save to folder |
 | `DELETE /channels/:id/messages/:messageId/previews/:urlHash` | Remove a preview |
@@ -367,9 +420,11 @@ Message send, edit, delete, react, pin and poll actions go over the channel WebS
 
 | Slice | Contents |
 |---|---|
-| **M3a: Messaging core** | Public and private channels; DMs **and group DMs** (including convert to private); channel browser, join and leave; channel admin basics; composer (rich text, mentions `@person`, `#channel`, emoji, drafts); history, unread markers and read cursors; typing and presence; system messages; edit and delete; quick switcher; default sidebar sections |
-| **M3b: Rich conversation** | Threads (inline and collapsed, follows, Threads view); reactions; message-owned files, Files tab and Save to folder; **pins**; **saved items**; **announcement channels** and read-only #general; **`@group`, `@channel` and `@here`**; forward, create from message, reply privately; **polls**; **external link previews**; search |
-| **M3c: Attention and polish** | Notification levels (Mute and Nothing) and Notify anyway; offline email; **starred and custom sidebar sections, unreads-first, hide**; moderation and admin settings; keyboard shortcuts; accessibility pass |
+| **M3a: Messaging core** | Public and private channels; DMs **and group DMs** (including convert to private); channel browser, join and leave; channel admin basics; channel configuration in the DO (§3.4); composer (rich text, `#channel`, emoji, drafts); **mentions `@person`, `@group`, `@channel` and `@here`** with their notifications at levels All and Mentions ([Notifications §9](notifications.md)); history, unread markers and read cursors; typing and presence; system messages; edit and delete; quick switcher; default sidebar sections; #general and default-channel provisioning |
+| **M3b: Rich conversation** | Threads (inline and collapsed, follows and muted follows, Threads view); reactions; message-owned files, Files tab and Save to folder; **pins**; **saved items**; **announcement channels** and read-only #general; forward, create from message, reply privately; **polls**; **external link previews**; search |
+| **M3c: Attention and polish** | Notification levels (Mute and Nothing; DMs All or Nothing) and Notify anyway; offline email; **starred and custom sidebar sections, unreads-first, hide**; moderation (with `message_removed`) and admin settings; keyboard shortcuts; accessibility pass |
+
+`call_chat` messages (§4.7) ship with calls (M4).
 
 ## 19. Accessibility
 
@@ -383,7 +438,7 @@ Message send, edit, delete, react, pin and poll actions go over the channel WebS
 
 ## 20. Rate limits
 
-Message send, `@channel`/`@here`, uploads, polls, link preview fetches and Notify anyway are rate-limited per [Platform §8](platform.md).
+Message send, `@channel`/`@here`, uploads, polls, link preview fetches and Notify anyway are rate-limited per [Platform §8](platform.md). `call_chat` messages have their own limit there instead of the per-conversation send limit (§4.7).
 
 ## 21. Acceptance criteria
 
@@ -406,7 +461,9 @@ Message send, `@channel`/`@here`, uploads, polls, link preview fetches and Notif
 - **Mentions:**
   - @channel in a 25-member channel asks for confirmation
   - `@person` for a non-member in a public channel notifies them; in a private channel it offers "Add to channel?" and doesn't notify
-  - at Mute, only `@you` notifies (Notifications acceptance criteria).
+  - at Mute, only `@you` notifies (Notifications acceptance criteria)
+  - editing a message to add `@sam` notifies Sam once; other recipients get nothing new
+  - a DM can't be set to Mute.
 - **Files:**
   - the Files tab lists attachments read-only
   - "Save to folder" creates an independent file that survives deleting the message
@@ -425,14 +482,21 @@ Message send, `@channel`/`@here`, uploads, polls, link preview fetches and Notif
   - hidden conversations reappear on new activity at their level.
 - **Polls:**
   - multiple choice and auto-close work
-  - for an anonymous poll, **no API response, export file, D1 row or DO event contains a voter's user ID**, checked by searching an export for the voter's ID
+  - for an anonymous poll, **no poll table, poll event or poll API response contains a voter's user ID**: an automated test searches the DO's `polls` and `poll_votes` tables, the `poll.*` events in the event log and outbox, the poll rows in an export, and the poll API responses for the voter's ID (other export files, such as the member list, legitimately contain it)
   - double voting is refused.
 - **Link previews:** an external preview stores its image in R2 (at most 1 MB); viewers never request third-party hosts; private-address URLs are refused (Platform §9 tests).
-- **Unread state:** unread counts and the "New" marker are correct after a reconnect and across two devices.
+- **Unread state:**
+  - unread counts follow §7: own messages, system messages, deleted messages, thread replies and `call_chat` messages don't count; an "also send to channel" reply counts once
+  - counts and the "New" marker are correct after a reconnect and across two devices, measured after the D1 copy has converged
+  - a late cursor write with a lower `seq` doesn't move the cursor back.
+- **Channel configuration:** making a member a poster in an announcement channel lets them post within 2 seconds without reconnecting (`access.changed`); archiving the channel stops further posts on open sockets; removing a member from a private channel closes their socket with 4403.
+- **Size caps:** a message whose rich-text JSON exceeds 100 KB is rejected; a 51st distinct reaction is refused; the largest allowed message passes through the queue to the D1 copy.
+- **Deletion and notifications:** deleting a mentioning message removes the mention from the recipient's inbox and cancels their pending offline email.
+- **In-call chat:** `call_chat` messages create no thread follows, no `thread_reply` records, no offline email and no unread counts.
 - **Search:** each filter (`from:`, `in:`, `with:`, `has:file`, `has:link`, `is:thread`, dates) returns only matching messages from conversations the searcher can read, as an automated test per filter.
 - **Performance:**
-  - p95 message round trip under 300 ms in-region (TDD §9.2)
-  - a channel with 10,000 messages renders a 50-message page in under 100 ms and scrolls at 60 fps on a mid-range laptop, as a manual check with the browser's performance panel **(default)**.
+  - p95 message round trip under 300 ms in-region (TDD §9.2), measured by the Playwright harness running in the same region as the Worker over 1,000 messages **(default)**
+  - a channel with 10,000 messages renders a 50-message page in under 100 ms and scrolls at 60 fps, measured with a Chrome DevTools performance trace on a 2020 MacBook Air (M1) or equivalent, as a manual check **(default)**.
 - **Accessibility:** axe passes on the conversation, thread panel and sidebar; a new message is announced in the live region.
 
 ## 22. Later
