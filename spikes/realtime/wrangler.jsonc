@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "officebox-realtime-spike",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "durable_objects": {
+    "bindings": [
+      { "name": "CHAT", "class_name": "ChatChannel" },
+      { "name": "DOCS", "class_name": "DocRoom" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChatChannel", "DocRoom"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "officebox-spike",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "message-projection" }],
+    "consumers": [
+      {
+        "queue": "message-projection",
+        "max_batch_size": 100,
+        "max_batch_timeout": 1,
+        "max_retries": 10,
+        "dead_letter_queue": "message-projection-dlq"
+      }
+    ]
+  },
+  // Spike only: enables /dev/* helper routes (login without password, seed data).
+  "vars": { "DEV_LOGIN": "1" }
+}

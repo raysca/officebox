@@ -876,7 +876,7 @@ Each document or whiteboard is a DocRoom Durable Object. The DO:
 - Persists updates to DO SQLite.
 - Broadcasts updates to other connected clients.
 - Compacts the update log into snapshots periodically.
-- Manages awareness (presence, cursors) and relays it to peers.
+- Manages awareness (presence, cursors) and relays it to peers. The server relays the awareness wire format directly and keeps states in memory only. It does not use the y-protocols `Awareness` class, whose interval timer would stop the object from hibernating. Cursors are lost when the object hibernates, and clients re-announce them within about 15 seconds (confirmed by the realtime spike).
 - Enforces roles (owner/editor/commenter/viewer) server-side; read-only roles' updates are rejected.
 
 ### 4.2 Client architecture
@@ -1457,6 +1457,11 @@ Decided in v1.3 (from the review):
 - Storage: protective mode and trimming of the D1 search copy (§7.7).
 
 To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
+
+**Validated by the realtime spike** ([`spikes/realtime`](spikes/realtime/README.md)): the channel DO write path, dedupe, replay, redaction, outbox to D1 with retry, revocation, Yjs sync with a stock `y-websocket` client, viewer enforcement, compaction, snapshot chunking, and cookie and ticket authentication. Three implementation notes came out of it:
+- The outbox drain must chunk by size: queue messages are limited to 128 KB and each `sendBatch` to 256 KB.
+- Stock clients must fetch a fresh ticket before each reconnect, by updating `provider.params.ticket`.
+- Server-side awareness avoids the y-protocols `Awareness` class (§4.1).
 
 **Still to confirm by measurement, not decision:** a Phase 1 load test should confirm or adjust these numeric defaults:
 - compaction thresholds
