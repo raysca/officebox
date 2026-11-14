@@ -50,7 +50,7 @@ officebox/
 | Worker routing | Hono | Small, Workers-native, typed routes and middleware |
 | Validation | Zod schemas in `packages/shared` | One schema validates both the API and the WebSocket messages, and gives client types |
 | Frontend | React 19, Vite, TanStack Router, TanStack Query | Typed routing; server-state caching works well with realtime invalidation |
-| UI | Tailwind CSS with Radix UI primitives | Accessible building blocks (WCAG 2.2 AA goal, PRD §18); no heavyweight design framework |
+| UI | Tailwind CSS only (no component library for now) | Lightweight; the visual design comes later. Accessibility (WCAG 2.2 AA, PRD §18) is handled in our own components. |
 | Editor / whiteboard | Tiptap (MIT packages) / Excalidraw (MIT) | Decided in PRD §5.5 and TDD §4.2 |
 | Dates and recurrence | Temporal polyfill, `rrule` | Correct time zones and RFC 5545 recurrence for the calendar |
 | Tests | Vitest + `@cloudflare/vitest-plugin`; Playwright | Proven in the spike, including headless screen capture |
@@ -414,6 +414,6 @@ When a module has been promoted and its tests pass in the new structure, its spi
    - keep "huddles" as the feature name.
 2. **Calendar scope for the first release.** Is the M5 **must** list right? In particular: do you want time-off **approvals** in the first release, and how soon do you need two-way Google and Microsoft sync?
 3. **Holiday regions.** Which countries matter first? Is a bundled open dataset with no external API acceptable?
-4. **Stack.** Confirm Hono, Zod, TanStack Router and Query, and Tailwind with Radix (§2).
+4. **Stack.** Confirmed: Hono, Zod, TanStack Router and Query, and Tailwind without Radix (§2).
 5. **Milestone order.** The plan follows your order (auth → chat → Campfire → calendar → documents). Calendar and documents could run in parallel with chat after M2 if you want features sooner.
 6. **Upgrades.** Confirm the release-sync upgrade work stays deferred until just before the first external install (M7).
