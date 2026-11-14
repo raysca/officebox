@@ -282,7 +282,7 @@ CREATE TABLE auth_tokens (                                 -- magic links, passw
 -- invitations: (email NOT NULL is in the baseline table); add groups
 ALTER TABLE invitations ADD COLUMN group_ids TEXT;         -- JSON array
 
--- auth_tokens: notification tracking for admin-issued actions
+-- security notices for admin-initiated actions
 ALTER TABLE users ADD COLUMN pending_security_notice TEXT; -- JSON: in-app banner shown at next sign-in (recovery link issued, email changed)
 
 -- groups: add handle and managers
