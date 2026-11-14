@@ -206,6 +206,17 @@ async function wsTicket(request: Request, env: Env): Promise<Response> {
 }
 
 async function devRoute(request: Request, env: Env, url: URL): Promise<Response> {
+  if (request.method === "GET" && url.pathname === "/dev/media-harness") {
+    // Blank same-origin page that the media run injects participant code into (cookies + Origin check work).
+    return new Response("<!doctype html><meta charset=utf-8><title>media harness</title>", { headers: { "Content-Type": "text/html" } });
+  }
+  if (request.method === "GET" && url.pathname === "/dev/sfu-status") {
+    return Response.json({
+      sfuMode: env.SFU_MODE ?? "real",
+      realtimeConfigured: Boolean(env.REALTIME_APP_ID && env.REALTIME_APP_SECRET),
+      turnConfigured: Boolean(env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN),
+    });
+  }
   if (request.method !== "POST") throw new HttpError(405, "POST only");
   switch (url.pathname) {
     case "/dev/seed":

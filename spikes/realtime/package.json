@@ -7,7 +7,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc --noEmit -p client",
     "stock-client": "node scripts/stock-yjs-client.mjs",
-    "test:browser": "node scripts/browser-screen-share.mjs"
+    "test:browser": "node scripts/browser-screen-share.mjs",
+    "test:media": "node scripts/media-run.mjs",
+    "test:media:self": "node scripts/media-run.mjs --self-test"
   },
   "dependencies": {
     "lib0": "^0.2.120",

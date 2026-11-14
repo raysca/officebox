@@ -1,2 +1,9 @@
 # Copy to .dev.vars for `wrangler dev`. Any long random string works locally.
 SESSION_SECRET=change-me-to-a-long-random-string
+
+# Real-media run (npm run test:media). From the Cloudflare dashboard: Realtime → SFU → create an app.
+# REALTIME_APP_ID=
+# REALTIME_APP_SECRET=
+# Optional, for the restrictive-network (TURN relay) check: Realtime → TURN → create a key.
+# TURN_KEY_ID=
+# TURN_KEY_API_TOKEN=
