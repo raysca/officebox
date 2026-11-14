@@ -1,0 +1,72 @@
+# Real-media run for the realtime spike: three headless Chromium participants in a huddle through the
+# Cloudflare Realtime SFU. Run it from the Actions tab ("Run workflow"). It never runs automatically.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   REALTIME_APP_ID, REALTIME_APP_SECRET    required — Cloudflare dashboard: Realtime → SFU → create an app
+#   TURN_KEY_ID, TURN_KEY_API_TOKEN         optional — enables the TURN relay check (Realtime → TURN)
+name: Realtime media run
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: Show wrangler dev output
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  media:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: spikes/realtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: spikes/realtime/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --legacy-peer-deps playwright@1.63.0
+          npx playwright install --with-deps chromium
+
+      - name: Write .dev.vars from secrets
+        env:
+          REALTIME_APP_ID: ${{ secrets.REALTIME_APP_ID }}
+          REALTIME_APP_SECRET: ${{ secrets.REALTIME_APP_SECRET }}
+          TURN_KEY_ID: ${{ secrets.TURN_KEY_ID }}
+          TURN_KEY_API_TOKEN: ${{ secrets.TURN_KEY_API_TOKEN }}
+        run: |
+          umask 077
+          {
+            echo "SESSION_SECRET=$(openssl rand -hex 32)"
+            echo "REALTIME_APP_ID=${REALTIME_APP_ID}"
+            echo "REALTIME_APP_SECRET=${REALTIME_APP_SECRET}"
+            echo "TURN_KEY_ID=${TURN_KEY_ID}"
+            echo "TURN_KEY_API_TOKEN=${TURN_KEY_API_TOKEN}"
+          } > .dev.vars
+
+      - name: Self-test the measurement code
+        run: npm run test:media:self
+
+      - name: Real-media run
+        run: npm run test:media -- --start ${{ inputs.verbose && '--verbose' || '' }}
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-report
+          path: spikes/realtime/media-report.json
+          if-no-files-found: ignore

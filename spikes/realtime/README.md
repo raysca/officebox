@@ -57,6 +57,42 @@ npm run dev                      # terminal 1
 npm run stock-client             # terminal 2
 ```
 
+## Real-media run
+
+The tests above use a fake SFU. The real-media run sends actual audio and video through the **Cloudflare Realtime SFU**. Three headless Chromium participants, using fake cameras, microphones and screens, join a huddle in `#general`:
+
+| Check | What happens | Target (TDD §9.2) |
+|---|---|---|
+| `join-to-audio` | Bob joins and hears Alice's microphone | < 2 s |
+| `share-start` | Alice shares her (fake) screen; time until both viewers decode the first frame | < 3 s |
+| `simulcast-layers-sent` | Alice's browser sends all three layers (`f`, `h`, `q`) | 3 layers |
+| `simulcast-layer-switch` | Bob switches to layer `q`; the resolution he receives drops to half or less | ≤ ½ width |
+| `turn-relay` | Carol joins relay-only (`iceTransportPolicy: "relay"`) and still receives the share. Skipped without a TURN key. | relay and frames |
+| `moderator-stop` | Bob takes over sharing; Alice (host) stops him; Carol's stream stops arriving | < 3 s |
+| `screen-latency-p95` | Alice shares a timestamp probe; Bob decodes about 100 frames to measure glass-to-glass delay | p95 < 500 ms |
+
+It also records audio and screen bitrates. Results go to `media-report.json`, and the process exits non-zero if a check fails.
+
+**You need** a Realtime SFU app (Cloudflare dashboard → Realtime → SFU): `REALTIME_APP_ID` and `REALTIME_APP_SECRET`. Optionally add a TURN key (`TURN_KEY_ID`, `TURN_KEY_API_TOKEN`) for the relay check. A run uses a few hundred MB at most, well inside the 1,000 GB monthly free allowance.
+
+**On your computer:**
+
+```sh
+cp .dev.vars.example .dev.vars        # then fill in the Realtime values
+npm run test:media:self               # measurement self-test, no credentials needed
+npm run test:media -- --start         # starts wrangler dev with SFU_MODE=real and runs the checks
+# against an already-running or deployed spike in real mode:
+npm run test:media -- --base=https://your-spike.example
+```
+
+If Playwright isn't installed globally: `npm i --no-save playwright@1.63.0 && npx playwright install chromium`.
+
+**In GitHub Actions:** add the values as repository secrets, then run the **Realtime media run** workflow from the Actions tab (`.github/workflows/media-run.yml`). The report is uploaded as an artifact.
+
+**From a Claude cloud session:** the Realtime API is reachable through the session's proxy, as the runner's preflight confirmed. Whether WebRTC media itself can leave the container is unverified; the run will show it.
+
+The probe's measurement code is checked by `npm run test:media:self`. Over a local WebRTC loopback it decodes every sample, at about 36 ms p50.
+
 ## Findings
 
 ### The design holds

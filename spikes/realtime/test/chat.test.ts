@@ -38,7 +38,11 @@ describe("authentication and access (TDD §3.1)", () => {
   });
 
   it("rejects a tampered session cookie", async () => {
-    const cookie = (await login("alice")).replace(/.$/, (c) => (c === "A" ? "B" : "A"));
+    // Flip a character in the middle of the payload. (The signature's last base64url character carries padding
+    // bits, so changing it can leave the decoded signature unchanged.)
+    const original = await login("alice");
+    const i = original.indexOf("=") + 10;
+    const cookie = original.slice(0, i) + (original[i] === "A" ? "B" : "A") + original.slice(i + 1);
     const res = await upgrade(`/ws/channels/${general}`, { cookie });
     expect(res.status).toBe(401);
   });
