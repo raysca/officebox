@@ -1214,7 +1214,7 @@ node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangl
 | Allow GitHub Actions to create pull requests | Manual repository setting | Upgrades |
 | Make the repository private | Recommended | Keeps scheduled release-sync running |
 | Custom domain | Manual; recommended before inviting the team | Stable sign-in, PWA and push |
-| Email provider API key or SMTP credentials | Manual (Worker secrets) | Email invitations, resets and notifications |
+| Email: Cloudflare Email Service sender domain (default), or an email provider API key or SMTP credentials | Manual: onboard the domain in the dashboard, or add the Worker secrets | Email invitations, resets and notifications |
 | Realtime SFU app and TURN key | Manual (Worker secrets) | Calls and screen sharing (M4) |
 | AI Gateway and provider keys | Manual | AI (Phase 3) |
 | Read-only analytics API token | Optional (Worker secret) | Usage panel with Cloudflare's own figures |
@@ -1461,12 +1461,21 @@ CREATE TABLE exports (
 
 ### 7.6 Email delivery
 
-Email sits behind an adapter interface with two kinds of driver:
+Email sits behind an adapter interface with three kinds of driver (product-owner decision, 15 Nov 2026):
 
-1. **HTTP API providers** (recommended): Resend, Postmark, Amazon SES, Mailgun or SendGrid, called with `fetch`. The API key is a Worker secret. This is the simplest and most reliable option from Workers.
-2. **Generic SMTP:** a TCP socket via `connect()`, using STARTTLS on port 587 (`secureTransport: "starttls"`, then `startTls()`) or implicit TLS on port 465, with AUTH PLAIN or LOGIN, through a maintained Workers-compatible SMTP library. Cloudflare blocks outbound port 25, so direct delivery to recipient mail servers isn't possible.
+1. **Cloudflare Email Service (default):** the `send_email` Worker binding (`"send_email": [{ "name": "EMAIL" }]`, then `env.EMAIL.send({ from, to, subject, html, text, headers, attachments })`, returning `{ messageId }`).
+   - There are no API keys to manage. Onboarding the sender domain adds SPF, DKIM, DMARC and bounce records automatically.
+   - **Requirements:** the workspace's sending domain must use **Cloudflare DNS** and be onboarded in Email Service, and the account must be on **Workers Paid** (3,000 emails a month included, then $0.35 per 1,000).
+   - **Limits:** 50 recipients per message, 25 MiB per message, and a daily quota that starts low and grows. Officebox sends one recipient per message.
+   - Errors are thrown with a `code`, which the driver maps to typed results. `E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`, `E_DELIVERY_FAILED` and `E_INTERNAL_SERVER_ERROR` are transient. `E_SENDER_NOT_VERIFIED`, `E_SENDER_DOMAIN_NOT_AVAILABLE`, `E_RECIPIENT_SUPPRESSED`, `E_VALIDATION_ERROR` and the other validation codes are permanent.
+   - **Still in public beta** (launched April 2026). This is why the other drivers stay.
+   - `wrangler dev` sends real mail through remote bindings, so tests use a fake driver.
+2. **HTTP API providers:** Resend, Postmark, Amazon SES, Mailgun or SendGrid, called with `fetch`. The API key is a Worker secret. Use this for a workspace whose domain isn't on Cloudflare DNS, or as a fallback while Cloudflare's service is in beta.
+3. **Generic SMTP:** a TCP socket via `connect()`, using STARTTLS on port 587 (`secureTransport: "starttls"`, then `startTls()`) or implicit TLS on port 465, with AUTH PLAIN or LOGIN, through a maintained Workers-compatible SMTP library. Cloudflare blocks outbound port 25, so direct delivery to recipient mail servers isn't possible.
 
-Cloudflare Email Workers are not used for invitations. Their sending binding is aimed at verified destination addresses rather than arbitrary recipients *(verify against current Cloudflare email offerings before ruling out)*.
+The admin picks the driver in settings. **Send test email** checks the configuration. A workspace on `*.workers.dev` with no custom domain can't use the Cloudflare driver, so it uses an HTTP provider or SMTP, or no email at all, since copy-link invites always work.
+
+**Receiving email** (Email Routing to a Worker `email()` handler) is not used at launch. Reply-by-email and email-to-channel are listed under Later in the notifications and chat specs.
 
 **Delivery:**
 
@@ -1707,7 +1716,7 @@ Every question open at v1.1 now has a decision:
 | InboxFanout DO vs. D1 polling | Neither: a per-user **UserHub** DO with a single hub socket, plus a single **WorkspacePresence** DO; batched fan-out to online users only | §2.2, §3.5 |
 | Snapshot compaction tuning | Compact at 500 updates, 1 MB or last disconnect; 4 MB chunks; hourly and daily versions in R2 | §4.3 |
 | Export format and restore tooling | Export format v1 (JSON Lines + Yjs + files) produced by Workflows; Restore from export in first-run setup; CLI for large archives | §7.5 |
-| SMTP provider matrix and retry policy | HTTP API providers preferred; STARTTLS SMTP on port 587 or 465; 8 retries with exponential backoff capped at 2 h; DLQ | §7.6 |
+| Email driver matrix and retry policy | Cloudflare Email Service binding by default (beta; needs Cloudflare DNS and Workers Paid); HTTP API providers and STARTTLS SMTP on port 587 or 465 as alternatives; 8 retries with exponential backoff capped at 2 h; DLQ | §7.6 |
 | Deploy to Cloudflare behaviour | Checked: secrets come from `.dev.vars.example`; resource IDs are written back into `wrangler.jsonc`; git history not documented, so the design doesn't depend on it | §6.1, §6.4 |
 | D1 migration transactions | Not documented, so migrations are treated as possibly partly applied: one change per file, safe to re-run, expand/contract | §6.5 |
 | Event log horizon and outbox batching | Defaults: 30-day horizon, 250 ms batching delay, 100 events per batch | §2.2, §3.3 |

@@ -378,7 +378,7 @@ What ships in each milestone. Later slices extend earlier ones; nothing ships be
 
 ## 12. Later
 
-Web push and native push (PRD §8) · per-device settings · keyword notifications · VIP senders who always break through · smart "catch up" summaries (Phase 3 AI) · `assignment` and `review_request` events (projects, Phase 2).
+Web push and native push (PRD §8) · per-device settings · keyword notifications · VIP senders who always break through · smart "catch up" summaries (Phase 3 AI) · `assignment` and `review_request` events (projects, Phase 2) · **reply by email** to mention and DM notification emails, received through Cloudflare Email Routing into a Worker `email()` handler and posted to the thread (product-owner decision, 15 Nov 2026: design it with chat, not at launch).
 
 ## 13. Open questions
 
