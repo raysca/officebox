@@ -140,7 +140,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - single-use links that expire after 7 days, roles at invite time
   - **copy link** (no email needed) and **email**
   - accept flow that creates the account
-- **Email:** the adapter interface with HTTP-API drivers (Resend, Postmark, SES) and SMTP over STARTTLS. Includes the queue, retries, DLQ and **Send test email** (TDD §7.6).
+- **Email:** the adapter interface, with the **Cloudflare Email Service** binding as the default driver, plus HTTP-API drivers (Resend, Postmark, SES) and SMTP over STARTTLS. Includes the queue, retries, DLQ and **Send test email** (TDD §7.6).
 - **Password reset** when email is configured.
 - **Profiles:** display name, avatar (R2), **time zone**, **working hours** and **location/region** (the calendar needs all three), and status text with an emoji.
 - **Roles and groups:** owner, admin and member; admin-managed groups (PRD §10.1).
@@ -164,7 +164,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - CSRF header and `Origin` checks; rate limits on setup and sign-in
   - the permission engine in `packages/shared` with workspace roles, and the first matrix test
 - **M1b — Email and invitations:**
-  - the email adapter (Resend, Postmark, SES, SMTP over STARTTLS), its queue, retries and dead-letter queue, and **Send test email**
+  - the email adapter (Cloudflare Email Service binding by default; Resend, Postmark, SES and SMTP over STARTTLS as alternatives), its queue, retries and dead-letter queue, and **Send test email**
   - invitations: copy link and email, single-use, 7-day expiry, role at invite time
   - the accept flow that creates the account
   - the "allowed email domains" setting (Should)

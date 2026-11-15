@@ -529,7 +529,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 | `POLL_SECRET_KEY` | Derives per-poll secrets for anonymous voter keys (alternatively, per-poll secrets are generated and stored in the channel DO) **(default: derive)** | Yes (from M3b) | Never rotated for existing polls; rotating changes keys only for new polls |
 | `SETUP_TOKEN` | First-run setup | Optional (generated if absent) | Ignored after setup; delete it |
 | `RECOVERY_TOKEN` | Owner recovery | Optional | Set only during recovery, then delete |
-| Email provider key(s), SMTP credentials | Outgoing email | Optional | Rotate at the provider |
+| Email provider key(s), SMTP credentials | Outgoing email when not using the default Cloudflare Email Service binding, which needs no secret | Optional | Rotate at the provider |
 | `REALTIME_APP_ID`, `REALTIME_APP_SECRET` | Realtime SFU for calls | Optional (calls) | Rotate in the Cloudflare dashboard |
 | `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | TURN credentials | Optional | Rotate in the dashboard |
 | `ANALYTICS_API_TOKEN` | Read-only usage panel | Optional | Rotate in the dashboard |

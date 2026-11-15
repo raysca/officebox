@@ -446,7 +446,7 @@ Further identity capabilities:
 
 ## 7. Email
 
-Officebox does not operate a mail server. It supports configurable outgoing email through an external SMTP service or relay. Likely uses:
+Officebox does not operate a mail server. Outgoing email uses **Cloudflare Email Service** by default, when the workspace's domain is on Cloudflare DNS. An external email API provider or SMTP relay can be configured instead (TDD §7.6). Likely uses:
 
 - Invitations.
 - Password resets.
@@ -649,7 +649,7 @@ Officebox reuses mature open-source projects and libraries wherever practical, w
 
 1. Embedded libraries/components: Tiptap editor, Yjs, board UI components and other frontend capabilities integrated into the React application.
 2. Cloudflare-native services: Durable Objects, D1, R2, Vectorize, Workers AI, AI Gateway, Realtime SFU and Queues.
-3. Optional external services: SMTP relay for email; model providers via BYOK.
+3. Optional services: email (Cloudflare Email Service by default, or an external API provider or SMTP relay); model providers via BYOK.
 
 Every candidate is assessed for licence, maturity, security, React integration, identity integration, data ownership, deployment footprint and replaceability.
 
@@ -671,7 +671,7 @@ Some capabilities need a short manual step after deployment. The admin UI shows 
 - allowing GitHub Actions to open pull requests, needed for upgrades
 - AI Gateway provider keys
 - Realtime SFU credentials
-- SMTP credentials
+- Email provider API key or SMTP credentials (not needed with Cloudflare Email Service)
 - a custom domain
 
 The customer does not manage servers, databases, ports or certificates. There is no persistent volume to provision and no backup policy to configure manually.
@@ -798,7 +798,7 @@ Delivered in the milestones in [PLAN.md](PLAN.md): foundation → identity → r
 - Personal Inbox with Today, Upcoming, Inbox, Assigned to me and Following views, using Officebox-native sources (§5.3).
 - Explicit links between conversations and documents.
 - Basic in-app notifications via Durable Objects.
-- SMTP configuration for transactional email.
+- Email configuration for transactional email (Cloudflare Email Service sender domain, or a provider or SMTP).
 - Application realtime via Durable Object WebSockets with hibernation.
 - Health checks, diagnostics, storage protective mode, post-deploy checklist and usage panel.
 - Owner recovery procedure.
@@ -960,7 +960,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Retention and deletion | Kept until deleted; 30-day Trash; immediate message deletion; documented 30-day platform recovery window | Baseline |
 | Message storage | Channel Durable Object is the source of truth; guaranteed asynchronous copy to D1 for search, inbox and export | Agreed |
 | Onboarding | Invitation-based; manual links supported without SMTP | Agreed |
-| Email | External SMTP; no mail server | Agreed |
+| Email | Cloudflare Email Service by default; external API provider or SMTP as alternatives; no mail server | Agreed (revised 15 Nov 2026) |
 | Notifications | Central service with multiple delivery adapters; All/Mentions/Mute/Nothing; DND holds banners, email and rings; "Notify anyway"; no text in DM and private-channel emails unless opted in | Agreed ([notifications](specs/notifications.md)) |
 | Web push | Phase 2 | Agreed |
 | Tasks/projects | Phase 2 | Agreed |

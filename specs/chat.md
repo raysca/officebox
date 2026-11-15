@@ -501,7 +501,7 @@ Message send, `@channel`/`@here`, uploads, polls, link preview fetches and Notif
 
 ## 22. Later
 
-Scheduled send and message reminders · mark unread · keyword notifications · custom emoji · slash commands · synced drafts · message edit history · Slack import (PRD §19) · bots and webhooks (PRD §19) · push notifications (Phase 2, PRD §8) · editable group-DM membership.
+Scheduled send and message reminders · mark unread · keyword notifications · custom emoji · slash commands · synced drafts · message edit history · Slack import (PRD §19) · bots and webhooks (PRD §19) · push notifications (Phase 2, PRD §8) · editable group-DM membership · **email to channel**: a per-channel address whose incoming mail is posted to the channel, via Cloudflare Email Routing (product-owner decision, 15 Nov 2026: Later).
 
 ## 23. Open questions
 
