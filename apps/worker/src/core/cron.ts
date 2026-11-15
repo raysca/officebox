@@ -13,7 +13,13 @@ import { rootLogger, type Logger } from "./log";
  * - Jobs run **one after another**, in registration order, so they never compete for D1.
  * - **Overlap guard:** each run takes a lease on its schedule in D1 (`cron_leases`). If the previous
  *   run of the same schedule still holds it (for example a slow 5-minute run), the new trigger skips.
- *   The lease expires after `LEASE_MS` so a crashed run can't block the schedule for good.
+ *   The lease expires after `LEASE_MS` so a crashed run can't block the schedule for good. The job
+ *   timeouts of one schedule must add up to less than `LEASE_MS` (checked at registration), so a
+ *   live run never outlasts its lease.
+ * - **If the lease can't be checked** (D1 unavailable, or the table not there yet mid-deploy), the
+ *   jobs run unguarded and the error is logged **(default)**. Jobs are idempotent, so an occasional
+ *   overlap is harmless, while skipping could stall purges and retention for as long as D1 errors.
+ *   A failure to release the lease is logged; the lease then simply expires.
  * - A job must be **idempotent**: a trigger can fire twice, or be skipped.
  */
 
@@ -105,6 +111,14 @@ export function createCronDispatcher(jobs: readonly CronJob[], log: Logger = roo
     if (names.has(job.name)) throw new Error(`Job ${job.name} registered twice`);
     names.add(job.name);
   }
+  for (const schedule of SCHEDULES) {
+    const total = jobs
+      .filter((j) => j.schedule === schedule)
+      .reduce((sum, j) => sum + (j.timeoutMs ?? DEFAULT_JOB_TIMEOUT_MS), 0);
+    if (total >= LEASE_MS) {
+      throw new Error(`Jobs on the ${schedule} schedule may run for ${total} ms, beyond the ${LEASE_MS} ms lease`);
+    }
+  }
 
   return async function scheduled(controller: ScheduledController, env: Env): Promise<DispatchReport> {
     const schedule = CRON_SCHEDULES[controller.cron] ?? null;
@@ -115,9 +129,15 @@ export function createCronDispatcher(jobs: readonly CronJob[], log: Logger = roo
     }
 
     const holder = ulid();
-    if (!(await acquireLease(env.DB, schedule, holder, Date.now()))) {
-      cronLog.warn("previous run of this schedule is still going; skipping");
-      return { cron: controller.cron, schedule, skipped: true, jobs: [] };
+    let leased = false;
+    try {
+      leased = await acquireLease(env.DB, schedule, holder, Date.now());
+      if (!leased) {
+        cronLog.warn("previous run of this schedule is still going; skipping");
+        return { cron: controller.cron, schedule, skipped: true, jobs: [] };
+      }
+    } catch (error) {
+      cronLog.error("could not check the cron lease; running unguarded", { error });
     }
 
     const reports: JobReport[] = [];
@@ -144,7 +164,13 @@ export function createCronDispatcher(jobs: readonly CronJob[], log: Logger = roo
         }
       }
     } finally {
-      await releaseLease(env.DB, schedule, holder);
+      if (leased) {
+        try {
+          await releaseLease(env.DB, schedule, holder);
+        } catch (error) {
+          cronLog.error("could not release the cron lease; it will expire", { error });
+        }
+      }
     }
     cronLog.info("cron trigger finished", {
       jobs: reports.length,

@@ -114,7 +114,13 @@ export class SettingsStore<R extends SettingsRegistry> {
   constructor(
     private readonly ctx: CoreContext,
     private readonly registry: R,
-  ) {}
+  ) {
+    for (const [key, definition] of Object.entries(registry)) {
+      if (!SETTING_KEY_PATTERN.test(key) || key !== definition.key) {
+        throw new Error(`Settings registry entry ${key} must be a valid key equal to its definition's key`);
+      }
+    }
+  }
 
   private async load(fresh = false): Promise<CacheEntry> {
     const db = this.ctx.env.DB;
@@ -174,8 +180,12 @@ export class SettingsStore<R extends SettingsRegistry> {
    *
    * The write is guarded on the value it read (compare-and-set), so the audited `old` value is exact
    * even with concurrent writers; if another writer got in between, it re-reads and tries once more,
-   * then returns `conflict`. A malformed column is replaced with a fresh object holding only this key,
-   * and the audit entry says so (`repaired: true`).
+   * then returns `conflict`. Both sides of the comparison go through SQLite's `json_extract`, so
+   * objects and arrays compare in SQLite's own canonical JSON text, not JavaScript's.
+   *
+   * A malformed column is replaced with a fresh object holding only this key, and the audit entry
+   * says so (`repaired: true`). **Any other settings in the malformed column are discarded**: they
+   * couldn't be read, so they were already in effect as their defaults.
    */
   async set(key: string, value: unknown, actor: string | null): Promise<Result<SettingEntry, ApiError>> {
     const definition = Object.hasOwn(this.registry, key) ? this.registry[key] : undefined;
@@ -186,7 +196,7 @@ export class SettingsStore<R extends SettingsRegistry> {
     const db = new Database(this.ctx.env.DB);
     const auditValue = async (v: unknown): Promise<unknown> =>
       definition.personal ? await hashPersonal(this.ctx.env, "value", JSON.stringify(v)) : v;
-    // The key is checked against SETTING_KEY_PATTERN by defineSetting, so it is safe in the JSON path.
+    // Bound as a parameter, never interpolated; the key is also checked against SETTING_KEY_PATTERN.
     const path = `$.${definition.key}`;
 
     for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
@@ -200,14 +210,17 @@ export class SettingsStore<R extends SettingsRegistry> {
 
       const update = current.malformed
         ? db.statement(
-            `UPDATE installation SET settings = json_set('{}', '${path}', json(?))
+            `UPDATE installation SET settings = json_set('{}', ?, json(?))
              WHERE id = 1 AND (json_valid(settings) = 0 OR json_type(settings) <> 'object')`,
+            path,
             JSON.stringify(next),
           )
         : db.statement(
-            `UPDATE installation SET settings = json_set(settings, '${path}', json(?))
-             WHERE id = 1 AND json_extract(settings, '${path}') IS json_extract(?, '$')`,
+            `UPDATE installation SET settings = json_set(settings, ?, json(?))
+             WHERE id = 1 AND json_extract(settings, ?) IS json_extract(?, '$')`,
+            path,
             JSON.stringify(next),
+            path,
             JSON.stringify(current.stored[definition.key] ?? null),
           );
       const entry = await auditStatement(

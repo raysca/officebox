@@ -486,6 +486,7 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `inbox_items` | Replace | As Notifications §7: adds `count`, `preview` (redactable, up to 140 characters), `last_event_at` and a `message_id` index; `UNIQUE (user_id, dedupe_key)`, with resolved records reopened in place | Notifications §3.1, §7 |
 | `scheduled_triggers`, `trigger_outbox` | New tables (ReminderScheduler DO SQLite) | §11.1 | §11 |
 | `pending_emails`, `rate_counters`, `ics_opt_outs` | New D1 tables | §11, §8, §15 | here |
+| `cron_leases` | New D1 table (M0b) | One lease per cron schedule `(schedule, holder, expires_at)`; overlap guard for the dispatcher. `schedule` is Zod-validated (no `CHECK`). Excluded from export as a job table. | TDD §2.1, §7.8 |
 | Spec DDL `CHECK`s on growable enums | Rule | `calendars.kind`, `events.type`, `huddle_messages.context_type`, `auth_tokens.kind`, `drives.kind`, `item_activity.kind`, `pending_emails.state` and similar are **Zod-validated; the `CHECK` is omitted in migrations**, even where a spec's illustrative DDL shows one | here |
 
 ## 15. API

@@ -109,7 +109,8 @@ export function createQueueConsumer(registry: QueueRegistry, log: Logger = rootL
       if (!parsed.ok) {
         msgLog.warn("refusing queue message; sending it to the dead-letter queue", {
           reason: parsed.error.reason,
-          type: parsed.error.type,
+          // Client-supplied, so cut short before logging.
+          type: parsed.error.type?.slice(0, 64),
         });
         await deadLetter(entry, env, message, parsed.error.reason, msgLog);
         continue;

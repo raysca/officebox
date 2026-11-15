@@ -8,6 +8,7 @@ import { redact, type Redacted } from "./redact";
  * token-like strings and credential query parameters are removed and email addresses become
  * `[email]`. Even so, log IDs (user ID, channel ID), never names, emails, message text, IP addresses,
  * query strings or request bodies. `level` and `message` always come from the call, never from fields.
+ * The one unredacted path is `logUnredacted` in `log-unredacted.ts`, restricted by ESLint.
  */
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -19,13 +20,6 @@ export interface Logger {
   info(message: string, fields?: LogFields): void;
   warn(message: string, fields?: LogFields): void;
   error(message: string, fields?: LogFields): void;
-  /**
-   * Writes a line **without redaction**. Only for values that must reach the operator verbatim
-   * through Workers Logs, which only members of the Cloudflare account can read: the generated
-   * first-run setup token (TDD §6.8). ESLint restricts calls to the files allowed in
-   * `eslint.config.js`; adding a caller needs review.
-   */
-  unredacted(event: string, fields: Record<string, string | number | boolean>): void;
   /** A logger that adds `fields` to every line. */
   child(fields: LogFields): Logger;
 }
@@ -33,7 +27,7 @@ export interface Logger {
 /** Where log lines go. Defaults to `console`; tests pass a capturing sink. */
 export type LogSink = (level: LogLevel, line: string) => void;
 
-const consoleSink: LogSink = (level, line) => {
+export const consoleSink: LogSink = (level, line) => {
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);
   else console.log(line);
@@ -59,8 +53,6 @@ export function createLogger(base: LogFields = {}, sink: LogSink = consoleSink):
     info: (message, fields) => write("info", message, fields),
     warn: (message, fields) => write("warn", message, fields),
     error: (message, fields) => write("error", message, fields),
-    unredacted: (event, fields) =>
-      sink("warn", JSON.stringify({ ...fields, level: "warn", message: event, unredacted: true })),
     child: (fields) => createLogger({ ...base, ...fields }, sink),
   };
 }

@@ -501,6 +501,13 @@ CREATE TABLE purge_jobs (
   UNIQUE (object_type, object_id)
 );
 
+-- Cron overlap guard (§7.8): one lease per schedule. Excluded from export (job table).
+CREATE TABLE cron_leases (
+  schedule TEXT PRIMARY KEY,         -- five_minutes | hourly | daily (Zod-validated, no CHECK)
+  holder TEXT NOT NULL,              -- ULID of the run holding the lease
+  expires_at INTEGER NOT NULL        -- an expired lease can be taken over
+);
+
 CREATE TABLE embedding_jobs (        -- Phase 3
   id TEXT PRIMARY KEY,
   source_type TEXT NOT NULL,
@@ -579,7 +586,7 @@ CREATE TABLE core_outbox (                                -- generic transaction
 );
 ```
 
-Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. Rows that keep failing to send while the queue is otherwise up are moved to `core_outbox_dead` after 10 attempts **(default)**, and the base class adds that table in its second core migration.
+Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. Rows that keep failing to send while the queue is otherwise up are moved to `core_outbox_dead` after 10 attempts **(default)**, and the base class adds that table in its second core migration. **Nothing reads or re-drives `core_outbox_dead` until M7**, which adds it to admin health with a re-drive action; until then dead rows are visible only in the error log and `Outbox.stats()` (admin note).
 
 **ChatChannel DO** — one per channel. This is the source of truth for the channel's messages.
 
@@ -1487,7 +1494,7 @@ CREATE TABLE object_sizes (          -- reported by DOs after compaction or dail
 
 ### 7.8 Scheduled jobs
 
-Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
+Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The dispatcher (`apps/worker/src/core/cron.ts`) runs each schedule's jobs one after another, each with its own timeout (60 s by default) and error isolation. A run takes the schedule's lease in `cron_leases` (§2.1), so a trigger that fires while the previous run of the same schedule is still going skips; leases expire after 15 minutes, and a schedule's job timeouts must add up to less than that. If the lease can't be checked (D1 unavailable), the jobs run unguarded and the error is logged **(default)**: jobs are idempotent, and skipping would stall purges.
 
 | Job | Schedule | Section |
 |---|---|---|

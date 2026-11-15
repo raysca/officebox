@@ -17,7 +17,9 @@ export const API_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 
 
 /** Headers on every response, whatever its type. */
 export const COMMON_SECURITY_HEADERS: Readonly<Record<string, string>> = {
-  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  // No includeSubDomains: an installation on a customer's domain mustn't force HTTPS on that
+  // domain's other subdomains (TDD §8.2 asks for HSTS only).
+  "Strict-Transport-Security": "max-age=31536000",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "strict-origin-when-cross-origin",
 };

@@ -13,8 +13,10 @@
  *   bytes **(default)**), and runs of 32 or more hex digits. ULIDs (26 characters) are kept.
  * - depth, array length and string length are capped so a huge value can't flood a log line.
  *
- * **Cost is linear.** Strings are cut to `maxString` (plus a small margin) before any pattern runs,
- * and every pattern is bounded, so a hostile multi-megabyte value costs microseconds.
+ * **Cost is bounded.** Strings are cut to `maxString` (plus a small margin) before any pattern runs,
+ * so whatever the input size, the patterns see at most about 2 KB. Most patterns are linear; the hex
+ * and opaque-run patterns can backtrack quadratically on a crafted run, but only over that 2 KB, so a
+ * hostile value costs well under a millisecond (checked in `test/node/redact-timing.test.ts`).
  */
 
 export const REDACTED = "[redacted]";

@@ -144,6 +144,10 @@ describe("day windows across time-zone rules", () => {
 
 describe("Rate Limiting binding", () => {
   it("allows 5 sign-in attempts per minute per key, then refuses", async () => {
+    // Miniflare's window is aligned to the wall-clock minute. If fewer than 5 s of this minute are
+    // left, wait for the next one so the six calls can't straddle a window boundary.
+    const intoMinute = Date.now() % 60_000;
+    if (intoMinute > 55_000) await new Promise((r) => setTimeout(r, 60_000 - intoMinute + 100));
     const k = key();
     const results = [];
     for (let i = 0; i < 6; i++) results.push(await checkLimit(at(Date.now()), LIMITS.auth, k));

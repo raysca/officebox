@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createLogger, type LogLevel } from "../src/core/log";
+import { logUnredacted } from "../src/core/log-unredacted";
 import { isSensitiveKey, redact, redactString, REDACTED } from "../src/core/redact";
 
 const opts = { email: () => "[email]" };
@@ -103,8 +104,10 @@ describe("logger", () => {
   });
 
   it("has a narrow unredacted escape hatch", () => {
-    const { log, lines } = capture();
-    log.unredacted("setup token generated", { token: "Zx9QmT4rLk2Vb8Nw1Yc7Hd3Fg6Js5Pa0Qw8Er2Ty" });
+    const lines: Array<{ level: LogLevel; record: Record<string, unknown> }> = [];
+    logUnredacted("setup token generated", { token: "Zx9QmT4rLk2Vb8Nw1Yc7Hd3Fg6Js5Pa0Qw8Er2Ty" }, (level, line) =>
+      lines.push({ level, record: JSON.parse(line) as Record<string, unknown> }),
+    );
     expect(lines[0]?.record).toMatchObject({
       level: "warn",
       message: "setup token generated",

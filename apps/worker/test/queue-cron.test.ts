@@ -253,6 +253,49 @@ describe("cron dispatcher", () => {
     expect((await dispatch(createScheduledController({ cron: "17 3 * * *" }), env)).skipped).toBeUndefined();
   });
 
+  it("runs unguarded, and logs, when the lease can't be checked", async () => {
+    const ran: string[] = [];
+    const lines: string[] = [];
+    const brokenDb = {
+      prepare: () => {
+        throw new Error("no such table: cron_leases");
+      },
+    } as unknown as D1Database;
+    const dispatch = createCronDispatcher(
+      [defineJob({ name: "test.unguarded", schedule: "hourly", run: () => (ran.push("ran"), Promise.resolve()) })],
+      createLogger({}, (_l, line) => lines.push(line)),
+    );
+    const report = await dispatch(createScheduledController({ cron: "0 * * * *" }), { ...env, DB: brokenDb });
+    expect(report.jobs.map((j) => j.ok)).toEqual([true]);
+    expect(ran).toEqual(["ran"]);
+    expect(lines.join("\n")).toContain("running unguarded");
+  });
+
+  it("keeps the report when releasing the lease fails", async () => {
+    const lines: string[] = [];
+    const releaseFails = {
+      prepare: (sql: string) => {
+        if (sql.startsWith("DELETE FROM cron_leases")) throw new Error("D1 went away");
+        return env.DB.prepare(sql);
+      },
+    } as unknown as D1Database;
+    const dispatch = createCronDispatcher(
+      [defineJob({ name: "test.release", schedule: "hourly", run: () => Promise.resolve() })],
+      createLogger({}, (_l, line) => lines.push(line)),
+    );
+    const report = await dispatch(createScheduledController({ cron: "0 * * * *" }), { ...env, DB: releaseFails });
+    expect(report.jobs.map((j) => [j.name, j.ok])).toEqual([["test.release", true]]);
+    expect(lines.join("\n")).toContain("could not release the cron lease");
+    // Clean up the lease the failed release left behind, for later tests in this file.
+    await env.DB.prepare("DELETE FROM cron_leases WHERE schedule = 'hourly'").run();
+  });
+
+  it("refuses job timeouts that add up to more than the lease", () => {
+    const long = (name: string) =>
+      defineJob({ name, schedule: "daily", timeoutMs: 8 * 60_000, run: () => Promise.resolve() });
+    expect(() => createCronDispatcher([long("test.a"), long("test.b")])).toThrow(/beyond/);
+  });
+
   it("refuses duplicate or malformed job names", () => {
     const job = defineJob({ name: "test.same", schedule: "daily", run: () => Promise.resolve() });
     expect(() => createCronDispatcher([job, job])).toThrow(/twice/);

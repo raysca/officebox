@@ -45,10 +45,13 @@ export function errorResponse(c: AppContext, error: ApiError): Response {
   return c.json(body, HTTP_STATUS[error.code], headers);
 }
 
-/** Turns a service result into a response: `value` as JSON on success, the error body otherwise. */
+/**
+ * Turns a service result into a response: `value` as JSON on success, the error body otherwise. API
+ * responses carry user data, so neither is cached (`Cache-Control: no-store`).
+ */
 export function respond<T>(c: AppContext, result: AppResult<T>, status: ContentfulStatusCode = 200): Response {
   if (!result.ok) return errorResponse(c, result.error);
-  return c.json(result.value ?? null, status);
+  return c.json(result.value ?? null, status, { "Cache-Control": "no-store" });
 }
 
 /** The body of the 500 response for an unexpected exception; details go to the log, never the client. */

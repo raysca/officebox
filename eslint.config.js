@@ -47,16 +47,28 @@ export default defineConfig(
   },
 
   {
-    // Logger.unredacted bypasses log redaction. Only the first-run setup token may use it (TDD §6.8);
-    // M1 adds that file to `ignores` here. Any other caller needs review.
+    // logUnredacted bypasses log redaction. Only the first-run setup token may use it (TDD §6.8); M1
+    // adds that module to `ignores` here. Any other importer needs review. Imports are restricted
+    // rather than calls, so aliasing or destructuring can't get around it.
     files: ["apps/worker/src/**/*.ts"],
     ignores: [],
     rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/log-unredacted", "**/log-unredacted.ts"],
+              message: "logUnredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
+            },
+          ],
+        },
+      ],
       "no-restricted-syntax": [
         "error",
         {
-          selector: "CallExpression[callee.property.name='unredacted']",
-          message: "Logger.unredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
+          selector: "ImportExpression[source.value=/log-unredacted/]",
+          message: "logUnredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
         },
       ],
     },
