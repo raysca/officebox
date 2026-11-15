@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { E2E_SECRETS, OWNER_STATE } from "./tests/fixtures";
+import { E2E_SECRETS, E2E_VARS, OWNER_STATE } from "./tests/fixtures";
 
 // End-to-end tests run against `wrangler dev` serving the built web app through Workers Assets, the
 // same path as production. Build first (`npm run build`); the root `npm run e2e` does both.
@@ -24,8 +24,9 @@ process.env.no_proxy = noProxy;
 process.env.OFFICEBOX_E2E_STATE ??= mkdtempSync(join(tmpdir(), "officebox-e2e-"));
 const STATE = process.env.OFFICEBOX_E2E_STATE;
 
-// Test-only Worker secrets (Platform §16), passed as --var so no .dev.vars file is needed.
-const vars = Object.entries(E2E_SECRETS)
+// Test-only Worker secrets (Platform §16) and the test email sink, passed as --var so no .dev.vars file
+// is needed.
+const vars = Object.entries({ ...E2E_SECRETS, ...E2E_VARS })
   .map(([name, value]) => `--var ${name}:${value}`)
   .join(" ");
 const wrangler = `npx wrangler --config ../wrangler.jsonc`;
@@ -48,13 +49,21 @@ export default defineConfig({
     {
       name: "chromium",
       dependencies: ["setup"],
-      testIgnore: [/first-run\.setup\.ts/, /passkeys\.spec\.ts/],
+      testIgnore: [/first-run\.setup\.ts/, /passkeys\.spec\.ts/, /onboarding\.spec\.ts/],
       use: { ...devices["Desktop Chrome"], storageState: OWNER_STATE },
     },
     {
       name: "passkeys",
       dependencies: ["chromium"],
       testMatch: /passkeys\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    // M1b: invitations, email and magic links. After the passkeys project, so the owner has the second
+    // passkey the invite gate asks for.
+    {
+      name: "onboarding",
+      dependencies: ["passkeys"],
+      testMatch: /onboarding\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
     },
   ],

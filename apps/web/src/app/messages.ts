@@ -345,7 +345,7 @@ export const messages = {
     status: { pending: "Pending", expired: "Expired", accepting: "Accepting" },
     formerMember: "Former member",
     copyAgain: "Copy link",
-    copyAgainLabel: (email: string) => `Copy the invitation link for ${email}`,
+    copyAgainLabel: (email: string) => `Copy link for the invitation to ${email}`,
     resend: "Resend",
     resendLabel: (email: string) => `Resend the invitation to ${email}`,
     resent: (email: string) => `The invitation was emailed to ${email} again.`,

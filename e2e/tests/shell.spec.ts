@@ -59,7 +59,12 @@ test.describe("desktop shell", () => {
       await expect(heading).toBeFocused();
       await expect(page).toHaveTitle(`${label} · Officebox`);
       await expect(link).toHaveAttribute("aria-current", "page");
-      await expect(page.getByRole("heading", { level: 2, name: "Coming soon" })).toBeVisible();
+      // Every area but Admin (Invitations and Settings since M1b) is still a placeholder.
+      if (path === "/admin") {
+        await expect(page.getByRole("navigation", { name: "Admin sections" })).toBeVisible();
+      } else {
+        await expect(page.getByRole("heading", { level: 2, name: "Coming soon" })).toBeVisible();
+      }
     }
   });
 
