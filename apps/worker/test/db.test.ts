@@ -95,7 +95,22 @@ describe("D1 migrations", () => {
 
   it("are safe to re-run (TDD §6.5)", async () => {
     for (const migration of migrations) {
-      for (const query of migration.queries) await env.DB.prepare(query).run();
+      for (const query of migration.queries) {
+        if (/^\s*ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN/i.test(query.replace(/^(\s*--[^\n]*\n)*/, ""))) {
+          // SQLite has no ADD COLUMN IF NOT EXISTS. Such a file holds that one statement only, so it is
+          // either applied or not; running it again fails with "duplicate column name" and changes nothing.
+          await expect(env.DB.prepare(query).run()).rejects.toThrow(/duplicate column name/);
+          continue;
+        }
+        await env.DB.prepare(query).run();
+      }
+    }
+  });
+
+  it("put each ALTER TABLE … ADD COLUMN in a file of its own (TDD §6.5)", () => {
+    for (const migration of migrations) {
+      const alters = migration.queries.filter((q) => /ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN/i.test(q));
+      if (alters.length > 0) expect(migration.queries, migration.name).toHaveLength(1);
     }
   });
 });

@@ -4,8 +4,9 @@ import {
   APP_CONTENT_SECURITY_POLICY,
   COMMON_SECURITY_HEADERS,
 } from "@officebox/shared";
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import type { AppEnv } from "./context";
+import { csrfProtection } from "./csrf";
 import { errorResponse, INTERNAL_ERROR } from "./errors";
 import { checkHealth } from "./health";
 import { ulid } from "./ids";
@@ -21,6 +22,9 @@ import { createLogger, rootLogger, type LogSink } from "./log";
  * - **Errors:** routes return typed results through `respond` (`errors.ts`); an unexpected exception
  *   becomes a 500 with the request ID and is logged with its stack.
  * - **Features** are Hono routers mounted under `/api/<name>` (see `defineFeature`).
+ * - **Before features:** the `apiMiddleware` the caller passes (identity's host guard, which sets
+ *   `c.var.canonicalOrigin`), then **CSRF** on every state-changing `/api` request (`csrf.ts`,
+ *   TDD §8.2). No CORS headers are ever sent.
  * - Unknown `/api` paths get a typed 404; everything else falls through to the web app in Assets.
  * - **Security headers** (TDD §8.2) on every response the Worker produces: HSTS, `nosniff`, the
  *   referrer policy, and a CSP: `default-src 'none'; frame-ancestors 'none'` for API responses, the
@@ -67,11 +71,16 @@ export interface AppOptions {
   features: readonly Feature[];
   /** Log destination; tests capture lines with it. */
   logSink?: LogSink;
+  /** Clock for every request (epoch ms); tests inject one. Defaults to `Date.now`. */
+  now?: () => number;
+  /** Middleware for `/api/*`, run before CSRF and the features (identity's host guard). */
+  apiMiddleware?: readonly MiddlewareHandler<AppEnv>[];
 }
 
 export function createApp(options: AppOptions): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const baseLog = options.logSink ? createLogger({}, options.logSink) : rootLogger;
+  const clock = options.now ?? Date.now;
 
   app.use("*", async (c, next) => {
     const requestId = ulid();
@@ -80,6 +89,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     c.set("requestId", requestId);
     c.set("startedAt", startedAt);
     c.set("log", log);
+    c.set("now", clock);
     await next();
     const path = new URL(c.req.url).pathname;
     c.header("X-Request-Id", requestId);
@@ -103,6 +113,10 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     const body = await checkHealth(c.env, c.var.log);
     return c.json(body, body.status === "ok" ? 200 : 503, { "Cache-Control": "no-store" });
   });
+
+  for (const middleware of options.apiMiddleware ?? []) app.use("/api/*", middleware);
+  // CSRF defence for every state-changing API request (TDD §8.2), before any feature route runs.
+  app.use("/api/*", csrfProtection);
 
   const names = new Set<string>();
   for (const feature of options.features) {

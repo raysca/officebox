@@ -6,7 +6,7 @@ import { consoleSink, type LogSink } from "./log";
  * first-run setup token (TDD §6.8).
  *
  * This is a separate module so ESLint can restrict who imports it (`no-restricted-imports` in
- * `eslint.config.js`, with an empty allow-list until M1 adds the setup-token module). Adding an
+ * `eslint.config.js`: `features/identity/setup-token.ts` is the one allowed importer). Adding an
  * importer needs review.
  */
 export function logUnredacted(
