@@ -4,11 +4,12 @@ import { CORE_JOBS } from "./core/jobs";
 import { createQueueConsumer, type QueueRegistry } from "./core/queue";
 import type { Env } from "./env";
 import { features } from "./features";
+import { IDENTITY_JOBS } from "./features/identity/jobs";
 
 export { SystemObject } from "./system-object";
 
 /** Cron jobs by schedule (TDD §7.8). Features append theirs. */
-const JOBS: readonly CronJob[] = [...CORE_JOBS];
+const JOBS: readonly CronJob[] = [...CORE_JOBS, ...IDENTITY_JOBS];
 
 /**
  * Queues and their typed handlers. The email queue has no handlers until M1, so anything that arrives

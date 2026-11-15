@@ -14,6 +14,10 @@ export default defineConfig({
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations("./migrations"),
+          // Test-only identity secrets (Platform §16). Real deployments set their own; see README.
+          SESSION_SIGNING_KEY: "test-session-signing-key-0123456789abcdef",
+          TOKEN_HASH_KEY: "test-token-hash-key-0123456789abcdefghijkl",
+          PEPPER_1: "test-pepper-one-0123456789abcdefghijklmnopq",
         },
         durableObjects: {
           SYSTEM: { className: "SystemObject", useSQLite: true },

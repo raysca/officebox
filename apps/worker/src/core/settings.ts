@@ -10,8 +10,9 @@ import { Database, expectOk } from "./db";
  * - **Typed keys.** Every key is declared once with `defineSetting`: a Zod schema, a default, who may
  *   change it and its audit action. Unknown keys can't be read or written.
  * - **Storage:** the `installation.settings` JSON column (TDD §6.1). Writes use `json_set` on one key,
- *   so concurrent changes to different keys don't overwrite each other. The installation row is
- *   created by first-run setup (M1); until then reads return defaults and writes return `unavailable`.
+ *   so concurrent changes to different keys don't overwrite each other. Until first-run setup has
+ *   completed (`setup_completed_at`; the row can exist earlier to hold a generated setup token), reads
+ *   return defaults and writes return `unavailable`.
  * - **Tolerant reads (expand/contract):** a stored value that no longer matches its schema (written by
  *   a newer or older release) reads as the default and is logged.
  * - **Audit on change:** every change writes the key's audit action with old and new values, in the
@@ -91,7 +92,7 @@ interface CacheEntry {
   stored: Record<string, unknown>;
   /** The column held something other than a JSON object; the next write repairs it. */
   malformed: boolean;
-  /** Whether the installation row exists (setup has run). */
+  /** Whether first-run setup has completed (the row also exists earlier, holding a generated setup token). */
   installed: boolean;
   expiresAt: number;
 }
@@ -129,7 +130,9 @@ export class SettingsStore<R extends SettingsRegistry> {
     if (!fresh && hit && hit.expiresAt > now) return hit;
     const generation = generations.get(db) ?? 0;
     const row = expectOk(
-      await new Database(db).first<{ settings: string }>("SELECT settings FROM installation WHERE id = 1"),
+      await new Database(db).first<{ settings: string; installed: number }>(
+        "SELECT settings, setup_completed_at IS NOT NULL AS installed FROM installation WHERE id = 1",
+      ),
     );
     let stored: Record<string, unknown> = {};
     let malformed = false;
@@ -143,7 +146,7 @@ export class SettingsStore<R extends SettingsRegistry> {
       }
       if (malformed) this.ctx.log.error("installation.settings is not a JSON object; using defaults until repaired");
     }
-    const entry = { stored, malformed, installed: row !== null, expiresAt: now + SETTINGS_CACHE_TTL_MS };
+    const entry = { stored, malformed, installed: row?.installed === 1, expiresAt: now + SETTINGS_CACHE_TTL_MS };
     if ((generations.get(db) ?? 0) === generation) cache.set(db, entry);
     return entry;
   }

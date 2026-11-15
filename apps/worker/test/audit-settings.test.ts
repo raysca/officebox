@@ -132,7 +132,7 @@ describe("settings store", () => {
 
   beforeEach(async () => {
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO installation (id, installation_id, name, settings) VALUES (1, 'inst', 'Test', '{}')",
+      "INSERT OR IGNORE INTO installation (id, installation_id, name, settings, setup_completed_at) VALUES (1, 'inst', 'Test', '{}', 1)",
     ).run();
     clearSettingsCache(env.DB);
   });
@@ -166,7 +166,9 @@ describe("settings store", () => {
     // A database with no installation row (setup hasn't run).
     const empty = {
       prepare: (sql: string) =>
-        env.DB.prepare(sql.includes("FROM installation") ? "SELECT settings FROM installation WHERE 0" : sql),
+        env.DB.prepare(
+          sql.includes("FROM installation") ? "SELECT settings, 1 AS installed FROM installation WHERE 0" : sql,
+        ),
       batch: (s: D1PreparedStatement[]) => env.DB.batch(s),
     } as unknown as D1Database;
     const { registry, flag } = makeRegistry();

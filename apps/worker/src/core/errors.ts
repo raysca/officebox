@@ -20,6 +20,10 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, ContentfulStatusCode>> = {
   validation_failed: 400,
   unauthenticated: 401,
   forbidden: 403,
+  invalid_credentials: 401,
+  csrf_failed: 403,
+  // The installation exists but isn't set up: no request can succeed until it is. (default)
+  setup_required: 409,
   not_found: 404,
   method_not_allowed: 405,
   conflict: 409,
