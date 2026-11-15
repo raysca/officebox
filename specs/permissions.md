@@ -1,6 +1,6 @@
 # Spec: Permissions
 
-**Status:** Draft for review
+**Status:** Approved (product owner, 15 Nov 2026)
 **Revision:** Written after the independent spec review (14 Nov 2026)
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
 **Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Platform](platform.md)

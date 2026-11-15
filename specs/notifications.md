@@ -1,6 +1,6 @@
 # Spec: Notifications & Attention
 
-**Status:** Draft for review
+**Status:** Approved (product owner, 15 Nov 2026)
 **Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices)
 **Feature name:** Notifications (marketing name to be decided later)
 **Milestone:** M2 core ([PLAN](../PLAN.md)), extended by each feature milestone (§9) · **Related:** PRD §8; TDD §3.5; [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Identity & Access](identity.md), [Platform](platform.md)

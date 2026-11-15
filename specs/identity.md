@@ -1,6 +1,6 @@
 # Spec: Identity & Access
 
-**Status:** Draft for review
+**Status:** Approved (product owner, 15 Nov 2026)
 **Revision:** Revised after independent review (14 Nov 2026)
 **Feature name:** Identity & Access (marketing name to be decided later)
 **Milestone:** M1 ([PLAN](../PLAN.md)) · **Related:** PRD §6, §10.1; TDD §3.1, §6.8, §8.1; [Permissions](permissions.md), [Platform](platform.md), [Notifications](notifications.md)
