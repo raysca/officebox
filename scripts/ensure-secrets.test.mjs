@@ -13,6 +13,10 @@ test("creates only the generated secrets that are missing, never others", () => 
   assert.deepEqual(secretsToCreate([]), ["SESSION_SIGNING_KEY", "TOKEN_HASH_KEY", "PEPPER_1"]);
   assert.deepEqual(secretsToCreate(["TOKEN_HASH_KEY", "SETUP_TOKEN"]), ["SESSION_SIGNING_KEY", "PEPPER_1"]);
   assert.deepEqual(secretsToCreate(GENERATED_SECRETS), []);
+  // Any existing pepper means the owner manages peppers: no PEPPER_1 is generated.
+  assert.deepEqual(secretsToCreate(["PEPPER_2"]), ["SESSION_SIGNING_KEY", "TOKEN_HASH_KEY"]);
+  assert.deepEqual(secretsToCreate(["PEPPER_17", "TOKEN_HASH_KEY"]), ["SESSION_SIGNING_KEY"]);
+  assert.deepEqual(secretsToCreate(["PEPPER_X"]), ["SESSION_SIGNING_KEY", "TOKEN_HASH_KEY", "PEPPER_1"]);
   for (const name of ["SETUP_TOKEN", "SESSION_SIGNING_KEY_PREVIOUS", "PEPPER_2"]) {
     assert.ok(!GENERATED_SECRETS.includes(name), `${name} must never be generated`);
   }

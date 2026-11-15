@@ -152,7 +152,8 @@ async function ensureSecrets(name) {
       input: value,
       stdio: ["pipe", "pipe", "pipe"],
       encoding: "utf8",
-      env: { ...process.env, CI: "true" },
+      // Wrangler's own log sanitising on, at its normal level, whatever the runner's environment says.
+      env: { ...process.env, CI: "true", WRANGLER_LOG_SANITIZE: "true", WRANGLER_LOG: "log" },
     });
     if (result.error || result.status !== 0) {
       const scrub = (text) => (text ?? "").split(value).join("[redacted]");

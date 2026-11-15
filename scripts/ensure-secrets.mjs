@@ -30,10 +30,15 @@ export function parseSecretList(stdout) {
   return names;
 }
 
-/** The generated secrets missing from `existing`, in a fixed order. Existing ones are never touched. */
+/**
+ * The generated secrets missing from `existing`, in a fixed order. Existing ones are never touched,
+ * and PEPPER_1 isn't created when any PEPPER_<n> exists (the owner already chose their peppers; a new
+ * PEPPER_1 would be ignored at best).
+ */
 export function secretsToCreate(existing) {
   const present = new Set(existing);
-  return GENERATED_SECRETS.filter((name) => !present.has(name));
+  const hasPepper = existing.some((name) => /^PEPPER_[1-9]\d*$/.test(name));
+  return GENERATED_SECRETS.filter((name) => !present.has(name) && !(name === "PEPPER_1" && hasPepper));
 }
 
 /** A new secret value: 32 random bytes, base64url (43 characters). */

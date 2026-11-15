@@ -205,3 +205,26 @@ test.describe("Content-Security-Policy (TDD §8.2)", () => {
     expect(await page.evaluate(() => (window as unknown as { __inlineRan?: boolean }).__inlineRan)).toBeUndefined();
   });
 });
+
+test.describe("an unconfigured workspace (Worker secrets missing)", () => {
+  for (const colorScheme of ["light", "dark"] as const) {
+    test(`/not-configured explains it and passes axe (${colorScheme})`, async ({ page }) => {
+      // The e2e server has its secrets, so the Worker's `unavailable` answer is simulated here.
+      await page.route("**/api/me", (route) =>
+        route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { code: "unavailable", message: "Sign-in isn't configured yet." } }),
+        }),
+      );
+      await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+      await page.goto("/chat");
+      await expect(page).toHaveURL(/\/not-configured$/);
+      await expect(
+        page.getByRole("heading", { level: 1, name: "This workspace isn't fully configured yet" }),
+      ).toBeVisible();
+      await expect(page.getByText(/“Secrets” in the README/)).toBeVisible();
+      await expectNoAxeViolations(page);
+    });
+  }
+});
