@@ -557,6 +557,30 @@ This replaces v1.3's "stop at the first match".
 
 ### 2.2 Durable Object SQLite schemas
 
+**Core tables in every DO** (`apps/worker/src/core/do/base.ts`, M0b). Every Durable Object extends the core base class, which owns three tables, versioned separately from the feature schema (`meta.core_schema_version`):
+
+```sql
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);   -- schema_version, core_schema_version, feature keys
+CREATE TABLE core_timers (                                -- alarm multiplexer: the alarm is set to MIN(due_at)
+  name TEXT PRIMARY KEY,                                  -- '<kind>' or '<kind>:<id>', e.g. 'poll:01J…'
+  due_at INTEGER NOT NULL,
+  payload TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,                    -- failed runs; retried with backoff
+  generation INTEGER NOT NULL DEFAULT 0                   -- bumped on reschedule, so a rescheduled timer is kept
+);
+CREATE TABLE core_outbox (                                -- generic transactional outbox, one stream per queue
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream TEXT NOT NULL,
+  body TEXT NOT NULL,                                     -- JSON message, at most 128 KB
+  bytes INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+```
+
+Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3).
+
 **ChatChannel DO** — one per channel. This is the source of truth for the channel's messages.
 
 ```sql
@@ -599,7 +623,7 @@ CREATE TABLE outbox (
 );
 
 CREATE TABLE meta (
-  key TEXT PRIMARY KEY,    -- schema_version, channel_id, log_horizon_seq, timers
+  key TEXT PRIMARY KEY,    -- schema_version, channel_id, log_horizon_seq (timers: core_timers above)
   value TEXT
 );
 ```
@@ -849,7 +873,7 @@ Limits: body up to 40 KB, which stays far below the 8 MB DO row limit; up to 20 
 4. The **alarm handler** drains the `outbox` in `seq` order, in batches of up to 100. For each event it sends the **current full state** of the affected message (from `messages`, not the event delta) to the `message-projection` Queue with `sendBatch`.
    - Rows are deleted only after the send succeeds.
    - On failure the DO increments `attempts` and reschedules with exponential backoff, capped at 5 minutes.
-   - DOs have one alarm each. Other timers (typing expiry, log trimming) are kept in `meta.timers`, and the alarm is always set to the earliest due timer.
+   - DOs have one alarm each. Other timers (typing expiry, log trimming) are named timers in `core_timers` (§2.2), and the alarm is always set to the earliest due timer.
 5. The **queue consumer** upserts into D1 `messages`:
    ```sql
    ... ON CONFLICT (channel_id, seq) DO UPDATE SET ...
