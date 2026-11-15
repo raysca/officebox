@@ -247,7 +247,8 @@ export async function confirmMagicLink(
   const sessionCookies = headers?.getSetCookie() ?? [];
   if (userId !== row.user_id || sessionCookies.length === 0) {
     ctx.log.error("magic link verify signed in someone unexpected; refusing", { expected: row.user_id });
-    if (userId) await auth.api.revokeSessions({ headers: new Headers({ cookie: cookiePairs(sessionCookies) }) });
+    // Unreachable while the session hook checks the marker's user; if it ever happens, end that one session.
+    if (userId) await auth.api.signOut({ headers: new Headers({ cookie: cookiePairs(sessionCookies) }) });
     return err(INVALID_LINK);
   }
 

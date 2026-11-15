@@ -59,7 +59,7 @@ import { claimSetup, resumeSetup, setupStatus, type SetupEnrolmentResult } from 
 import { isSetupComplete } from "./setup-state";
 
 /**
- * Identity routes for M1a (Identity §6). Paths are relative to `/api`.
+ * Identity routes for M1a and M1b (Identity §6). Paths are relative to `/api`.
  *
  * | Route | Who |
  * |---|---|
@@ -70,6 +70,10 @@ import { isSetupComplete } from "./setup-state";
  * | `GET /me/passkeys` · `PATCH /me/passkeys/:id` · `DELETE /me/passkeys/:id` | Member (own); removal needs step-up |
  * | `POST /me/reauth/options` · `POST /me/reauth` | Member |
  * | `GET /me/security-notices` · `POST /me/security-notices/ack` | Member; ack needs a fresh passkey assertion |
+ * | better-auth `POST /auth/sign-in/magic-link` (M1b) | Public; our availability check and limits first |
+ * | `POST /sign-in/link/lookup` · `POST /sign-in/link` (M1b) | Magic-link token: show the email; consume and sign in |
+ * | `POST /invitations/lookup` · `POST /invitations/accept` (M1b) | Invitation token |
+ * | `GET /status/public` (M1b) | Anyone: whether magic links are offered |
  *
  * Every state change passes the core CSRF check first; every route that touches user content asks
  * the permission engine. No route returns a session token.
