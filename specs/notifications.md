@@ -69,11 +69,17 @@ Every notification is an `inbox_items` record (§3.1, §7) with an `event_type`.
 | `assistant_nudge` | Commitment nudge after the member's own message ("Want a reminder…?", Assistant §8) | The author, if opted in and with assistant access | As `assistant_brief` | `assistant_nudge:<messageId>` | The member opens the assistant DM |
 | `assistant_reply` | A long assistant task finished (for example an audio file is ready, Assistant §9) | The member who asked | As `assistant_brief` | `assistant_reply:<turnId>` | The member opens the assistant DM |
 | `personal_reminder` | A personal reminder is due (ReminderScheduler `personal_reminder`, Assistant §7.1) | The member who owns it | In-app; email after the delay | `personal_reminder:<reminderId>` | The member marks it done or dismisses it |
+| `assignment` | Assigned to an issue or personal task ([Projects](projects.md) §9.1, M10b) | The new assignee (never the actor) | In-app; email after the delay | `assignment:<issueId>` | The issue moves to `completed` or `cancelled`, or is reassigned to someone else (opening the issue marks the notification `read` without resolving the action item) |
+| `review_request` | Added as a reviewer on an issue (`issue_reviewers`, Projects §9.1, M10b) | The requested reviewer | In-app; email after the delay | `review_request:<issueId>` | The reviewer submits `approved` or `changes_requested`, is removed as reviewer, or the issue closes (opening the issue marks the notification `read` without resolving the review request) |
+| `issue_review_decided` | A reviewer approves or requests changes on an issue (Projects §9.1, M10b) | The issue's assignee (or creator if unassigned) | In-app; email after the delay **(default)** | `issue_review_decided:<issueId>` | The recipient opens the issue |
+| `issue_mention` | `@person` or `@group` in an issue description or comment (Projects §9.1, M10b) | Mentioned members who have access to the issue | In-app; email after the delay | `issue_mention:<issueId>:<commentOrDescId>` | The member opens the issue |
+| `issue_comment` | New comment on a followed issue (`issue_follows`, Projects §9.1, M10b) | Issue followers, except the author and people already notified by `issue_mention` on that comment | In-app; email after the delay **(default)** | `issue_comment:<issueId>` (count) | The member opens the issue |
+| `issue_status` | Issue moves to `completed` or `cancelled`, or is unblocked when its last blocking issue closes (Projects §9.1, M10b) | Issue followers (and the assignee of the newly unblocked issue), except the actor **(default)** | In-app only **(default)** | `issue_status:<issueId>` | The member opens the issue or dismisses it |
+| `issue_due_soon` | Open issue reaches its `due_date` (ReminderScheduler `issue_due`, Projects §9.1, M10b) | The assignee (or creator for unassigned personal tasks) | In-app; email after the delay **(default)** | `issue_due_soon:<issueId>:<dueDate>` | The issue is completed/cancelled, its `due_date` changes, or the member opens/dismisses it |
+| `issue_needs_reassignment` | An open issue's assignee is disabled or deleted (`needs_reassignment = 1`, Projects §9.1, §10.3, M10b) | Project Leads (or creator if active) | In-app; email after the delay **(default)** | `issue_needs_reassignment:<issueId>` | The issue is reassigned or closed |
 | `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected, passkey added (not the first at setup or acceptance), magic-link sign-in from a new device, owner recovery used, domain moved** (Identity §4.4, §4.6, §4.6a, §4.11); **an admin exported the member's data** (per-member export, when it completes; [Admin](admin.md) §12) | The affected member (and, for passkey clone detection, owners; for owner recovery used and domain moved, the **other** owners). For a per-member export: the subject, unless deleted; a **disabled** subject's item is **held and delivered on re-enable** (an exception to "no new inbox items" for disabled members, [Platform](platform.md) §3) | **Sign-in banner** (`users.pending_security_notice` list) until acknowledged on a fresh passkey sign-in, **plus email whenever email is configured** (to the old address for an email change); the inbox record from M2 (§9). Not affected by levels or DND. **Per-member export notices** use the banner too (product-owner decision, 15 Nov 2026; [Admin](admin.md) §12). | `security_notice:<kind>:<id>` | Dismissed |
 | `admin_alert` | An admin alert is raised, or escalates, by the cron dispatcher ([Admin](admin.md) §4) | The alert's audience: owners and admins, or owners only for owner-only kinds ([Admin](admin.md) §4 table) | In-app (plus the admin banner). **Email to owners for serious alerts only**: once when raised (at most one per alert record per 24 hours) and once when cleared, if a raise email went out; admins get no email ([Admin](admin.md) §4). | `admin_alert:<kind>:<subject>` (one record per alert record; repeats update it). Kinds without a subject use `_`. | The alert clears **(default)**; warning alerts can also be dismissed ([Admin](admin.md) §4) |
 | `maintenance_scheduled` | An owner schedules or starts a maintenance window ([Admin](admin.md) §13.1) | **Active members only** | In-app, from **24 hours (default)** before the start; immediately for a window less than 24 hours ahead | `maintenance:<id>` (the window ID). **Rescheduling updates** the record; **cancelling retracts** it. | The window ends, or the member dismisses it **(default)** |
-
-**Reserved for Phase 2** (projects and issues, PRD §5.6): `assignment`, `review_request`. They're not raised in the first release.
 
 The `<userId>` is implicit: every record belongs to one recipient (`inbox_items.user_id`), so keys are unique per recipient.
 
@@ -225,6 +231,7 @@ The UserHub computes each member's **derived availability**: `{ state, until, so
   - **DMs, group DMs and private channels:** **no message text**, only "Ana sent you 2 messages" or "3 new mentions in a private channel", unless the member opts in to message text in their preferences.
   - **Public channels:** the text of the mentioning message **(default)**.
   - **Documents, comments and events:** title, plus the comment text for public-workspace documents only **(default)**.
+  - **Projects, issues and personal tasks:** for **private projects** and **personal tasks**, **no issue title or comment text** ("Ana assigned you an issue in a private project"), unless the member opts in (`email_include_private_text`). Public projects include the issue key, title and comment excerpt **(default)**.
   - **Personal reminders** (`personal_reminder`): "You have a reminder due" with a link, **without the reminder text** **(default)**, because it may come from a private assistant conversation. The in-app record shows the text to its owner.
   - **Assistant items** (`assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`): **no content**, only a fixed line with the assistant's display name ("Butler has your daily brief"), linking to the assistant DM. Push notifications follow the same rule when push exists ([Assistant](assistant.md) §11).
 - **Template:**
@@ -266,7 +273,7 @@ CREATE TABLE inbox_items (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,                       -- notification | action | schedule | follow (Personal Inbox, PRD §5.3)
   event_type TEXT NOT NULL,                 -- §3 catalogue (Zod-validated)
-  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder | admin
+  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder | admin | project | issue
   source_id TEXT NOT NULL,
   source_seq INTEGER,                       -- latest channel seq contributing (chat)
   message_id TEXT,                          -- latest message contributing (chat)
@@ -341,6 +348,7 @@ What ships in each milestone. Later slices extend earlier ones; nothing ships be
 | **M9a** | `personal_reminder` | — | ReminderScheduler kind `personal_reminder` |
 | **M9b** | `assistant_brief`, `assistant_prep`, `assistant_nudge` | Assistant mentions create no inbox item; proactive items held during DND, focus time and time off, then summarised | `assistant_brief`, `assistant_prep` |
 | **M9c** | `assistant_reply` (audio files ready) | — | — |
+| **M10b** | `assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment` | Auto-resolution on issue completion, cancellation, reassignment or review decision; private project and personal task email privacy | ReminderScheduler kinds `issue_due`, `project_pulse` (M10c) |
 
 ## 10. API
 
@@ -398,7 +406,7 @@ What ships in each milestone. Later slices extend earlier ones; nothing ships be
 
 ## 12. Later
 
-Web push and native push (PRD §8) · per-device settings · keyword notifications · VIP senders who always break through · smart "catch up" summaries (Phase 3 AI) · `assignment` and `review_request` events (projects, Phase 2) · **reply by email** to mention and DM notification emails, received through Cloudflare Email Routing into a Worker `email()` handler and posted to the thread (product-owner decision, 15 Nov 2026: design it with chat, not at launch).
+Web push and native push (PRD §8) · per-device settings · keyword notifications · VIP senders who always break through · smart "catch up" summaries (Phase 3 AI) · **reply by email** to mention and DM notification emails, received through Cloudflare Email Routing into a Worker `email()` handler and posted to the thread (product-owner decision, 15 Nov 2026: design it with chat, not at launch).
 
 ## 13. Open questions
 

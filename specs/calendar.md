@@ -57,6 +57,7 @@ A team calendar built into the workspace:
 | **Personal** | Automatically for each member | Owner edits. `general_access = workspace_freebusy`: every member sees busy blocks. | Holds the member's own events, invitations they've received, time off, focus time and working location |
 | **Group** | Automatically for each group | Group members **edit**. **Every member views** (`general_access = workspace_view`). | Shows the group's events plus an overlay of members' time off |
 | **Channel** | Optional; added from channel settings | Channel members edit; follows channel visibility | Private channel calendars are visible to members only |
+| **Project** | Automatically for each project (M10a, [Projects](projects.md) §3.1, §7) | Project Leads and Editors edit; Commenters and Viewers view (plus everyone for public projects) | Holds project milestones, releases, demos and project meetings, and overlays project contributors' declared time off, regional public holidays and working hours for capacity planning |
 | **Standalone** | Any member creates one (e.g. "On-call rota") | Creator is owner; shared with users, groups and channels as editor / viewer / free/busy; general access restricted / free/busy / workspace view / workspace edit | |
 | **Workspace** | One, at setup | Admins edit; everyone views | All-hands, company holidays, office closures |
 | **Public holidays** | **Virtual**: generated, no rows stored **(default)** | Read-only; everyone | One overlay per region in use (§6) |
@@ -72,10 +73,10 @@ A team calendar built into the workspace:
 
   They're resolved by the permission engine as a resource type ([Permissions](permissions.md) §4). `freebusy` is a stored grant role; the matching calendar-wide general access value is `workspace_freebusy` (§12; [Permissions](permissions.md) §9).
 - **Deletion:**
-  - personal, workspace and group calendars can't be deleted directly; they follow their owner, group or workspace ([Platform](platform.md) §4)
+  - personal, workspace, group and project calendars can't be deleted directly; they follow their owner, group, project or workspace ([Platform](platform.md) §4)
   - channel calendars are removed with their channel
   - standalone and external calendars can be deleted by their owner (Trash for 30 days; restorable by the owner, the person who deleted it, or an admin; [Platform](platform.md) §5)
-  - **when a group or channel calendar is purged** (decision), each event **moves to its organiser's personal calendar**, so attendees keep it. Events whose organiser has been deleted are deleted instead, and attendees get `event_cancel` ([Platform](platform.md) §4).
+  - **when a group, channel or project calendar is purged** (decision), each event **moves to its organiser's personal calendar**, so attendees keep it. Events whose organiser has been deleted are deleted instead, and attendees get `event_cancel` ([Platform](platform.md) §4).
 - **Deleted organiser:** events on a deleted member's personal calendar that have other attendees move to the **first remaining attendee's** personal calendar (earliest to accept, otherwise earliest invited), who becomes organiser **(default)**. Events with no other attendees are deleted. Events they organised on shared calendars get the calendar's first remaining editor (or owner) as organiser ([Platform](platform.md) §3).
 
 ## 4. Events
@@ -86,7 +87,7 @@ A team calendar built into the workspace:
 |---|---|
 | Title | Required |
 | Calendar | Which calendar it belongs to; default is personal |
-| Type | `event`, `focus`, `working_location`, `deadline`, plus `holiday` for company holidays on the workspace calendar (§5, §6) |
+| Type | `event`, `focus`, `working_location`, `deadline`, `release`, `demo` (project calendars, [Projects](projects.md) §7.1), plus `holiday` for company holidays on the workspace calendar (§5, §6) |
 | Start / end | Timed (with an **IANA time zone**) or **all-day** (date range, no zone) |
 | Recurrence | RFC 5545 RRULE, plus exceptions (§4.3) |
 | Attendees | Members, groups (expanded when the invitation is sent, **(default)**) and external emails (§8). Each can be marked **optional**. |

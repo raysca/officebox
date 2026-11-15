@@ -60,6 +60,7 @@ The rules every feature follows, so features behave consistently and no data is 
 | **Search** | Their content stays searchable. Hidden from people search **(default)**. | Content stays (attributed to "Former member"). Removed from people search. `@handle` occurrences re-rendered (Chat row). |
 | **Presence** | Removed from WorkspacePresence immediately. | Same. |
 | **Assistant** | Assistant DO kept but unreachable. `/ws/assistant` sockets close with `4401`. Proactive triggers, personal reminders and proactive opt-ins are suspended. Queued mention, nudge and proactive requests for them are **dropped** at their status check. **Purges (`assistant-purge`), vector deletes and the DO's `retention_sweep` keep running**, because they're housekeeping, not requests. Re-enabling runs the **reconcile pass** before the DO serves requests ([Assistant](assistant.md) §4.4, §13). | The member's **Assistant DO storage is deleted** (all tables), and their proactive triggers removed ([erase list](#31-personal-data-erase-list)). Every Worker path checks the member's status in D1 before addressing an Assistant DO, so queue consumers and alarms never recreate it. |
+| **Projects, Tasks & Issues** | `/ws/projects/:id` sockets close with `4401`. Open project issues assigned to them stay open with **`needs_reassignment = 1`**, raising `issue_needs_reassignment` for the Project Lead(s) and flagging them on the Project Overview. Pending `issue_reviewers` rows for them are marked `cancelled`. If they were the **last Project Lead**, the longest-standing active Editor (or an admin) is promoted (audited). Available working days drop to `0` in capacity math. Personal tasks (`project_id IS NULL`) stay in their account; shared/assigned personal tasks stay accessible to collaborators. | Everything for *disabled*, plus: authored issues, comments, activity and `project_memories` stay as **"Former member"** (`@handle` text in issue descriptions, comments, `ProjectRoom` DO and `search_index` is re-rendered as "Former member"). Open personal tasks (`project_id IS NULL`) are **transferred to an admin** (matching My files); completed/cancelled personal tasks with no other participants are **erased** **(default)**. `issue_follows` are erased. |
 
 ### 3.1 Personal-data erase list
 
@@ -79,6 +80,7 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | Notifications | `inbox_items`, `pending_emails`, `notify_anyway_log`, **`user_availability`** |
 | Membership | `group_members`, `channel_members` (channel history stays) |
 | Assistant | **Assistant DO storage** (all tables), `assistant_interactions`, `assistant_optins`, `assistant_source_refs`, `personal_reminders`, and their `assistant_brief`, `assistant_prep` and `personal_reminder` triggers ([Assistant](assistant.md) §13) |
+| Projects & Issues | `issue_follows`; completed/cancelled solo personal tasks (`project_id IS NULL`) deleted from `ProjectRoom("personal")` and D1 `issues` (after open personal tasks are transferred to an admin); `@handle` text re-rendered as "Former member" in `issues`, `issue_comments`, `search_index`, `ProjectRoom("personal")` and each project `ProjectRoom` DO the member participated in ([Projects](projects.md) §10.3) |
 | Calls | Nothing erased: `call_notes.started_by` and `call_transcript_segments.speaker_id` keep the user ID and show "Former member", like messages |
 
 `ON DELETE CASCADE` on `users` never fires, because user rows are anonymised, not deleted. The purge job must delete each table explicitly.
@@ -112,7 +114,7 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | | Grants where the group is the principal | Removed (audited) |
 | | Event attendee rows | Already expanded to individuals when the invitation was sent, so they're unaffected |
 | | `@handle` | Released (held 30 days) |
-| **Calendar → delete** | Personal, workspace, group | **Can't be deleted directly.** Personal goes with its member (events handled as in §3), group with its group, workspace never. Private events whose organiser is disabled or deleted can be deleted individually by an owner or admin. |
+| **Calendar → delete** | Personal, workspace, group, project | **Can't be deleted directly.** Personal goes with its member (events handled as in §3), group with its group, project with its project, workspace never. Private events whose organiser is disabled or deleted can be deleted individually by an owner or admin. |
 | | Standalone | To Trash with its events. Attendees see the events removed (cancellation notice). Restorable by the calendar owner, the person who deleted it, or an admin. |
 | | External (ICS in) | Deleted immediately with its cached events (no Trash) |
 | **Event → delete** | Single event or whole series | To Trash. Cancellations sent to members and external attendees. Reminders and triggers removed. |
@@ -126,11 +128,19 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | | Search text and stars, recents and access requests | Removed from search immediately; the rest purged |
 | **File → delete** | All versions | To Trash, which removes the file's derived text from retrieval (restore re-indexes it). Purge deletes every version's R2 object, its `file_derived_text` rows and their vectors ([Assistant](assistant.md) §9). |
 | **Comment thread → delete** | Comments | Deleted immediately (no Trash) by the author (own comments) or the document owner, editors or admins (moderation, audited) |
+| **Project → archive** | Issues & board, project channel, project drive, project calendar | All become read-only. Active channel and issue calls end; open polls close. Reversible via Unarchive ([Projects](projects.md) §10.1). |
+| **Project → delete (Trash)** | Project, issues, project channel, project drive, project calendar, `project_memories` | To Trash for 30 days as one unit (active channel and issue calls end). Restorable by a Project Lead, the person who deleted it, or an admin. |
+| **Project → purge** | Project Drive documents, whiteboards and files | **Moved to each creator's My files** (or an admin's if the creator was deleted), keeping explicit item grants and removing project-inherited access. Empty Project Drive and folders deleted. |
+| | Project Calendar | Purged. Milestones deleted; meeting events with attendees **move to their organiser's personal calendar** (or are deleted with `event_cancel` if the organiser is deleted). |
+| | Project Channel | Purged as in **Channel → purge** (`ChatChannel` DO `deleteAll()`, message-owned files, call notes/transcripts). |
+| | Issues, sub-issues, comments, checklists, relations, key aliases, issue-owned files, issue calls (`huddle_messages`, `call_notes`, `call_transcript_segments`), `project_memories`, `project_pulses` | Deleted (`ProjectRoom` DO `deleteAll()`, D1 rows, R2 issue attachments, `file_derived_text`, issue-call chat/notes/transcripts, `search_index` and Vectorize entries; `assistant-purge` fan-out for members' personal memories). Project key held 30 days. |
+| **Issue / personal task → delete** | Sub-issues, comments, checklists, relations, issue-owned files, issue calls (`huddle_messages`, `call_notes`, `call_transcript_segments`) | To Trash for 30 days (active issue call ends; removed from search, vectors and active boards; inbox items resolved), then purged with `assistant-purge` fan-out (Projects §10.2). |
+| **Source object → delete/purge** | `project_memories` citing the object (`project_memory_sources`) | Moving a cited source to 30-day Trash immediately hides citing `project_memories` from Overview, `search_index` and Vectorize (restoring the source un-hides them); permanent deletion or purge deletes the `project_memories` rows immediately along with their FTS5 and Vectorize entries (Projects §8.2). |
 | **User → delete** | See §3 | |
 
-**Assistant purge fan-out.** Every pipeline that deletes content also purges copies derived from it in members' assistant memory ([Assistant](assistant.md) §4.4):
-- **Which pipelines:** a message deleted or a channel purged; a document or whiteboard purged; a file version dropped or purged; an event deleted; call notes or transcripts purged, by retention or by a context cascade. Editing a message doesn't purge **(default)**.
-- **How:** the pipeline looks up `assistant_source_refs` and enqueues one **`assistant-purge`** job per affected member. The job skips only **deleted** members; it runs for disabled members, members without assistant access and while the assistant is off.
+**Assistant purge fan-out.** Every pipeline that deletes content also purges copies derived from it in members' assistant memory ([Assistant](assistant.md) §4.4) and deletes dependent rows in `project_memories` ([Projects](projects.md) §8.2):
+- **Which pipelines:** a message deleted or a channel purged; a document or whiteboard purged; a file version dropped or purged; an event deleted; **an issue or project purged**; call notes or transcripts purged, by retention or by a context cascade. Editing a message doesn't purge **(default)**.
+- **How:** the pipeline looks up `assistant_source_refs` and enqueues one **`assistant-purge`** job per affected member (and deletes matching `project_memories` via `project_memory_sources`). The job skips only **deleted** members; it runs for disabled members, members without assistant access and while the assistant is off.
 - **Vectors:** vector deletes and index invalidations always run, even while the assistant is off (Assistant §9).
 
 ## 5. Retention, Trash and purge
@@ -153,7 +163,7 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | Huddle metadata (`huddles`, `huddle_participants`) | 365 days | No | — |
 | Call rings (`call_rings`) | 365 days, with huddle metadata | No | — |
 | **In-call chat**, channel and DM calls | A thread in the conversation, so it follows the channel | With the channel | — |
-| **In-call chat**, document and event calls | **Life of the context.** `huddle_messages` is **reparented** to the context (`context_type`, `context_id`) and **must not cascade** from `huddles`. | With the context | As the context |
+| **In-call chat**, document, event and issue calls | **Life of the context.** `huddle_messages` is **reparented** to the context (`context_type`, `context_id`) and **must not cascade** from `huddles`. | With the context | As the context |
 | Link previews (`link_previews`) | Cache 24 hours. Rows unreferenced for 30 days are purged with their R2 image **(default)**. | No | — |
 | Access requests | Decided requests 90 days after decision; pending ones expire after 30 days **(default)** | No | — |
 | `ws_tickets` | Deleted daily after expiry | No | — |
@@ -175,16 +185,20 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | Download tokens (`download_tokens`) | Valid for **1 hour (default)**; expired rows deleted daily ([Admin](admin.md) §11.3, §16) | No | — |
 | Admin job previews (`admin_jobs`) | Previews valid for 10 minutes; expired previews deleted daily ([Admin](admin.md) §5, §16) | No | — |
 | `file_derived_text` and its vectors | Per file version, following the file: Trash removes it from retrieval, restore re-indexes it, purge deletes it. An owner can delete the whole assistant index (audited) **(default)**. | With the file | As the file |
+| **Projects** (`projects`, milestones, labels, pulses) | Until deleted | 30 days | Project Lead, person who deleted it, admin |
+| **Issues & personal tasks** (`issues`, sub-issues, checklists, relations, comments, activity, issue-owned files) | Until deleted | 30 days | Project Lead, issue creator/owner, person who deleted it, admin |
+| **Project Memory** (`project_memories`, `project_memory_sources`) | Life of the project; hidden while any cited source is in 30-day Trash and deleted immediately if a cited source object is permanently deleted or purged; undecided `pending` items expire after 30 days **(default)** | With the project | As the project |
 
 **Who can restore from Trash (canonical rule):** the item's **owner**, the **person who deleted it**, **drive managers** of its drive, and **admins**. Feature specs use this rule unchanged.
 
 | Container | How the rule applies |
 |---|---|
 | Item in My files | Owner (the My files member), person who deleted it, admin |
-| Item in a shared or group drive | Item owner, person who deleted it, drive managers, admin |
+| Item in a shared, group or project drive | Item owner, person who deleted it, drive managers (or Project Leads), admin |
 | Channel folder item | Item owner, person who deleted it, admins (admins manage the Channels drive) |
 | Folder or drive | Its owner or drive managers, person who deleted it, admin |
 | Channel | Person who deleted it, admin |
+| Project or issue | Project Lead (or issue owner), person who deleted it, admin |
 | Standalone calendar | Calendar owner, person who deleted it, admin |
 | Event | Organiser, person who deleted it, admin |
 
@@ -194,7 +208,7 @@ This extends TDD §7.5. Exports are run by **owners and admins** and include pri
 
 | Included | Notes |
 |---|---|
-| Private content: DMs, group DMs, private channels, restricted documents | Included in admin-run exports, so a restore is complete; disclosed in the privacy statement ([Permissions](permissions.md) §6) |
+| Private content: DMs, group DMs, private channels, private projects, personal tasks, restricted documents | Included in admin-run exports, so a restore is complete; disclosed in the privacy statement ([Permissions](permissions.md) §6) |
 | Calendars, events, event exceptions, attendees, reminders | External attendee emails are included (personal data the organiser holds) |
 | Time off | Including type and note, in admin-run exports (workspace and per-member, [Admin](admin.md) §2) |
 | `personal_reminders` | Included in admin-run exports (workspace and per-member, [Admin](admin.md) §2, [Assistant](assistant.md) §7.1) |
@@ -202,11 +216,12 @@ This extends TDD §7.5. Exports are run by **owners and admins** and include pri
 | Comment threads and comments | |
 | Polls and votes | Anonymous polls export **votes as hashed `voter_key`s only**, never member IDs; `poll_secret` is excluded. Non-anonymous polls export voter IDs. |
 | Saved items, stars, sidebar prefs, user and notification preferences | |
-| In-call chat | From `huddle_messages` (document and event calls) **and** from channel threads (channel and DM calls, part of channel export) |
+| In-call chat | From `huddle_messages` (document, event and issue calls) **and** from channel threads (channel and DM calls, part of channel export) |
 | Huddle metadata, call rings | Within retention |
 | `assistant_interactions` | Metadata only, within retention ([Assistant](assistant.md) §13) |
 | Call notes and transcripts | Within retention |
 | `passkeys` (public keys, credential IDs, counters, names, how each was created) | **Included** (product owner, 15 Nov 2026). Public keys aren't secret. A restore onto the **same canonical origin** keeps them working; onto another origin they're dropped, and members use a magic link (email configured) while everyone else gets a recovery link. The restore summary lists who needs one ([Identity](identity.md) §2). |
+| **Projects, milestones, labels, issues, sub-issues, checklists, comments, relations, activity, key aliases, Project Pulses and active Project Memory** | Exported from each project's `ProjectRoom` DO plus `ProjectRoom("personal")` (`projects/<id>/state.jsonl` and `projects/personal/state.jsonl` for authoritative `issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments` and `issue_activity`) and D1 (`projects`, `project_milestones`, `project_labels`, `issue_relations`, `issue_follows`, `issue_key_aliases`, `project_memories`, `project_memory_sources`, `project_pulses`), plus issue-owned attachments in R2 ([Projects](projects.md)) |
 
 | Excluded | Reason |
 |---|---|
@@ -227,6 +242,7 @@ This extends TDD §7.5. Exports are run by **owners and admins** and include pri
 - messages they wrote in every conversation, including DMs, with conversation names and their message-owned attachments
 - their reactions, saved items, stars and non-anonymous poll votes
 - documents, whiteboards and files they own, with versions, including items in Trash
+- issues and personal tasks they created or are assigned to, their `issue_reviewers` rows and `issue_follows`, issue comments they wrote, and their issue-owned attachments ([Projects](projects.md) §10.4)
 - events they organise or attend, their time off (with type and note) and personal reminders
 - comments they wrote, and call-note transcript segments they spoke
 - their `assistant_interactions` metadata
@@ -286,6 +302,7 @@ The single list of workspace settings. Feature specs reference this table instea
 | `export_retention_days` | 45 **(default)** (31–365 **(default)**); applies to on-demand workspace exports only | **Owner** | `settings.export_retention` | Admin §11.1 |
 | `scheduled_export` | off. `{ enabled, weekday, time, include_files, set_by }`; when on, weekly **(default)**, files included, latest 4 complete exports kept (fixed) | Admin | `settings.scheduled_export` | Admin §11.1 |
 | `workspace_timezone` | the first owner's time zone (IANA name) **(default)** | Admin | `settings.workspace_timezone` | Admin §11.1 |
+| `project_creation` | `everyone` (`everyone` / `admins`) **(default)** | Admin | `settings.project_creation` | Projects §3.2 |
 
 Every change writes the audit event with old and new values (values that are personal data, such as email addresses, are stored hashed). Settings are read and written through `GET` / `PATCH /admin/settings` (§15). Settings are cached per Worker isolate for at most 30 seconds **(default)**. Durable Objects that enforce a setting (for example ChatChannel for `general_read_only`) receive it through their config RPC.
 
@@ -319,7 +336,7 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Group DM creation | 20 per hour per user **(default)** | D1 counter | Chat §20 |
 | Poll creation | 10 per hour per user **(default)** | D1 counter | Chat §20 |
 | Rings | 5 rings to the same person per 10 minutes **(default)** | DO (caller's UserHub) | Calls §4 |
-| In-call chat (`call_chat`) | 20 messages per 10 seconds per user per call **(default)**, separate from the per-conversation send limit | DO (ChatChannel, or HuddleRoom for document and event calls) | Chat §4.7 |
+| In-call chat (`call_chat`) | 20 messages per 10 seconds per user per call **(default)**, separate from the per-conversation send limit | DO (ChatChannel, or HuddleRoom for document, event and issue calls) | Chat §4.7 |
 | Handle changes | 3 per 30 days per user **(default)** | D1 counter (from `handles` history) | Identity §4.8 |
 | Access requests | 1 pending request per object per requester (unique index); 20 per day per requester **(default)** | D1 (unique index) + D1 counter | Permissions §7 |
 | External event invitation emails | 50 external recipients per member per day (setting) | D1 counter | Calendar §8 |
@@ -363,6 +380,9 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Call notetakers | 1 per call; not counted toward the 25 participants (Assistant §12.3) |
 | Push-to-talk clip | 2 minutes **(default)** (Assistant §12.1) |
 | Assistant file reading | Documents up to 50 MB or 500 pages; audio up to 2 hours; images up to 20 MB **(default)** (Assistant §9) |
+| Project workflow columns | 3–12 per project **(default)** ([Projects](projects.md) §4.2) |
+| Issue description / comment | 40 KB of text (100 KB rich-text JSON) **(default)**; sub-issue depth 1; labels per issue 20 **(default)** |
+| Project Memory item | 1,000 characters **(default)** |
 
 ## 9. Outbound fetching
 
@@ -421,6 +441,8 @@ Our tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.r
 | Assistant daily brief | ReminderScheduler | Kind `assistant_brief`, per opted-in member at the start of their working hours on working days; enqueues to `assistant-proactive` ([Assistant](assistant.md) §8) |
 | Assistant meeting prep | ReminderScheduler | Kind `assistant_prep`, 30 minutes **(default)** before a qualifying event the opted-in member attends; enqueues to `assistant-proactive` (Assistant §8) |
 | Personal reminders | ReminderScheduler | Kind `personal_reminder`; raises the `personal_reminder` inbox item (Assistant §7.1) |
+| Issue due-today notification | ReminderScheduler | Kind `issue_due`, at the start of the assignee's working hours on `due_date`; raises `issue_due_soon` ([Projects](projects.md) §9.1) |
+| Scheduled Project Pulse draft | ReminderScheduler | Kind `project_pulse`, when a Project Lead enables `projects.pulse_schedule` (Projects §8.1) |
 | DND schedule (weekly quiet hours) | ReminderScheduler | Kinds `dnd_start` / `dnd_end`, expanded from the member's schedule, refilled hourly; each calls UserHub `refreshAvailability()` |
 | Manual DND expiry | ReminderScheduler | Kind **`dnd_until_end`**, created when a member sets DND "for 1 hour", "until tomorrow" and so on; calls UserHub `refreshAvailability()` |
 | Holds longer than 24 hours (e.g. an email held for a long time off) | ReminderScheduler | Kind `email_release`, instead of a queue delay |
@@ -438,7 +460,7 @@ Our tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.r
 | ICS-in refresh | Hourly cron | Queue a fetch per due subscription |
 | Snooze wake-ups | 5-minute cron | TDD §7.8 |
 | Room-registry sweep | Daily cron | §12 |
-| Purge, retention, reconciliation, version thinning, release check | Daily cron | TDD §7.8. The purge job also deletes expired `assistant_interactions`, `call_transcript_segments` past retention (and their vectors), `file_derived_text` for purged versions, and finished `personal_reminders` (Assistant §14.3). |
+| Purge, retention, reconciliation, version thinning, release check | Daily cron | TDD §7.8. The purge job also deletes expired `assistant_interactions`, `call_transcript_segments` past retention (and their vectors), `file_derived_text` for purged versions, finished `personal_reminders` (Assistant §14.3), and undecided `pending` `project_memories` past 30 days (Projects §8.2). |
 | Scheduled-trigger refill | Hourly cron | Below |
 | Identity repair job | Hourly cron | Completes setup when the owner has a passkey but setup isn't complete; rolls forward or releases partial invitation accepts under the rules in [Identity](identity.md) §4.3; idempotent |
 | Setup claim expiry | Hourly cron, and the next setup request | One conditional batch, 24 hours after the claim ([Identity](identity.md) §4.1) |
@@ -481,7 +503,7 @@ CREATE TABLE scheduled_triggers (            -- in the ReminderScheduler DO's SQ
   fire_at INTEGER NOT NULL,                   -- UTC ms
   kind TEXT NOT NULL,                         -- reminder | event_start | focus_start | focus_end | time_off_start | time_off_end
                                               -- | status_expire | dnd_start | dnd_end | dnd_until_end | email_release
-                                              -- | assistant_brief | assistant_prep | personal_reminder (Zod-validated)
+                                              -- | assistant_brief | assistant_prep | personal_reminder | issue_due | project_pulse (Zod-validated)
   target TEXT NOT NULL,                       -- JSON: { eventId, occurrence, userId, ... }
   fired_at INTEGER
 );
@@ -511,17 +533,17 @@ This replaces TDD §3.5's "at most three WebSockets per tab".
 | Socket | When open |
 |---|---|
 | Hub (UserHub) | Always (one per browser, shared across tabs by leader election) |
-| Channel (ChatChannel) | The conversation on screen |
-| Document or whiteboard (DocRoom / BoardRoom) | The item on screen |
+| Channel (ChatChannel) | The conversation on screen (or the project channel split-pane drawer) |
+| Document, whiteboard or project board (DocRoom / BoardRoom / ProjectRoom) | The item or project board/list on screen |
 | Call (HuddleRoom) | While in a call |
 | Embedded whiteboard | **Only while "edit in place" is active** |
 | Assistant (Assistant DO, `/ws/assistant`) | **Only while an assistant surface is on screen** ([Assistant](assistant.md) §3, §15) |
 
-- **Other embeds** (messages, events, document previews, link previews) **don't open sockets**. They refresh through hub `activity` events for objects the viewer has open.
+- **Other embeds** (messages, events, document previews, link previews, issue chips) **don't open sockets**. They refresh through hub `activity` events for objects the viewer has open.
 - **Hard cap: 6 sockets per tab** **(default)**. Opening another closes the least recently used embedded-board socket first.
 
 **Access-change propagation:**
-- When a member's role is **downgraded**, or their **inherited access changes** (item moved, folder or drive grant changed, channel made private), the Worker computes the affected users and calls **`updateAccess(userId, role | null)`** on each affected Durable Object.
+- When a member's role is **downgraded**, or their **inherited access changes** (item moved, folder, drive or project grant changed, channel or project made private), the Worker computes the affected users and calls **`updateAccess(userId, role | null)`** on each affected Durable Object.
 - The DO sends **`{ type: "access.changed", role }`** on the member's sockets and **switches them to read-only** (viewer or commenter), or **closes them with `4403`** when the role is `null`. This complements `closeConnections` for full revocation (TDD §3.5).
 - **Offline edits after losing access:** on reconnect the server rejects updates from a connection without edit rights. The client keeps the unsynced changes in a local copy the user can **export as Markdown**, and shows "You no longer have edit access — your offline changes were not saved" **(default)**.
 
@@ -531,10 +553,10 @@ This replaces TDD §3.5's "at most three WebSockets per tab".
 - `updateAccess` is **not** used for maintenance. Closed DOs aren't woken; they check `installation.maintenance_epoch` lazily (cached for 10 seconds **(default)**) before any refused write.
 
 **Durable room registry (revocation):**
-- Each member's UserHub keeps a **room registry in its SQLite storage**, keyed by `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board`, `huddle` and `assistant`. `assistant` sockets close with `4401` when the member is disabled and `4403` when they lose assistant access (Assistant §14.1).
+- Each member's UserHub keeps a **room registry in its SQLite storage**, keyed by `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board`, `huddle`, `project` and `assistant`. `assistant` sockets close with `4401` when the member is disabled and `4403` when they lose assistant access (Assistant §14.1).
 - A room DO **registers** a connection when it accepts the socket and **unregisters** it when the socket closes (the DO calls the hub). Heartbeats refresh `last_seen_at`.
 - Entries are **never pruned by age while the socket lives.** A **daily sweep** asks each room whether the connection still exists, and removes entries the room doesn't recognise.
-- **Worker-side fallback:** revocation doesn't rely on the registry alone. The Worker also **recomputes the affected rooms from D1** (channel memberships, grants on documents and boards, active call contexts from `huddles`, and the member's own Assistant DO) and calls `closeConnections(userId)` on each directly. Revocation is complete when both paths have run.
+- **Worker-side fallback:** revocation doesn't rely on the registry alone. The Worker also **recomputes the affected rooms from D1** (channel memberships, grants on documents, boards and projects, active call contexts from `huddles`, and the member's own Assistant DO) and calls `closeConnections(userId)` on each directly. Revocation is complete when both paths have run.
 
 **Durable UserHub state:** the hub stores **live ring state**, **`currentCall`** (one call at a time), the **held-notification flag and summary** (DND), the room registry and derived availability in its **SQLite storage**, never only in memory, so hibernation or eviction loses nothing.
 
@@ -548,6 +570,7 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | **M3a** (chat) | `#general` (at setup, or backfilled), channels, default-channel auto-join on account creation, the welcome post. Backfill: existing members join the default channels. |
 | **M5a** (calendar) | The workspace calendar, a personal calendar per member, a group calendar per group. Created on setup, account creation and group creation from M5a on, and backfilled. |
 | **M6a** (documents) | The Channels drive, a channel folder per channel (not DMs), My files per member, a group drive per group, and a root folder per drive. Created on the matching events from M6a on, and backfilled. |
+| **M10a** (projects) | Creating a project (or promoting a channel) automatically creates its dedicated `ProjectRoom` DO, project channel (`#proj-<slug>`), Project Drive (with root folder) and Project Calendar ([Projects](projects.md) §3). |
 
 | Event (once the owning milestone has shipped) | Created |
 |---|---|
@@ -555,8 +578,9 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | Account created (invitation accepted) | Default-channel memberships (M3a), personal calendar (M5a), My files (M6a) |
 | Group created | `@handle` (M1), group calendar (M5a), group drive (M6a) |
 | Channel created (not DMs) | Channel folder in the Channels drive (M6a). A channel calendar is optional (M5a). |
+| Project created (M10a) | Dedicated project channel, Project Drive (with root folder), Project Calendar, and `ProjectRoom` DO (or migrates the existing channel/folder/calendar when promoting a channel). |
 | Drive created | Root folder |
-| Rename (group, channel) | Its calendar, drive or folder renamed with it |
+| Rename (group, channel, project) | Its calendar, drive or folder renamed with it |
 
 **Backfill:**
 - Each of M3a, M5a and M6a ships an **idempotent backfill job**. It's enqueued by the migration's deploy step and also runs in the daily cron until complete.
@@ -597,49 +621,51 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `magic_link_issues`, `user_devices` | New tables | Our consumption and revocation record for magic links, and known devices for the new-device notice; excluded from export | Identity §4.4, §5 |
 | `sign_in_throttle`, `sign_in_failure_buckets`, `sign_in_slots`, `users.password_version` | Dropped from the design (never on `main`) | Drafted in the M1a branch for password throttling and slow mode; not created, because there are no passwords (15 Nov 2026) | §8, Identity §2 |
 | `channels.type` | Add value | `public`, `private`, `dm`, **`group_dm`**. `dm_key` is required for `dm` and `group_dm`. Converting a group DM to a private channel clears `dm_key` and sets a name. | Chat §3.1 |
-| `channels` | Add | `topic`, `description`, `posting_policy`, **`config_version`** (`INTEGER NOT NULL DEFAULT 0`, bumped on every change pushed by `applyConfig`) | Chat §3.4, §15 |
+| `channels` | Add | `topic`, `description`, `posting_policy`, **`config_version`** (`INTEGER NOT NULL DEFAULT 0`, bumped on every change pushed by `applyConfig`), **`project_id`** (nullable, for project channels) | Chat §3.4, §15; Projects §3.1 |
 | `channel_members` | Add | `can_post`, `hidden` (no per-conversation email delay; the delay lives only in `user_preferences.email_delay`, Notifications §7) | Chat §15 |
-| `messages` (D1 copy) | Add | `kind` (`user`, **`call_chat`**, **`assistant`**, **`call_notes`**, or a system kind, Chat §4.6), `format` (rich-text JSON; the existing `body` column holds the plain-text copy, `text`), `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15 |
+| `messages` (D1 copy) | Add | `kind` (`user`, **`call_chat`**, **`assistant`**, **`call_notes`**, **`project_event`**, or a system kind, Chat §4.6), `format` (rich-text JSON; the existing `body` column holds the plain-text copy, `text`), `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15; Projects §6.1 |
 | `messages.sender_id` and `users` | Reserved rows | `messages.sender_id` references `users(id)`, but `'system'` and `'assistant'` are not people. Reserved `users` rows with ids `'system'` and `'assistant'` and **`status = 'system'`** (a new `users.status` value), excluded from the directory, seats and sign-in **(default)**. Assistant messages use `sender_id = 'assistant'`, handled like `'system'`: a reserved sender that bypasses posting policy; `system_payload` holds `{ invoked_by, sources }`. | Assistant §14.2, §17 |
 | `thread_follows` | New table | Thread follows and per-thread read state. The TDD `follows` table remains for other object types. | Chat §15 |
 | `saved_items`, `sidebar_prefs`, `link_previews`, `message_previews` | New tables | As Chat §15 (`saved_items.state`: `in_progress`, `done`) | Chat §15 |
 | `channel_members.notify_level` | Values | `default`, `all`, `mentions`, `mute`, `nothing` | Notifications §7 |
 | ChatChannel DO `events.actor_id` | Exception | For `poll.voted` on **anonymous** polls, the actor is the per-poll `voter_key`, never a user ID (TDD §2.2 change) | Chat §9 |
-| `resource_grants.resource_type` | Values | `document`, `whiteboard`, `folder`, `file`, `drive`, `calendar`, `project` | Permissions §9 |
+| `resource_grants.resource_type` | Values | `document`, `whiteboard`, `folder`, `file`, `drive`, `calendar`, `project`, `issue` | Permissions §9 |
 | `resource_grants.role` | Values | `owner`, `manager`, `editor`, `commenter`, `viewer`, `freebusy` | Permissions §9 |
-| `general_access` (documents, folders, files, drives, calendars) | Values | `restricted`, `workspace_freebusy` (calendars only), `workspace_view`, `workspace_comment`, `workspace_edit`. Personal calendars default to `workspace_freebusy`, group and workspace calendars to `workspace_view`. | Permissions §9 |
+| `general_access` (documents, folders, files, drives, calendars, projects) | Values | `restricted`, `workspace_freebusy` (calendars only), `workspace_view`, `workspace_comment`, `workspace_edit`. Personal calendars default to `workspace_freebusy`, group and workspace calendars to `workspace_view`. | Permissions §9 |
 | `folders.general_access` | Default | **`restricted`** (new items follow the container) | Permissions §5 |
-| `access_requests` | New table | Unique pending request per `(object_type, object_id, requester_id)`, with `expires_at` (30 days). `object_type` includes `event` (approver: the organiser, who adds the requester as an attendee) and `calendar` (approvers grant a calendar role). | Permissions §7, §9, Documents §9 |
+| `access_requests` | New table | Unique pending request per `(object_type, object_id, requester_id)`, with `expires_at` (30 days). `object_type` includes `event` (approver: the organiser, who adds the requester as an attendee), `calendar` (approvers grant a calendar role) and `project` / `issue`. | Permissions §7, §9, Documents §9, Projects §3.3 |
 | `item_activity` | New table | Details-panel activity | Documents §9 |
 | `folders` | Add | `drive_id`, `channel_id` | Documents §9 |
-| `files` | Rules | Three kinds: **message-owned** (`parent_type = 'message'`, no folder, no versions, deleted with the message); **document-owned** (`parent_type = 'document'`: images and file cards inside a document, no folder, no versions, inherit the document's access, deleted with it); or a **drive file** (`folder_id` set, versioned). "Save to folder" copies a message-owned file into a new drive file. | §2; Documents §6 |
+| `files` | Rules | Four kinds: **message-owned** (`parent_type = 'message'`, no folder, no versions, deleted with the message); **document-owned** (`parent_type = 'document'`: images and file cards inside a document, no folder, no versions, inherit the document's access, deleted with it); **issue-owned** (`parent_type = 'issue'`: attachments on an issue description or comment, inherit the issue's access, deleted with it); or a **drive file** (`folder_id` set, versioned). "Save to folder" copies a message-owned or issue-owned file into a new drive file. | §2; Documents §6; Projects §4.6 |
 | `files` | Add | `drive_id`, `current_version`, `copied_from_file_id` (Save to folder provenance); new `file_versions` table | Documents §9 |
 | `documents` | Add | `folder_id`, `drive_id`, `created_by` | Documents §9 |
-| `drives`, `stars`, `recent_items`, `comment_threads`, `comments` | New tables | As Documents §9. **`drives.general_access`** column (default `restricted`). | Documents §9 |
-| `huddles.context_type` | Values | `channel` (including DMs), `document`, `event` (`project` reserved) | Calls §10 |
-| `huddles` | Add | `started_message_id`, `purge_after`, **`context_key`** (e.g. `channel:<id>`, `document:<id>`, `event:<id>`, `event:<id>:<occurrenceStart>`). The active-call unique index moves to `context_key WHERE ended_at IS NULL`. The call kind is **derived**, not stored. | Calls §3, §10 |
+| `drives`, `stars`, `recent_items`, `comment_threads`, `comments` | New tables | As Documents §9. **`drives.general_access`** column (default `restricted`). `drives.kind` gains `'project'`, with `drives.project_id`. | Documents §9; Projects §3.1 |
+| `huddles.context_type` | Values | `channel` (including DMs), `document`, `event`, `project`, `issue` | Calls §10; Projects §6.3 |
+| `huddles` | Add | `started_message_id`, `purge_after`, **`context_key`** (e.g. `channel:<id>`, `document:<id>`, `event:<id>`, `event:<id>:<occurrenceStart>`, `issue:<id>`). The active-call unique index moves to `context_key WHERE ended_at IS NULL`. The call kind is **derived**, not stored. | Calls §3, §10 |
 | `huddle_messages` | New table | Keyed to the **context** (`context_type`, `context_id`, `context_key`), plus `huddle_id` as a nullable reference **without cascade**. Written through an outbox. | Calls §10, §5 here |
 | `call_rings` | New table | Missed-call records (UserHub holds live ring state). `state`: `ringing`, `accepted`, `declined`, `missed`, `suppressed`, **`refused`** | Calls §10 |
-| `calendars.kind` | Values | `personal`, `group`, `channel`, `standalone`, `workspace`, `external` (holidays are generated, not stored) | Calendar §12 |
+| `calendars.kind` | Values | `personal`, `group`, `channel`, `project`, `standalone`, `workspace`, `external` (holidays are generated, not stored); `calendars.project_id` added | Calendar §12; Projects §7.1 |
+| `events.type` | Values | `event`, `focus`, `working_location`, `deadline`, `holiday`, **`release`**, **`demo`** | Calendar §4.1; Projects §7.1 |
 | Calendar tables | New tables | `calendars`, `events` (with `range_start`, `range_end` in UTC ms for every event, and `purge_after`), `event_exceptions`, `event_attendees`, `event_reminders`, `event_notes`, `time_off`, `ics_feeds`, `ics_subscriptions` | Calendar §12 |
 | `time_off` | Columns | `deleted_at` for audit only; **no `purge_after`** (no Trash; hard-deleted 30 days after `deleted_at`, §5) | Calendar §12 |
-| UserHub room registry | Durable | SQLite table keyed `(kind, room_id, connection_id)`; kinds `channel`, `doc`, `board`, **`huddle`**, **`assistant`** (§12) | §3, §12, Assistant §14.1 |
+| UserHub room registry | Durable | SQLite table keyed `(kind, room_id, connection_id)`; kinds `channel`, `doc`, `board`, **`huddle`**, **`project`**, **`assistant`** (§12) | §3, §12, Assistant §14.1, Projects §11.3 |
 | `user_preferences`, `notify_anyway_log`, **`user_availability`** | New tables | Defined in Notifications §7 (`user_preferences.reminder_defaults`, `offline_cache`, `dnd_until`, `dnd_schedule`, ...; `user_availability.focus_until`, `away_until`, `schedule_dnd_until`, ...) | Notifications §5.7, §7 |
 | `inbox_items` | Replace | As Notifications §7: adds `count`, `preview` (redactable, up to 140 characters), `last_event_at` and a `message_id` index; `UNIQUE (user_id, dedupe_key)`, with resolved records reopened in place | Notifications §3.1, §7 |
-| `inbox_items.event_type` | Add values | `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder` | Notifications §3, Assistant §14.2 |
-| `inbox_items.event_type` | Add values | `admin_alert`, `maintenance_scheduled` | Notifications §3, Admin §16 |
+| `inbox_items.event_type` | Add values | `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`, `admin_alert`, `maintenance_scheduled`, `assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment` | Notifications §3, Assistant §14.2, Admin §16, Projects §9.1 |
 | `admin_alerts`, `health_checks`, `maintenance_windows`, `admin_jobs`, `download_tokens` | New D1 tables (M7 baseline) | As Admin §16. Enums Zod-validated. `maintenance_windows` has a unique index on `open` (one scheduled or active window). Excluded from export as operational tables (§6). | Admin §16 |
 | `exports` | Columns | `kind` (`export`, `member_export`, `restore`), `state` (`running`, `packing`, `complete`, `failed`, `cancelled`, `expired`, `deleted`), `include_files`, `in_maintenance`, `scheduled`, `subject_user_id`, `schema_version`, `size_bytes`, `object_count`, `archive_r2_key`, `restore_report`, `error`, `manifest_r2_key`, `requested_by`, `schedule_set_by`, `created_at`, `completed_at`, `expires_at`; a partial unique index enforcing one running workspace export. Excluded from export. | Admin §16, TDD §7.5 |
 | `sessions` | Add (Admin) | The step-up field Admin §11.3 and §16 call `authenticated_at` is **`fresh_auth_at`** (with `fresh_auth_method`, above): one column, set only by a passkey assertion, in M1's baseline | Admin §11.3, §16; Identity §4.5 |
 | `installation` | Add | `checklist` (JSON), `maintenance_epoch INTEGER NOT NULL DEFAULT 0`, `scheduled_export_last_slot`. Admin §4's `public_origin` is **`canonical_origin`** (above): recorded at the setup claim and changed only by an owner's two-step domain move | Admin §4, §13.2, §15, §16; Identity §4.4 |
 | Shared error codes | Add values | `reauth_required`, `maintenance` | Admin §16, §17 |
 | `scheduled_triggers`, `trigger_outbox` | New tables (ReminderScheduler DO SQLite) | §11.1 | §11 |
-| `scheduled_triggers.kind` | Add values | `assistant_brief`, `assistant_prep`, `personal_reminder` | §11.1, Assistant §14.2 |
+| `scheduled_triggers.kind` | Add values | `assistant_brief`, `assistant_prep`, `personal_reminder`, `issue_due`, `project_pulse` | §11.1, Assistant §14.2, Projects §8.1, §9.1 |
 | `pending_emails`, `rate_counters`, `ics_opt_outs` | New D1 tables | §11, §8, §15 | here |
 | `cron_leases` | New D1 table (M0b) | One lease per cron schedule `(schedule, holder, expires_at)`; overlap guard for the dispatcher. `schedule` is Zod-validated (no `CHECK`). Excluded from export as a job table. | TDD §2.1, §7.8 |
 | `rate_counters.scope` | Add values | `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes` | §8, Assistant §14.2 |
 | `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments` | New D1 tables | As Assistant §14.2. `call_notes` is keyed to the context and **must not cascade** from `huddles` (§5). | Assistant §14.2 |
 | Assistant DO | New DO schema | Versioned with lazy migration through the core DO base class (Assistant §14.1) | Assistant §14.1 |
+| `projects`, `project_milestones`, `project_labels`, `issues` (D1 copy), `issue_key_aliases`, `issue_reviewers`, `issue_relations`, `issue_follows`, `project_memories`, `project_memory_sources`, `project_pulses` | New D1 tables (M10) | As Projects §11.2; `ProjectRoom` DO is authoritative for issues, checklists, comments and activity | Projects §11 |
+| `ProjectRoom` DO | New DO schema (M10) | Versioned with lazy migration through the core DO base class (Projects §11.1) | Projects §11.1 |
 | `handles` | Reserved | `assistant` and the handle derived from the current `assistant_display_name` | Assistant §14.2, Identity |
 | `audit_log.metadata` | Convention | `"via": "assistant"` on assistant-initiated writes (no new column). For writes into DMs and group DMs, only the object type is recorded (Permissions §4.1). | Assistant §5.1, §14.2 |
 | Spec DDL `CHECK`s on growable enums | Rule | `calendars.kind`, `events.type`, `huddle_messages.context_type`, `auth_tokens.kind`, `drives.kind`, `item_activity.kind`, `pending_emails.state` and similar are **Zod-validated; the `CHECK` is omitted in migrations**, even where a spec's illustrative DDL shows one | here |

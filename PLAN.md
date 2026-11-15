@@ -3,7 +3,7 @@
 **Status:** Draft for review
 **Date:** 14 November 2026
 **Inputs:** [PRD](PRD.md) v1.4, [TDD](TDD.md) v1.4, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
-**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md) · [Assistant](specs/assistant.md) · [Admin & Operations](specs/admin.md).
+**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md) · [Assistant](specs/assistant.md) · [Admin & Operations](specs/admin.md) · [Projects, Tasks & Issues](specs/projects.md).
 **Cross-cutting specs:** [Permissions](specs/permissions.md) · [Notifications & Attention](specs/notifications.md) · [Platform Rules](specs/platform.md) (lifecycle, cascades, retention, export, settings, limits, timers, schema).
 
 The specs supersede the scope lists in §4 wherever they differ; each spec assigns its features to slices. Working rules are in [AGENTS.md](AGENTS.md).
@@ -17,7 +17,7 @@ We build a **foundation first** and then add features as **vertical slices** on 
 - **Always deployable.** `main` deploys to a fresh Cloudflare account with the Deploy button at every milestone.
 - **Promote the spike, don't copy it.** The spike proved the designs. Production code re-implements them inside the new module structure and applies the spike's findings, most importantly typed RPC results instead of thrown errors (§6).
 
-**Feature order:** authentication → chat → calls → calendar → documents. Other work fits around these (§4).
+**Feature order:** authentication → chat → calls → calendar → documents → assistant → projects. Other work fits around these (§4).
 
 ## 2. Codebase structure
 
@@ -31,7 +31,7 @@ officebox/
 │   │   │                       settings, rate limits, cron dispatcher, queues + outbox, DO base class
 │   │   ├── src/features/       one folder per feature: routes, Durable Objects, services, jobs
 │   │   │   ├── auth/  members/  realtime/  chat/  files/  calls/
-│   │   │   ├── calendar/  docs/  inbox/  search/  admin/
+│   │   │   ├── calendar/  docs/  inbox/  search/  assistant/  projects/  admin/
 │   │   ├── migrations/         D1 migrations (single sequence; files named by feature)
 │   │   └── test/               Workers-runtime integration tests
 │   └── web/                    React SPA (Vite)
@@ -74,7 +74,8 @@ officebox/
 | M7 | **Operations** | Admin area, alerts, health, storage protection, usage panel, export/restore, maintenance mode, upgrades | M1 (grows alongside) | M |
 | M8 | **Personal Inbox** | Today / Upcoming / Assigned / Following views | M3, M5, M6 | M |
 | M9 | **Assistant** (M9a–M9d) | Personal assistant with memory, channel mentions, proactive help, push-to-talk, call notes, live voice | M8, M4; voice spike passed (M9c, M9d) | XL (4 slices) |
-| Later | Projects and issues · MFA and SSO · imports · API and webhooks | PRD Phase 2 (Phase 3 is M9; AI actions on tasks and issues arrive with projects) | — | — |
+| M10 | **Projects, Tasks & Issues** (M10a–M10c) | Auto-provisioned project workspace (board, channel, drive, calendar), `ProjectRoom` DO, issues & personal tasks, capacity planning, Project Pulse & shared Project Memory | M3, M5, M6, M8, M9a | XL (3 slices) |
+| Later | MFA and SSO · Guests · imports · API and webhooks | PRD Phase 2 | — | — |
 
 Sizes are relative: M ≈ 1×, L ≈ 2×, XL ≈ 3×.
 
@@ -472,6 +473,26 @@ The Today, Upcoming, Inbox, Assigned to me and Following views (PRD §5.3).
 - **M9d: live voice.** Spoken conversation over the Realtime SFU.
 
 **Gate:** the voice spike (SFU-to-Durable-Object audio path, streaming speech-to-text, latency, and the memory, CPU and wall time of transcribing 25 tracks; [specs/assistant.md](specs/assistant.md) §19) passes before M9c starts. M9d also needs its latency target met.
+
+### M10 — Projects, Tasks & Issues
+
+**Spec:** [specs/projects.md](specs/projects.md). Every project is a living workspace that automatically provisions a board/issue tracker (`ProjectRoom` Durable Object), a dedicated project channel, a project drive and a project calendar, governed by one unified permission list.
+
+- **M10a: projects, auto-provisioned ecosystem, `ProjectRoom` DO, issues, personal tasks, list and board views.**
+  - Create a project (auto-provisioning `#proj-<slug>`, Project Drive, Project Calendar and `ProjectRoom` DO) or promote an existing channel into a project.
+  - Unified permissions (**Project Lead · Editor · Commenter · Viewer**) flowing through the permission engine to the project's issues, channel, drive and calendar.
+  - Unified `issues` model for project issues (`ENG-42`) and private-by-default personal tasks (`TASK-12`), configurable workflow columns across 5 status categories (`backlog`, `unstarted`, `started`, `completed`, `cancelled`), 1-level sub-issues, checklists, `issue_key_aliases` on move, and outbox sync to D1.
+  - Kanban board (`dnd-kit` with full keyboard and single-pointer alternatives), List/Table view and workspace-wide **My Work** view.
+  - Archive/unarchive, 30-day Trash and purge (moving project drive docs/files to their creators' My files on purge), and member disabled/deleted lifecycle (`needs_reassignment = 1`, last-Lead promotion, personal task transfer).
+- **M10b: comments, relations, milestones, calendar capacity planning, Personal Inbox and cross-object continuity.**
+  - Issue comments, mentions, issue-owned attachments, `blocks` / `relates_to` / `duplicate_of` relations, and Tiptap `[ ]` checklist promotion to issues.
+  - Milestones, `release` and `demo` events on the Project Calendar, and deterministic **capacity planning** (comparing each contributor's available working days after `time_off` and regional/company public holidays against assigned open issue `effort_days`).
+  - Curated, low-noise project channel events (batched over 2 minutes) and permission-checked `ENG-42` live chips across chat and documents.
+  - Personal Inbox integration (`assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment`).
+- **M10c: Project Pulse (Overview), shared Project Memory and Butler project/issue tools.**
+  - Project Overview (Pulse) tab with live metrics, blockers and `project_pulses`.
+  - Shared, transparent **Project Memory** (`project_memories` in D1, indexed in FTS5 and Vectorize; AI-proposed items from untrusted sources start as `pending` until confirmed by a Lead/Editor; auto-purged when a cited source is deleted; isolated from personal memory).
+  - Butler project and issue tools (`search_issues`, `get_project_pulse`, `check_project_capacity`, and confirmed write tools `create_issue`, `update_issue`, `comment_on_issue`, `propose_project_memory`).
 
 ## 5. Definition of done (every slice)
 
