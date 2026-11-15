@@ -1,9 +1,9 @@
 # Spec: Notifications & Attention
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
+**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: `admin_alert` and `maintenance_scheduled` events, a DND exception for serious alert emails, and `security_notice` for per-member exports (held for disabled members)
 **Feature name:** Notifications (marketing name to be decided later)
-**Milestone:** M2 core ([PLAN](../PLAN.md)), extended by each feature milestone (§9) · **Related:** PRD §8; TDD §3.5; [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Identity & Access](identity.md), [Assistant](assistant.md), [Platform](platform.md)
+**Milestone:** M2 core ([PLAN](../PLAN.md)), extended by each feature milestone (§9) · **Related:** PRD §8; TDD §3.5; [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Identity & Access](identity.md), [Assistant](assistant.md), [Admin & Operations](admin.md), [Platform](platform.md)
 
 Decisions marked **(default)** were not discussed; change them on review.
 
@@ -29,7 +29,8 @@ Every feature raises notifications through this model, never through its own rul
 | Message deletion | Clears matching inbox previews, recalculates counts, and cancels pending offline emails and toasts |
 | What DND holds | **In-app banners and sounds, email notifications, call rings.** The inbox still records items. |
 | What time off holds | **Call rings and email.** In-app banners and sounds still show **(default)**. |
-| Breaking through DND | **"Notify anyway"** for DMs, rate-limited |
+| Breaking through DND | **"Notify anyway"** for DMs, rate-limited. `security_notice` is never held. **`check_failing`, `protective_mode` and `d1_copy_paused` alert emails** to owners also break through **(default)** ([Admin](admin.md) §4; added by the approved Admin spec so serious outages reach owners at once). |
+| Admin alerts and maintenance | **`admin_alert`** inbox items for owners and admins, one per alert record; **`maintenance_scheduled`** items for active members ([Admin](admin.md) §4, §13.1). Added by the approved Admin spec. |
 | Disclosure | **Shown:** presence and senders see "in do-not-disturb", "focusing until…" and "away until…" |
 | Availability | **Derived in the UserHub** from time off, manual DND, focus time, DND schedule and presence (§5.7) |
 | Offline email | After **10 minutes unread** (member-configurable, one setting per member), batched per conversation |
@@ -68,7 +69,9 @@ Every notification is an `inbox_items` record (§3.1, §7) with an `event_type`.
 | `assistant_nudge` | Commitment nudge after the member's own message ("Want a reminder…?", Assistant §8) | The author, if opted in and with assistant access | As `assistant_brief` | `assistant_nudge:<messageId>` | The member opens the assistant DM |
 | `assistant_reply` | A long assistant task finished (for example an audio file is ready, Assistant §9) | The member who asked | As `assistant_brief` | `assistant_reply:<turnId>` | The member opens the assistant DM |
 | `personal_reminder` | A personal reminder is due (ReminderScheduler `personal_reminder`, Assistant §7.1) | The member who owns it | In-app; email after the delay | `personal_reminder:<reminderId>` | The member marks it done or dismisses it |
-| `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected** (Identity §4.4, §4.6, §4.11) | The affected member (and, for passkey clone detection, owners) | In-app **and email (always; to the old address for an email change)**, not affected by levels or DND | `security_notice:<kind>:<id>` | Dismissed |
+| `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected** (Identity §4.4, §4.6, §4.11); **an admin exported the member's data** (per-member export, when it completes; [Admin](admin.md) §12) | The affected member (and, for passkey clone detection, owners). For a per-member export: the subject, unless deleted; a **disabled** subject's item is **held and delivered on re-enable** (an exception to "no new inbox items" for disabled members, [Platform](platform.md) §3) | In-app **and email (always; to the old address for an email change)**, not affected by levels or DND. Per-member export notices have no sign-in banner ([Admin](admin.md) §12). | `security_notice:<kind>:<id>` | Dismissed |
+| `admin_alert` | An admin alert is raised, or escalates, by the cron dispatcher ([Admin](admin.md) §4) | The alert's audience: owners and admins, or owners only for owner-only kinds ([Admin](admin.md) §4 table) | In-app (plus the admin banner). **Email to owners for serious alerts only**: once when raised (at most one per alert record per 24 hours) and once when cleared, if a raise email went out; admins get no email ([Admin](admin.md) §4). | `admin_alert:<kind>:<subject>` (one record per alert record; repeats update it). Kinds without a subject use `_`. | The alert clears **(default)**; warning alerts can also be dismissed ([Admin](admin.md) §4) |
+| `maintenance_scheduled` | An owner schedules or starts a maintenance window ([Admin](admin.md) §13.1) | **Active members only** | In-app, from **24 hours (default)** before the start; immediately for a window less than 24 hours ahead | `maintenance:<id>` (the window ID). **Rescheduling updates** the record; **cancelling retracts** it. | The window ends, or the member dismisses it **(default)** |
 
 **Reserved for Phase 2** (projects and issues, PRD §5.6): `assignment`, `review_request`. They're not raised in the first release.
 
@@ -76,6 +79,7 @@ The `<userId>` is implicit: every record belongs to one recipient (`inbox_items.
 
 **Rules:**
 - **Never notify yourself.** The actor of an event isn't a recipient.
+- **Disabled members get no new inbox items** ([Platform](platform.md) §3), with one exception: a per-member export `security_notice` is held and delivered when they're re-enabled ([Admin](admin.md) §12).
 - **Access is checked at delivery.** A recipient who has lost access by then doesn't receive the item.
 - **Grouping and reopening** follow §3.1.
 - **Auto-resolution** follows the "Resolves when" column. A resolved item moves to "Read" (Personal Inbox, PRD §5.3).
@@ -135,6 +139,7 @@ Each conversation has one level per member:
   - **Call rings are suppressed.** The caller sees the disclosure (§5.4), and a `missed_call` is recorded.
   - **The inbox still records every item**, and badges still update.
   - `security_notice` items are never held.
+  - **Exception for serious admin alerts:** `admin_alert` emails for `check_failing`, `protective_mode` and `d1_copy_paused` break through DND **(default)**. Other `admin_alert` emails and banners are held as above; the inbox still records the item ([Admin](admin.md) §4).
 
 ### 5.2 "Notify anyway"
 
@@ -261,7 +266,7 @@ CREATE TABLE inbox_items (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,                       -- notification | action | schedule | follow (Personal Inbox, PRD §5.3)
   event_type TEXT NOT NULL,                 -- §3 catalogue (Zod-validated)
-  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder
+  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder | admin
   source_id TEXT NOT NULL,
   source_seq INTEGER,                       -- latest channel seq contributing (chat)
   message_id TEXT,                          -- latest message contributing (chat)
@@ -332,6 +337,7 @@ What ships in each milestone. Later slices extend earlier ones; nothing ships be
 | **M5a** | — | Time off in availability (`away_until`), "away until", time off holding rings and email | `time_off_start`, `time_off_end` |
 | **M5b** | `event_invite`, `event_update`, `event_cancel`, `rsvp_response`, `reminder`, `call_starting` | Focus time acting as DND | `reminder`, `event_start`, `focus_start`, `focus_end`; hourly RSVP batch |
 | **M6** | `doc_mention`, `doc_comment`, `comment_reply`, `access_request`, `access_request_decided`, `share` | — | — |
+| **M7** | `admin_alert`, `maintenance_scheduled`; `security_notice` for per-member exports ([Admin](admin.md)) | DND exception for serious alert emails (§5.1); per-member export notice held for disabled subjects | Cron dispatcher (alerts, maintenance notices; [Platform](platform.md) §11). No ReminderScheduler kinds. |
 | **M9a** | `personal_reminder` | — | ReminderScheduler kind `personal_reminder` |
 | **M9b** | `assistant_brief`, `assistant_prep`, `assistant_nudge` | Assistant mentions create no inbox item; proactive items held during DND, focus time and time off, then summarised | `assistant_brief`, `assistant_prep` |
 | **M9c** | `assistant_reply` (audio files ready) | — | — |
@@ -386,7 +392,8 @@ What ships in each milestone. Later slices extend earlier ones; nothing ships be
   - a DM email contains no message text unless the member opted in
   - a public-channel mention email contains the text.
 - **Access and actors:** a member who lost access before delivery gets no notification; actors never notify themselves.
-- **Security notices** are delivered during DND and with email notifications off.
+- **Security notices** are delivered during DND and with email notifications off. A per-member export notice for a disabled subject is held until they're re-enabled.
+- **Admin alerts and maintenance:** repeats of an alert update one `admin_alert:<kind>:<subject>` record; `check_failing`, `protective_mode` and `d1_copy_paused` emails break through DND while other alert emails are held; rescheduling a maintenance window updates its `maintenance:<id>` item and cancelling retracts it; disabled members get no maintenance item ([Admin](admin.md) §18).
 - **Accessibility:** new notifications are announced in a polite live region; an axe check passes on the panel and toasts.
 
 ## 12. Later

@@ -1,9 +1,9 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: admins can export private content (disclosed), new `workspace.export` and `member.export` actions, the room-level maintenance flag, and break-glass removed from Later
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
-**Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Platform](platform.md)
+**Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Admin & Operations](admin.md), [Platform](platform.md)
 
 Decisions marked **(default)** were not discussed; change them on review.
 
@@ -29,7 +29,8 @@ It replaces TDD §2.1's "stop at first match" resolution with a **union** rule.
 | Private channel membership | **Any member can add people; channel admins remove them.** This corrects PRD §10.1. |
 | Admin powers over people | Admins act on **members only**. Recovery, email change, disable and delete on **admins or owners need an owner**. **Only owners invite or promote admins.** |
 | Notice of admin actions | Every recovery link or email change **notifies the person** (email to the old address and an in-app banner) and **revokes their pending sign-in, reset and recovery tokens**. |
-| Admins and private content | Admins see that private objects **exist** but can't read them. They **can't add themselves to private channels**; they can archive, delete and remove members. In private channels they **are** members of (added by a member), admins can delete messages. |
+| Admins and private content | Admins see that private objects **exist** but **can't read private content in the app**. They **can't add themselves to private channels**; they can archive, delete and remove members. In private channels they **are** members of (added by a member), admins can delete messages. **Admins can export private content**, including DMs, time-off type and note, personal reminders and peppered password hashes ([Admin](admin.md) §2, §11.1). Changed by the approved Admin spec: exports are an owner and admin power so a restore is complete; this is disclosed in the privacy statement (§6) and every export is audited. |
+| Exports | Engine actions **`workspace.export`** (owners and admins) and **`member.export`** (owners and admins; a subject who is an admin or owner needs an owner), checked when an export **starts** and on **every download request** ([Admin](admin.md) §11.1, §11.3, §12). The owner requirement for admin or owner subjects is a **process control, not a security boundary**: any admin can export the whole workspace ([Admin](admin.md) §2). |
 | Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** a role on a group drive or folder, **needs an owner**. Audited. |
 | Recovery links without email | Allowed for members, **loudly flagged**: a notice on the member's **sign-in page** and a flag on the member list for **every owner** until acknowledged (Identity §4.6). |
 | Comment moderation | Document **owners, editors and admins** can remove others' comments |
@@ -99,7 +100,7 @@ Legend: ✓ allowed · — not allowed · *(cond.)* allowed under the stated con
 | Delete (to Trash) | — | — | — | — | — | — | ✓ |
 | Start or join a channel call | ✓ | ✓ (joins the call, not the channel) | ✓ | ✓ | ✓ | ✓ | Public ✓; **private —** |
 
-**DMs and group DMs:** only participants can see, read, post, react or call. Nobody else, including admins, can see the content or add people. Group DMs have fixed membership: adding someone starts a new group DM. Admins can see that a DM exists only in the export and in storage figures, never the participants' messages.
+**DMs and group DMs:** only participants can see, read, post, react or call. Nobody else, including admins, can see the content or add people. Group DMs have fixed membership: adding someone starts a new group DM. In the app, admins can see that a DM exists only in storage figures, never the participants' messages. Workspace and per-member exports, which admins run, **include DM content** ([Admin](admin.md) §2, §11.1, §12).
 
 **Assistant writes into DMs and group DMs:** when a member confirms an assistant write there (for example `post_message`), the audit entry records only the **object type**, not the conversation ID ([Assistant](assistant.md) §5.1).
 
@@ -175,8 +176,8 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 
 **Time off:**
 - Every member sees **the dates** of anyone's time off, shown as "Away".
-- The **type and note are visible only to the member**: not to admins, not to group managers.
-- Members create, edit and cancel their own time off. Admins can edit or cancel anyone's dates (audited), but never see type or note.
+- The **type and note are visible only to the member** in the app: not to admins, not to group managers. They **are included in admin-run exports** (workspace and per-member, [Admin](admin.md) §2).
+- Members create, edit and cancel their own time off. Admins can edit or cancel anyone's dates (audited), but never see type or note in the app.
 
 ### 4.5 Calls
 
@@ -273,6 +274,9 @@ effective role(user, item) = max(
 | See that private objects exist (name, member count, size), in admin views only | ✓ | ✓ |
 | Manage groups and group managers | ✓ | ✓ |
 | Workspace settings | ✓ (except owner-only: platform §7 Admin settings) | ✓ |
+| Export the whole workspace, including private content (`workspace.export`; [Admin](admin.md) §11) | ✓ | ✓ |
+| Export one member's data for a data-protection request (`member.export`; [Admin](admin.md) §12) | Members only | ✓ (required when the subject is, or has since become, an admin or owner) |
+| Maintenance mode ([Admin](admin.md) §13) | — (view only) | ✓ |
 
 **Notification and token revocation:**
 - When anyone issues a **recovery link** for a person or **changes their email**:
@@ -283,7 +287,10 @@ effective role(user, item) = max(
   - an audit entry is written.
 - Using a recovery link also signs out all the person's existing sessions (Identity §4.6).
 
-**Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents through Officebox. These things are stated plainly:
+**Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents **in the app**. These things are stated plainly:
+- **Exports** ([Admin](admin.md) §2, §11, §12). Owners and admins can **export the whole workspace, including private content**: DMs, group DMs, private channels, restricted documents, time-off type and note, personal reminders, and peppered password hashes (useless without the `PEPPER_*` Worker secrets, which are never exported). They can also run a per-member export for a data-protection request, which never contains password hashes. Every export is audited. Members aren't told about workspace exports; the subject of a per-member export gets a notice.
+- **Export expiry and erasure** ([Admin](admin.md) §11.1, §11.2). On-demand exports are deleted after 45 days **(default)**, scheduled exports keep the latest 4, and per-member exports are deleted after 7 days **(default)**. Exports **aren't rewritten** when a member is deleted, so a deleted member's data can remain in an archive until it expires, and restoring an older export brings it back.
+- **Direct R2 access.** Reading export archives directly from R2 (Wrangler or R2 credentials) needs **Cloudflare account access**, which is outside Officebox's control ([Admin](admin.md) §11.1).
 - **Recovery links.** An admin could sign in as an ordinary **member** by issuing them a recovery link. Officebox emails the member (if email is configured), shows a notice on their sign-in page, flags it to every owner when email isn't configured, and audits it. The member may only find out at their next sign-in, so this is visible, not prevented.
 - **Deleted members' files.** Deleting a member hands their private My files to an admin, who can then read them (platform §3 Member lifecycle).
 - **Groups.** An admin can't add themselves to a group or grant themselves group-drive access without an owner, because that would expose everything shared with the group.
@@ -339,6 +346,7 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 | HTTP routes | Every route that reads or writes user content calls the engine. No ad-hoc checks (AGENTS §4.1). |
 | WebSocket upgrades | The Worker resolves the role before forwarding (TDD §3.1). The DO stores it in the socket attachment. |
 | Revocation | Total loss of access is `updateAccess(userId, null)`: sockets close with `4403` through the UserHub room registry (TDD §3.5). Disabling a member closes everything with `4401`. The registry covers ChatChannel, DocRoom, BoardRoom, HuddleRoom **and the Assistant DO** (kind `assistant`: losing assistant access closes with `4403`), and is persisted (platform §12). |
+| **Maintenance mode** ([Admin](admin.md) §13.2) | Maintenance is **not a role change**. On each maintenance transition the Worker calls a room-level **`setMaintenance(epoch, active)`** RPC on open rooms only, through the UserHub room registry (platform §12). The room sets a **read-only flag separate from each socket's role** and sends `status.changed { maintenance }`; when maintenance ends the flag clears and each socket's own role applies again, with no reconnect. `updateAccess` is not used for maintenance. Closed DOs check the maintenance epoch lazily before any refused write. |
 | **Access change on open sockets** | When a person's effective role on an open document, whiteboard, channel or call context changes (for example editor → viewer, or they leave a group), the Worker calls **`updateAccess(userId, role | null)`** on the affected DOs through the room registry. The DO updates the attachment and sends **`{ type: "access.changed", role }`**. A DocRoom then rejects that socket's updates (read-only) and the client switches to view mode without reconnecting. When `role` is **null** (all access lost), the DO closes the socket with **4403**. This is the only name for the mechanism (platform §12, TDD §3.5). |
 | Search, previews, embeds, forwards, notifications, AI | Filtered through the engine at read time (TDD §2.4, §5.3) |
 | **AI assistant** ([Assistant](assistant.md) §4, §5, §6) | **Private surfaces** (assistant DM, Talk, live voice, proactive): every tool runs **as the member** through the engine, with their current access; confirmed writes re-check permission. **Mentions in shared conversations** use the **audience rule**: only sources the **whole audience** can open (public channel: public-channel messages, this conversation's files and `workspace_view` objects; private channel: plus objects shared with the channel; DMs, group DMs and private channels of 8 or fewer: plus objects the engine confirms **each** member can open **(default)**), re-checked when the reply is posted. **Personal memory is isolated:** it lives only in the member's own Assistant DO, addressed only by the authenticated member's ID, never used to answer anyone else, and not readable by admins. Cited sources are re-checked on every recall; lost access hides them immediately. |
@@ -373,7 +381,7 @@ The engine is internal. It's exposed only through:
 
 ## 11. Acceptance criteria
 
-- **Matrix test.** An automated test enumerates every object type × role × action in §4 and checks the engine's answer. It runs in CI, and a change to §4 must update the test. **It grows per milestone:** M1 covers workspace roles, groups and profiles; M3a adds channels, DMs and messages; M4 adds calls; M5a adds calendars and events; M6a adds documents, folders, drives and files.
+- **Matrix test.** An automated test enumerates every object type × role × action in §4 and checks the engine's answer. It runs in CI, and a change to §4 must update the test. **It grows per milestone:** M1 covers workspace roles, groups and profiles; M3a adds channels, DMs and messages; M4 adds calls; M5a adds calendars and events; M6a adds documents, folders, drives and files; M7 adds the admin pages and endpoints, `workspace.export` and `member.export` ([Admin](admin.md) §18).
 - **Union:** a viewer grant on a folder plus an editor grant on an item inside gives editor. An item can't be restricted below its folder.
 - **New items:** a document created in My files is private; one created in a channel folder is editable by channel members; none starts workspace-wide.
 - **Channel made private:** non-members lose access to messages, attachments and the folder within 5 seconds, open sockets included. Items with explicit wider shares keep them, and those items were listed in the conversion dialog.
@@ -383,7 +391,8 @@ The engine is internal. It's exposed only through:
   - a recovery link or email change sends an email to the old address, shows the sign-in notice, and revokes pending tokens
   - without email configured, a recovery link flags the member to every owner until acknowledged
   - an admin adding themselves to a group, or granting themselves a group-drive role, gets 403; an owner can do it for them.
-- **Admins and private content:** an admin can't join or read a private channel or DM. They can remove members from it and archive it. An admin who was added to a private channel by a member can delete messages in it.
+- **Admins and private content:** an admin can't join or read a private channel or DM in the app. They can remove members from it and archive it. An admin who was added to a private channel by a member can delete messages in it. An admin **can export** private content: a workspace export they run includes DMs, private channels, time-off type and note, personal reminders and peppered password hashes ([Admin](admin.md) §18 Exports).
+- **Exports:** the matrix test covers `workspace.export` and `member.export` for every workspace role, at start and at download. Members are denied both. An admin is denied `member.export` when the subject is an admin or owner, including at download when the subject was promoted after the export started; an owner is allowed.
 - **Comments:** an editor can delete another person's comment; a commenter can't.
 - **Document calls:** a viewer can start a call on a document.
 - **Trash:** the item's owner, the person who deleted it, a drive manager and an admin can each restore it; an editor who didn't delete it can't.
@@ -394,14 +403,14 @@ The engine is internal. It's exposed only through:
   - a free/busy viewer sees `public` events in full
   - a free/busy viewer can't join an event call; an invitee can.
 - **Access change:** a socket whose role becomes null is closed with 4403; one whose role drops receives `access.changed`.
-- **Time off:** type and note are absent from every API response except the member's own, including for admins.
+- **Time off:** type and note are absent from every API response except the member's own, including for admins. (Admin-run export archives include them, [Admin](admin.md) §2.)
 - **Role downgrade:** an editor downgraded to viewer while connected has their next update rejected and their client switches to view mode, without a reconnect.
 - **No-access screens:** a no-access screen for an item in a private space doesn't reveal its title. Messages in private channels have no request option.
 - **Access requests:** a second request from the same person updates the first; requests expire after 30 days.
 
 ## 12. Later
 
-Guest role (Phase 2) · custom roles · deny rules · per-item narrowing below the container · admin "break-glass" access to private content with member notification.
+Guest role (Phase 2) · custom roles · deny rules · per-item narrowing below the container. (Admin "break-glass" access to private content was removed: admin exports cover it, [Admin](admin.md) §2.)
 
 ## 13. Open questions
 

@@ -3,7 +3,7 @@
 **Status:** Draft for review
 **Date:** 14 November 2026
 **Inputs:** [PRD](PRD.md) v1.4, [TDD](TDD.md) v1.4, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
-**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md) · [Assistant](specs/assistant.md).
+**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md) · [Assistant](specs/assistant.md) · [Admin & Operations](specs/admin.md).
 **Cross-cutting specs:** [Permissions](specs/permissions.md) · [Notifications & Attention](specs/notifications.md) · [Platform Rules](specs/platform.md) (lifecycle, cascades, retention, export, settings, limits, timers, schema).
 
 The specs supersede the scope lists in §4 wherever they differ; each spec assigns its features to slices. Working rules are in [AGENTS.md](AGENTS.md).
@@ -71,7 +71,7 @@ officebox/
 | M4 | **Calls** | Channel and DM calls: audio, video, screen sharing, ringing | M3, real-media run passed | L |
 | M5 | **Calendar** (M5a–M5c) | Calendars, events, holidays, time off, invitations, reminders, ICS. Event calls land in M5b. | M2, M4 | L |
 | M6 | **Documents** (M6a–M6c) | Drives, docs, whiteboards, sharing, comments, history, files, offline. Document calls and present mode land here. | M2, M4 | L |
-| M7 | **Operations** | Health, storage protection, usage panel, export/restore, upgrades | M1 (grows alongside) | M |
+| M7 | **Operations** | Admin area, alerts, health, storage protection, usage panel, export/restore, maintenance mode, upgrades | M1 (grows alongside) | M |
 | M8 | **Personal Inbox** | Today / Upcoming / Assigned / Following views | M3, M5, M6 | M |
 | M9 | **Assistant** (M9a–M9d) | Personal assistant with memory, channel mentions, proactive help, push-to-talk, call notes, live voice | M8, M4; voice spike passed (M9c, M9d) | XL (4 slices) |
 | Later | Projects and issues · MFA and SSO · imports · API and webhooks | PRD Phase 2 (Phase 3 is M9; AI actions on tasks and issues arrive with projects) | — | — |
@@ -137,6 +137,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - **magic links** by email and **passkeys** (members may be passkey-only; owners must keep a password)
   - `HttpOnly` session cookie plus rotating refresh cookie, reuse detection, and `session_epoch` revocation
   - sign out and sign out everywhere
+  - `sessions.authenticated_at` (when the member last proved who they are; a refresh doesn't update it) and **step-up re-authentication** with `POST /auth/reauth` and the shared `reauth_required` code, for sensitive downloads ([Admin §11.3](specs/admin.md))
 - **Invitations:**
   - single-use links that expire after 7 days, roles at invite time
   - **copy link** (no email needed) and **email**
@@ -162,6 +163,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - email and password sign-in (PBKDF2 100k + HMAC pepper)
   - session and rotating refresh cookies, reuse detection, `session_epoch`
   - sign out, sign out everywhere, and "My devices"
+  - `sessions.authenticated_at` in the baseline schema, and `POST /auth/reauth` by password (Admin §11.3)
   - CSRF header and `Origin` checks; rate limits on setup and sign-in
   - the permission engine in `packages/shared` with workspace roles, and the first matrix test
 - **M1b — Email and invitations:**
@@ -174,6 +176,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - passkeys, including passkey-only members (owners keep a password)
   - password reset
   - owner recovery with `RECOVERY_TOKEN`
+  - step-up re-authentication by passkey and magic link (Admin §11.3)
 - **M1d — Profiles and directory:**
   - display name, avatar (R2), time zone, working hours, location or region, status text with emoji
   - @handles
@@ -407,12 +410,14 @@ Calendar is **new scope**. The PRD currently plans only an outbound ICS feed in 
 
 ### M7 — Operations
 
+**Spec:** [specs/admin.md](specs/admin.md) (Approved): the admin area, alerts, health, storage, usage, exports (workspace and per-member), restore, maintenance mode and updates.
+
 This grows in parallel with the features above. Items are pulled in when a feature needs them.
 
 - **Health:** the admin health page, the post-deploy checklist and the diagnostics bundle (TDD §6.1, §7.1–7.2).
 - **Storage:** monitoring and **protective mode** (TDD §7.7), plus the Trash and purge pipeline and retention jobs (TDD §2.3).
 - **Usage panel and telemetry:** the usage and cost panel, and opt-in telemetry (TDD §7.9).
-- **Export and restore** with Workflows (TDD §7.5). This needs to exist before the first customer, because it's how they protect and move their data.
+- **Export and restore** with Workflows (TDD §7.5): workspace exports by owners and admins, per-member data exports, and restore (Admin §11–§12). Export and restore **must ship before the first customer**, because it's how they protect and move their data.
 - **Upgrades:** the release-sync workflow and update awareness (TDD §6.2–6.7). Deferred for now at your request; it must ship before the first release that someone else installs.
 
 ### M8 — Personal Inbox
@@ -465,7 +470,7 @@ When a module has been promoted and its tests pass in the new structure, its spi
 
 ## 7. Documentation updates this plan implies
 
-The feature and cross-cutting specs change several PRD and TDD statements. These include: calendar scope, passkeys and magic links at launch, chat attachments, document defaults, the union permission rule, notifications and DND, retention and export of new objects, schema value lists, the socket budget, and timers. Both documents are being brought in line with the specs (see each spec's notes and platform §14). The assistant spec moves personal memory into the first AI release and maps PRD Phase 3 to M9; its §17 lists every PRD, TDD and spec change it made.
+The feature and cross-cutting specs change several PRD and TDD statements. These include: calendar scope, passkeys and magic links at launch, chat attachments, document defaults, the union permission rule, notifications and DND, retention and export of new objects, schema value lists, the socket budget, and timers. Both documents are being brought in line with the specs (see each spec's notes and platform §14). The assistant spec moves personal memory into the first AI release and maps PRD Phase 3 to M9; its §17 lists every PRD, TDD and spec change it made. The admin spec makes exports an owner and admin power and removes member self-export; its §19 lists the changes it made.
 
 ## 8. Decisions
 
