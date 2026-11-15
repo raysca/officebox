@@ -3,7 +3,7 @@
 **Status:** Draft for review
 **Date:** 14 November 2026
 **Inputs:** [PRD](PRD.md) v1.4, [TDD](TDD.md) v1.4, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
-**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md) · [Assistant](specs/assistant.md).
+**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md) · [Assistant](specs/assistant.md) · [Admin & Operations](specs/admin.md).
 **Cross-cutting specs:** [Permissions](specs/permissions.md) · [Notifications & Attention](specs/notifications.md) · [Platform Rules](specs/platform.md) (lifecycle, cascades, retention, export, settings, limits, timers, schema).
 
 The specs supersede the scope lists in §4 wherever they differ; each spec assigns its features to slices. Working rules are in [AGENTS.md](AGENTS.md).
@@ -71,7 +71,7 @@ officebox/
 | M4 | **Calls** | Channel and DM calls: audio, video, screen sharing, ringing | M3, real-media run passed | L |
 | M5 | **Calendar** (M5a–M5c) | Calendars, events, holidays, time off, invitations, reminders, ICS. Event calls land in M5b. | M2, M4 | L |
 | M6 | **Documents** (M6a–M6c) | Drives, docs, whiteboards, sharing, comments, history, files, offline. Document calls and present mode land here. | M2, M4 | L |
-| M7 | **Operations** | Health, storage protection, usage panel, export/restore, upgrades | M1 (grows alongside) | M |
+| M7 | **Operations** | Admin area, alerts, health, storage protection, usage panel, export/restore, maintenance mode, upgrades | M1 (grows alongside) | M |
 | M8 | **Personal Inbox** | Today / Upcoming / Assigned / Following views | M3, M5, M6 | M |
 | M9 | **Assistant** (M9a–M9d) | Personal assistant with memory, channel mentions, proactive help, push-to-talk, call notes, live voice | M8, M4; voice spike passed (M9c, M9d) | XL (4 slices) |
 | Later | Projects and issues · MFA and SSO · imports · API and webhooks | PRD Phase 2 (Phase 3 is M9; AI actions on tasks and issues arrive with projects) | — | — |
@@ -139,6 +139,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - `security_notice` on every passkey addition and on a magic-link sign-in from a new device
   - better-auth database sessions: 30 days sliding, cookie cache off, no refresh tokens or `session_epoch`, no session token reachable by JavaScript
   - sign out, sign out everywhere, and "My devices"; every revocation closes live sockets (from M2, when sockets exist)
+  - **step-up** (`sessions.fresh_auth_at`, `POST /me/reauth`, the shared `reauth_required` code) for sensitive actions (Identity §4.5) and the sensitive downloads in [Admin §11.3](specs/admin.md)
 - **Invitations:**
   - single-use links that expire after 7 days, roles at invite time
   - **copy link** (no email needed) and **email**
@@ -169,7 +170,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - first-run setup with the setup token and an atomic claim: WebAuthn preflight, canonical origin, **the owner's passkey** (enrolment ticket bound to the challenge, consumed at verify), resume guard and 24-hour expiry
   - **passkey sign-in** with user verification required and the counter rule chosen in M1a-0
   - better-auth sessions (30 days sliding, cookie cache off, primary reads, `session.create.before` status check), sign out, sign out everywhere and "My devices", with socket-revocation hooks wired for M2
-  - **step-up** (`fresh_auth_at`, `POST /me/reauth`, the typed `reauth_required`)
+  - **step-up** (`fresh_auth_at` in the sessions baseline, `POST /me/reauth`, the typed `reauth_required`), also used by Admin §11.3 downloads
   - **signed-in passkey management:** add, rename and remove passkeys, with step-up, the last-passkey rules, labels for how each was created, the owners' second-passkey reminder and the `*.workers.dev` warning. It's here so an owner can meet the M1b invite gate.
   - the **security-notice banner list** (`users.pending_security_notice`) with acknowledgement on a fresh passkey sign-in. **Interim:** notices for passkeys added in M1a are written to the banner list only; email for them starts in M1b.
   - the hourly identity repair job's setup half (complete setup when the owner has a passkey) and one-batch claim expiry
@@ -442,12 +443,14 @@ Calendar is **new scope**. The PRD currently plans only an outbound ICS feed in 
 
 ### M7 — Operations
 
+**Spec:** [specs/admin.md](specs/admin.md) (Approved): the admin area, alerts, health, storage, usage, exports (workspace and per-member), restore, maintenance mode and updates.
+
 This grows in parallel with the features above. Items are pulled in when a feature needs them.
 
 - **Health:** the admin health page, the post-deploy checklist and the diagnostics bundle (TDD §6.1, §7.1–7.2).
 - **Storage:** monitoring and **protective mode** (TDD §7.7), plus the Trash and purge pipeline and retention jobs (TDD §2.3).
 - **Usage panel and telemetry:** the usage and cost panel, and opt-in telemetry (TDD §7.9).
-- **Export and restore** with Workflows (TDD §7.5). This needs to exist before the first customer, because it's how they protect and move their data.
+- **Export and restore** with Workflows (TDD §7.5): workspace exports by owners and admins, per-member data exports, and restore (Admin §11–§12). Export and restore **must ship before the first customer**, because it's how they protect and move their data.
 - **Upgrades:** the release-sync workflow and update awareness (TDD §6.2–6.7). Deferred for now at your request; it must ship before the first release that someone else installs.
 
 ### M8 — Personal Inbox
@@ -500,7 +503,7 @@ When a module has been promoted and its tests pass in the new structure, its spi
 
 ## 7. Documentation updates this plan implies
 
-The feature and cross-cutting specs change several PRD and TDD statements. These include: calendar scope, passkeys and magic links at launch, chat attachments, document defaults, the union permission rule, notifications and DND, retention and export of new objects, schema value lists, the socket budget, and timers. Both documents are being brought in line with the specs (see each spec's notes and platform §14). The assistant spec moves personal memory into the first AI release and maps PRD Phase 3 to M9; its §17 lists every PRD, TDD and spec change it made.
+The feature and cross-cutting specs change several PRD and TDD statements. These include: calendar scope, passkeys and magic links at launch, chat attachments, document defaults, the union permission rule, notifications and DND, retention and export of new objects, schema value lists, the socket budget, and timers. Both documents are being brought in line with the specs (see each spec's notes and platform §14). The assistant spec moves personal memory into the first AI release and maps PRD Phase 3 to M9; its §17 lists every PRD, TDD and spec change it made. The admin spec makes exports an owner and admin power and removes member self-export; its §19 lists the changes it made.
 
 ## 8. Decisions
 

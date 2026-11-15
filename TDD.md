@@ -1,10 +1,10 @@
 # Officebox — Technical Design Document (TDD)
 
 **Status:** Draft for engineering review  
-**Version:** 1.7  
+**Version:** 1.8  
 **Date:** 15 November 2026  
 **Companion to:** [Officebox PRD v1.5](PRD.md) and the feature and cross-cutting specs in [`specs/`](specs/)  
-**Changes in 1.7:** passwordless sign-in on **better-auth** (product-owner decision, 15 Nov 2026; [Identity](specs/identity.md) §2):
+**Changes in 1.8:** passwordless sign-in on **better-auth** (product-owner decision, 15 Nov 2026; [Identity](specs/identity.md) §2):
 - passkeys and magic links only; passwords, password reset, peppers and PBKDF2 removed (§3.1, §8.1)
 - better-auth (MIT) for sessions, magic links and passkeys on D1, its configuration, and the advisory policy (§8.1)
 - database sessions with the cookie cache off; no refresh tokens or `session_epoch`; revocation closes sockets by session (§2.1, §3.1, §3.5)
@@ -12,6 +12,14 @@
 - CSRF alongside better-auth's origin check (§8.2); export exclusions (§7.5); tests (§9.1); decisions, with the PBKDF2 spike result kept for the record (§10)
 - after the product owner's answers and the review (same day): the canonical origin in `installation` (§2.1, §3.1, §8.1); user verification required; magic links for members only; tokens in URL fragments (§8.2); no session token reachable by JavaScript; sign-in limits in our middleware; our compare-and-set token consumption; the setup WebAuthn preflight, resume guard and expiry (§6.8); passkeys in exports (§7.5); session recheck for sockets (§3.5); and the M1a-0 better-auth spike scope (§10)
 - after the second review and the product owner's answers (same day): step-up for sensitive actions, the two-step domain move and the security-notice banner (§8.1); one-batch claim expiry, nonce-checked completion and the identity repair job (§6.8, §7.8, §8.1); promotion rules; passkey public keys exported (§7.5, §9.1); M1a-0 go/no-go criteria (§10).
+
+**Changes in 1.7:** brought in line with the [Admin & Operations spec](specs/admin.md) (§19 there):
+- `exports` columns and states, the step-up session field (now `sessions.fresh_auth_at`, 1.8), new `installation` columns, and the admin tables (§2.1, §7.5)
+- maintenance through `maintenance_epoch` and the room-level `setMaintenance` RPC, not `updateAccess` (§3.5, §7.5)
+- checklist items, the `config.json` values embedded at build, alerts for updates, and restore (peppers dropped in 1.8) (§6.1, §6.3, §6.4, §6.7, §6.8)
+- dispatcher-run health checks, owner-only diagnostics, and Admin §4 alerts as the in-app path (§7.1–§7.3)
+- exports run by owners and admins, packing into one R2 object, download tokens, retention, per-member exports and the consistency barrier (§7.5)
+- priority writes in protective mode, `storage_thresholds`, and the new dispatcher jobs (§7.7, §7.8).
 
 **Changes in 1.6:** brought in line with the [Assistant spec](specs/assistant.md) (§17 there):
 - assistant tables, reserved `system` and `assistant` user rows, purge jobs and the `assistant-purge` fan-out (§2.1, §2.3)
@@ -188,7 +196,7 @@ Conventions:
 - The schema implements the role model and retention rules in PRD §10.1 and §10.2.
 - **Authority:**
   - This section is authoritative for the **core** tables: installation, users, sessions, invitations, groups, channels, channel members, the message copy, resource grants, audit, jobs.
-  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15, and Assistant §14.2.
+  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15, Assistant §14.2, and Admin §16.
   - [Platform §14](specs/platform.md) reconciles every change.
 - **Enums that may grow are validated with Zod** in `packages/shared`, not with SQL `CHECK` constraints (Platform §14). The value lists are given as comments below. Fixed sets (for example `group_members.role`) may keep a `CHECK`.
 - **Baseline rule:** spec changes to a table are folded into the baseline migration of the milestone that first creates it, so no table is rebuilt. After a release, changes follow expand/contract (§6.5).
@@ -204,13 +212,16 @@ CREATE TABLE installation (
   setup_claim TEXT,                 -- nonce of the request that claimed setup
   setup_claimed_at INTEGER,         -- an incomplete claim expires after 24 hours (§6.8)
   setup_completed_at INTEGER,       -- set when the owner's first passkey is registered
-  canonical_origin TEXT,            -- recorded at the claim; rpID, link origin and Origin checks (§8.1)
+  canonical_origin TEXT,            -- recorded at the claim; also the link origin for dispatcher email (Admin §4, which called it public_origin); rpID, link origin and Origin checks (§8.1)
   allowed_hosts TEXT,               -- JSON: hosts that redirect to the canonical origin
   pending_origin TEXT,              -- two-step domain move: started, not yet committed (§8.1)
   pending_origin_started_by TEXT,
   pending_origin_expires_at INTEGER,  -- 24 hours after the start (default)
   latest_release TEXT,              -- JSON from the daily release check (§6.7)
-  settings TEXT NOT NULL DEFAULT '{}'  -- JSON: storage thresholds, retention overrides
+  settings TEXT NOT NULL DEFAULT '{}',  -- JSON: storage thresholds, retention overrides
+  checklist TEXT,                   -- JSON: manual post-deploy checklist items marked done (§6.1, Admin §15)
+  maintenance_epoch INTEGER NOT NULL DEFAULT 0,  -- incremented on every maintenance change (§7.5, Admin §13.2)
+  scheduled_export_last_slot INTEGER  -- claimed scheduled-export slot, compare-and-set (§7.8, Admin §11.1)
 );
 
 -- Identity
@@ -273,7 +284,7 @@ CREATE TABLE sessions (             -- better-auth `session` model, mapped (Iden
   approx_location TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,       -- last refresh of the sliding expiry ("last seen", at most a day old)
-  fresh_auth_at INTEGER,             -- last passkey assertion on this session: step-up (§8.1)
+  fresh_auth_at INTEGER,             -- last passkey assertion on this session: step-up for sensitive actions and downloads (§8.1, Admin §11.3, which called it authenticated_at)
   fresh_auth_method TEXT,            -- passkey | magic_link
   expires_at INTEGER NOT NULL
 );
@@ -581,6 +592,7 @@ CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 | Platform | `rate_counters` (D1 counters), `ics_opt_outs`, the durable UserHub room registry | Platform §8, §12, §15 |
 | Files | Three kinds: message-owned (`parent_type = 'message'`), document-owned (`parent_type = 'document'`), drive files (`folder_id` set, versioned) | Platform §14, Documents §6 |
 | Assistant | New `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments`; `messages.kind` adds `assistant` and `call_notes` (sender `'assistant'`); `scheduled_triggers.kind` adds `assistant_brief`, `assistant_prep`, `personal_reminder`; `inbox_items.event_type` adds `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`; `rate_counters` scopes `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes`; reserved handles `assistant` and the display-name handle; reserved `users` rows `'system'` and `'assistant'` (`status = 'system'`, above) | Assistant §14.2 |
+| Admin | New `admin_alerts` (one row per `kind, subject`), `health_checks`, `maintenance_windows` (single-open-window unique index), `admin_jobs` (CSV invites and bulk actions) and `download_tokens` (token hashes only); `exports` columns and states (§7.5), including the partial unique index allowing one running workspace export; the `installation` columns above (the step-up field is `sessions.fresh_auth_at`, Identity §5); `inbox_items.event_type` adds `admin_alert` and `maintenance_scheduled`; shared error codes `reauth_required` and `maintenance` | Admin §16 |
 
 **Permission resolution** ([Permissions](specs/permissions.md) §5). The Worker resolves access as follows:
 
@@ -1025,6 +1037,7 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 **Role downgrades and inherited-access changes** (Permissions §8, Platform §12):
 - When someone's effective role on an open object changes (for example editor → viewer, a folder or drive grant changes, an item moves, a channel is made private, or a poster loses `can_post`), the Worker calls the RPC **`updateAccess(userId, role | null)`** on the affected DOs through the room registry.
 - The DO updates the socket attachment and sends **`{ type: "access.changed", role }`**. A DocRoom then treats the socket as read-only. When `role` is null (all access lost) the DO closes the socket with **`4403`**. This is the only name for the mechanism (Permissions §8, Platform §12).
+- **Maintenance mode doesn't use `updateAccess`.** Open rooms get a room-level `setMaintenance(epoch, active)` RPC that sets a read-only flag separate from each socket's role (§7.5, Admin §13.2).
 - **Offline edits** that reach the server after access was lost are rejected. The client keeps them locally and offers to export them.
 
 **Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel, document or call context, the Worker calls `closeConnections(userId, reason, scope)`. The room registry kinds are `channel`, `doc`, **`huddle`** and **`assistant`**, so revocation also closes HuddleRoom sockets and the user's SFU tracks, and the member's `/ws/assistant` sockets:
@@ -1277,7 +1290,7 @@ Design rule: permission filtering happens before model invocation, not after. No
 
 The audit split (Assistant §11):
 - **Every assistant invocation** writes one row to D1 **`assistant_interactions`**: member, time, surface, model role, provider and model, tools run, IDs of objects read and changed, outcome, and token and audio-second counts. Never prompts, replies, tool arguments or memory. Retention is `assistant_interaction_retention_days` (default 30 days, PRD §10.2). Owners and admins see it through `GET /admin/assistant/interactions` with object IDs and types only; titles are resolved only for objects the viewing admin can open. Members see their own rows.
-- **`audit_log`** receives only confirmed write actions (actor = the member, the tool and its target, `metadata.via = "assistant"`; for DMs and group DMs the object type only, Permissions §4.1), assistant settings changes, call-notes start and stop, "Forget everything", personal exports, index deletion and transcript purges.
+- **`audit_log`** receives only confirmed write actions (actor = the member, the tool and its target, `metadata.via = "assistant"`; for DMs and group DMs the object type only, Permissions §4.1), assistant settings changes, call-notes start and stop, "Forget everything", index deletion and transcript purges.
 
 ### 5.5 Assistant Durable Object
 
@@ -1347,14 +1360,14 @@ Upgrades are delivered as **release-sync pull requests** in the customer's own r
 The repository's `wrangler.jsonc` grows to include the bindings below. It is added to milestone by milestone, so a fresh deploy never provisions unused resources: M0 ships the bindings M0 and M1 need, and each later milestone adds its own bindings and Durable Object migration tags (Vectorize and AI in M9a (Phase 3), Workflows in M7, feature DOs and queues with their milestone). The full set:
 
 - Durable Object namespaces (ChatChannel, DocRoom, BoardRoom, UserHub, WorkspacePresence) as SQLite-backed classes.
-- Workflows (export and restore).
+- Workflows (workspace export, per-member export and restore).
 - D1 database.
 - R2 bucket.
 - Vectorize index.
 - Workers AI binding.
 - Queues and their dead-letter queues: `message-projection`, `search-projection`, `purge`, `email`, `indexing`.
 - Rate Limiting binding (setup, login and invitation endpoints).
-- Cron Triggers (daily maintenance: purge, retention, reconciliation, release check).
+- Cron Triggers (every 5 minutes, hourly and daily: health checks, purge, retention, reconciliation, release check; §7.8).
 - Observability (Workers Logs) enabled. This is needed for generated setup tokens (§6.8).
 - Build-time variable `OFFICEBOX_VERSION`.
 - **v1.4 additions:**
@@ -1377,23 +1390,25 @@ node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangl
 
 **Missing secrets on deploy (kept from M1a).** The deploy step lists the Worker's secrets and creates any of **`BETTER_AUTH_SECRET`** and **`TOKEN_HASH_KEY`** that are missing, each from 32 random bytes piped to `wrangler secret put`. It never overwrites an existing secret, never prints a value, and stops the deploy if it fails. It no longer creates `SESSION_SIGNING_KEY` or `PEPPER_1` (15 Nov 2026). Until the required secrets exist, setup and sign-in show the **`/not-configured`** page and the Worker logs which secret is missing, never its value. Because there are no password hashes, losing a generated secret signs everyone out (and invalidates outstanding links) but locks nobody out for good: members sign in again with a passkey or magic link.
 
-`SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist:
+`SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist, an owner page whose items, required marks and behaviour are set by [Admin](specs/admin.md) §15. Items marked **(R)** are required and can't be dismissed. Manual marks are stored in `installation.checklist`, not in settings.
 
 | Item | How | Needed for |
 |---|---|---|
 | Durable Objects, D1, R2, Vectorize, Queues, Workers AI | Automatic (Deploy button) | Everything |
 | Setup token | Prompted at deploy, or generated (§6.8) | First-run setup |
-| Allow GitHub Actions to create pull requests | Manual repository setting | Upgrades |
+| Allow GitHub Actions to create pull requests **(R)** | Manual repository setting | Upgrades |
 | Make the repository private | Recommended | Keeps scheduled release-sync running |
-| Custom domain | Manual; recommended **before the owner registers passkeys**, or at least before inviting the team (passkeys are bound to the domain) | Stable sign-in, PWA and push |
+| Custom domain **(R)** before inviting the team | Manual; recommended **before the owner registers passkeys** (passkeys are bound to the domain) | Stable sign-in, PWA and push |
 | Owner's second passkey, or `RECOVERY_TOKEN` | Prompted in setup and the checklist; **required before the owner can invite anyone** | Owner recovery; inviting |
 | Email on a `*.workers.dev` address | The checklist says **"`workers.dev` usually means no email"**: the default driver needs a custom domain on Cloudflare DNS (§7.6). Without email there are no magic links, so recovery relies on second passkeys, recovery links and `RECOVERY_TOKEN`. | Magic links, emailed invitations |
+| Cloudflare notifications for Worker errors and health **(R)** | Manual (dashboard) | Alerting when Officebox itself is down (§7.3) |
+| Scheduled exports, or a first export **(R)** | Admin Data page (§7.5) | Recovery |
 | Email: Cloudflare Email Service sender domain (default), or an email provider API key or SMTP credentials | Manual: onboard the domain in the dashboard, or add the Worker secrets | Email invitations, **magic links** and notifications |
 | Realtime SFU app and TURN key | Manual (Worker secrets) | Calls and screen sharing (M4) |
 | AI Gateway | Manual; **recommended** for assistant logging control: set `assistant_gateway_id` so every assistant call runs with logging and caching off (§5.10). The checklist tells owners that logging stays off for assistant traffic. | Assistant (M9a); Workers AI works without it |
 | BYOK provider keys | Optional (AI Gateway Provider Keys); switching a role needs the owner to acknowledge that content goes to that provider | Assistant roles on another provider |
 | Read-only analytics API token | Optional (Worker secret) | Usage panel with Cloudflare's own figures |
-| Cloudflare billing notifications | Recommended (dashboard) | Cost alerts |
+| Cloudflare billing notifications **(R)** | Manual (dashboard) | Cost alerts |
 | R2 lifecycle rule for noncurrent versions | Recommended | Retention guarantee (§2.3) |
 
 The admin UI checks each item it can detect and shows its status. R2 is reached only through the binding, so no R2 S3 credentials are needed (§8.3).
@@ -1421,7 +1436,7 @@ The admin UI checks each item it can detect and shows its status. R2 is reached 
 
 | Path | Purpose |
 |---|---|
-| `.officebox/config.json` | `{ "channel": "stable", "upstream": "<upstream repo URL>", "auto_merge": "none" }`. `auto_merge` is one of `none`, `security` or `patch`. The `channel` value is the authoritative channel setting; the admin UI only displays it. |
+| `.officebox/config.json` | `{ "channel": "stable", "upstream": "<upstream repo URL>", "auto_merge": "none" }`. `auto_merge` is one of `none`, `security` or `patch`, default `none`; owners opt in by editing the file (Admin §14). The `channel` value is the authoritative channel setting. The running app holds no GitHub credentials, so the build embeds `channel` and `auto_merge`, and the Updates page shows them as deployed. |
 | `.officebox/version` | Upstream version the repository currently matches; used as the diff base. |
 | `.officebox/release-signing-key.pub` | Pinned release-signing public key. |
 | `.github/workflows/officebox-release-sync.yml` | The release-sync workflow. It updates itself through releases. |
@@ -1447,12 +1462,12 @@ Steps:
 5. Merge `wrangler.jsonc` with `scripts/merge-wrangler.mjs`. It takes the upstream structure but keeps local resource IDs, names and customer-added bindings.
 6. Open a PR titled "Upgrade Officebox to vX.Y.Z (channel)". The body carries release notes, the migration list, `rollback_safe_to` and any security flag.
    - **Conflicts:** the PR opens as a draft labelled `officebox-conflict`. It lists the conflicted files and links to resolution guidance. Conflict markers make the build fail, so a conflicted release can't deploy.
-7. **Auto-merge:** if `auto_merge` allows it (a patch or security release on stable), the release has no conflicts and checks pass, the workflow merges the PR.
+7. **Auto-merge:** if `auto_merge` (`security` or `patch`) allows it for a patch or security release on stable, the release has no conflicts and checks pass, the workflow merges the PR. With `none` (the default), or for a minor or major release, the PR always waits for a manual merge.
 
 Notes:
 
 - PRs created with `GITHUB_TOKEN` don't trigger other GitHub workflows. Workers Builds is triggered by the Cloudflare GitHub App on push to the production branch, so merging still deploys.
-- GitHub disables scheduled workflows in public repositories after 60 days without activity. The post-deploy checklist therefore recommends a **private** customer repository. The admin UI also warns when the installed version has been behind the latest release for more than 7 days, because that may mean the workflow is disabled.
+- GitHub disables scheduled workflows in public repositories after 60 days without activity. The post-deploy checklist therefore recommends a **private** customer repository. Owners also get the `release_sync_stuck` alert (Admin §4) when the installed version has been behind the latest release for 7 days, because that may mean the workflow is disabled.
 
 ### 6.5 Build, migrations and compatibility
 
@@ -1482,7 +1497,7 @@ Migrations run **before** the new code goes live, and can be partly applied if a
 
 **Durable Object class migrations** (`new_sqlite_classes` and so on) only ever *add* classes within a rollback window. Renames and deletions follow the contract rule.
 
-The admin UI shows the applied migrations (from D1's migrations table) next to the running version, and flags a schema that is ahead of the code.
+The admin UI shows the applied migrations (from D1's migrations table) next to the running version. A schema ahead of the code raises the `schema_ahead` alert for owners (Admin §4).
 
 ### 6.6 Rollback
 
@@ -1496,9 +1511,10 @@ The daily Cron Trigger fetches the release manifest (§6.2) and stores the resul
 
 - the installed `OFFICEBOX_VERSION` and channel
 - the latest release on that channel and its notes
-- a link to the repository's open sync PR.
+- a link to the repository's open sync PR
+- the `channel` and `auto_merge` values as deployed (§6.3).
 
-A security release that hasn't been installed after 48 hours raises a persistent banner for owners.
+Admins can view the page; only owners act on it ([Admin](specs/admin.md) §14). A security release that hasn't been installed after 48 hours raises the serious `security_release` alert for owners, with its banner, inbox item and email (Admin §4). Being behind for 7 days raises `release_sync_stuck` (§6.4).
 
 ### 6.8 First-run setup
 
@@ -1550,6 +1566,8 @@ Until `installation.setup_completed_at` is set, every route except `/setup`, `/s
 
 **Required secrets:** if `BETTER_AUTH_SECRET` or `TOKEN_HASH_KEY` is missing, `/setup` and sign-in show `/not-configured` instead (§6.1).
 
+**Restore.** Restore from export (§7.5) uses the same setup token and the same claim, which records the restore's origin as the canonical origin (Admin §11.4). There are no password hashes or peppers to carry over. If the restore's origin equals the export's canonical origin, the exported passkey public keys keep working; otherwise the restoring owner registers a passkey as above and the restore report lists who needs a magic link or a recovery link (§7.5). The `RECOVERY_TOKEN` flow (§8.1) covers an owner who can't register.
+
 **After setup:** `/setup` returns 404 permanently and `SETUP_TOKEN` is ignored. The admin UI recommends deleting the secret.
 
 **Optional hardening:** the documentation describes putting Cloudflare Access in front of the workspace during setup.
@@ -1558,7 +1576,9 @@ Until `installation.setup_completed_at` is set, every route except `/setup`, `/s
 
 ### 7.1 Health checks
 
-A /health endpoint checks:
+The cron dispatcher (§7.8) runs the checks every 5 minutes with cheap probes: no real email, model calls or SFU sessions. Only the dispatcher writes the results, to `health_checks` (status, consecutive runs in that status, and when it last changed), and raises or clears `admin_alerts` with compare-and-set on the stored state, so concurrent runs can't send duplicate emails. A failure counts after two consecutive runs ([Admin](specs/admin.md) §4). The admin health page (`GET /admin/health`, owners and admins) reads the stored state, and loading it never raises alerts. The public `/health` endpoint stays minimal (Platform §15). Members learn feature availability from `GET /status` and `GET /status/public` (Admin §8.2).
+
+The checks:
 
 - Worker and D1 connectivity.
 - Durable Object namespace availability (lightweight ping to a system DO).
@@ -1572,7 +1592,7 @@ A /health endpoint checks:
 
 ### 7.2 Diagnostics bundle
 
-The admin can download a support bundle containing:
+**Owners** download a support bundle, after a preview of its full contents ([Admin](specs/admin.md) §8.3). Admins can't. The download is audited (`diagnostics.downloaded`). The bundle contains:
 
 - Worker version and deployment ID.
 - Binding configuration (without secrets).
@@ -1586,15 +1606,9 @@ The owner reviews the bundle before sharing it. It never contains message, docum
 
 ### 7.3 Alerts
 
-Officebox uses Cloudflare's observability and optional external alerting (email/webhook) for:
+**In-app alerts** follow [Admin](specs/admin.md) §4: one `admin_alerts` record per `<kind>:<subject>` (storage, protective mode, paused D1 copy, failed or missing exports, failing checks and services, releases, schema, projection backlog, purges, assistant budget), raised and cleared by the dispatcher (§7.1, §7.8) with hysteresis. Delivery is a persistent banner and an `admin_alert` inbox item for owners and admins, plus email to owners for serious alerts, with links built from `installation.canonical_origin` (§8.1).
 
-- Elevated Worker error rate.
-- D1 query failures.
-- Durable Object exceptions.
-- R2 write failures.
-- Queue backlog growth.
-- Storage approaching limits.
-- Billing: owners are prompted to set Cloudflare billing notifications (§7.9).
+**Outages of the alert path.** Alerts live in D1 and run in the Worker, so a D1 or Worker outage can't raise one. **Cloudflare's own notifications** for Worker errors and health cover these; setting them up is a required checklist item (§6.1). Billing: owners are prompted to set Cloudflare billing notifications (§7.9).
 
 ### 7.4 Backup and recovery guidance
 
@@ -1605,28 +1619,32 @@ Officebox uses Cloudflare's observability and optional external alerting (email/
 
 ### 7.5 Export and restore
 
-Implements PRD §13. Exports and restores run as **Cloudflare Workflows**: durable, retried, multi-step jobs that are not bound by request time limits.
+Implements PRD §13 and [Admin](specs/admin.md) §11–§13. Exports and restores run as **Cloudflare Workflows**: durable, retried, multi-step jobs that are not bound by request time limits.
+
+**Who.** Owners **and admins** run and download workspace exports and per-member exports. The permission engine checks `workspace.export` or `member.export` when an export starts and on every download request (Admin §11.1, §12). Members have no export endpoint. Only owners can choose an export in maintenance mode.
+
+**`exports` table.** Created in M7's baseline with the columns in Admin §16 (that list is authoritative):
+- `kind`: `export` | `member_export` | `restore` (Zod)
+- `state`: `running` | `packing` | `complete` | `failed` | `cancelled` | `expired` | `deleted` (Zod)
+- `include_files`, `in_maintenance`, `scheduled`; `subject_user_id` for member exports
+- `schema_version`, `size_bytes`, `object_count`, `archive_r2_key`, `manifest_r2_key`, `restore_report` (JSON, restores), `error` (short, non-sensitive)
+- `requested_by` (a system actor for scheduled exports), `schedule_set_by`, `created_at`, `completed_at`, `expires_at`.
+
+One workspace export runs at a time; starting another returns `conflict`:
 
 ```sql
-CREATE TABLE exports (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('export', 'restore')),
-  state TEXT NOT NULL CHECK (state IN ('running', 'complete', 'failed')),
-  include_files INTEGER NOT NULL DEFAULT 1,
-  manifest_r2_key TEXT,
-  error TEXT,
-  requested_by TEXT REFERENCES users(id),
-  created_at INTEGER NOT NULL,
-  completed_at INTEGER
-);
+CREATE UNIQUE INDEX IF NOT EXISTS one_running_export
+  ON exports(kind) WHERE kind = 'export' AND state IN ('running', 'packing');
 ```
+
+Per-member exports are limited to one running per subject and 10 per actor per day, and don't block workspace exports (Admin §12).
 
 **Export format v1.** Written under `exports/<id>/` in the installation's R2 bucket:
 
 | Path | Content |
 |---|---|
 | `manifest.json` | Format version, Officebox version, D1 schema version, creation time, row/object counts, SHA-256 for every part, each channel's exported `seq`, each document's state vector |
-| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `auth_accounts`, `auth_verifications`, `magic_link_issues`, `user_devices`, `mfa_factors`, setup fields, job tables, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6). From M9 also `file_derived_text` (rebuilt like `search_index`), `personal_reminders` (personal export only) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
+| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `auth_accounts`, `auth_verifications`, `magic_link_issues`, `user_devices`, `mfa_factors`, setup fields, job tables, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6), and the operational tables `exports`, `maintenance_windows`, `admin_alerts`, `health_checks`, `admin_jobs` and `download_tokens`, so a restore never starts read-only or with stale alerts (Admin §11.1). **Passkey public keys are included** (Identity §2). From M9 also `file_derived_text` (rebuilt like `search_index`) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
 | `channels/<id>/messages.jsonl` | Current message state from the ChatChannel DO, including tombstones |
 | `docs/<id>/state.ystate` | Native Yjs state |
 | `docs/<id>/content.md` or `content.json` | Readable rendering (Markdown for documents, JSON for whiteboards) |
@@ -1635,10 +1653,25 @@ CREATE TABLE exports (
 
 **Rules:**
 
+- **Contents:** everything, including private content (DMs, private channels, restricted documents, time off with type and note, personal reminders), so a restore is complete (Admin §2).
 - **Secrets are never exported:** SMTP credentials, AI keys, `BETTER_AUTH_SECRET`, `TOKEN_HASH_KEY` and the setup token stay out. MFA secrets are encrypted with an installation-specific key, so they are left out and users re-enrol after a restore. There are no password hashes (sign-in is passwordless), so a restore needs no secret carried over.
-- **Download:** owners download a single `.tar` streamed by the Worker. The command-line tool (`officebox export pull`) fetches parts with resume support.
-- **Consistency:** each object is internally consistent. **Maintenance mode** makes the workspace read-only for a fully consistent export. It closes every socket through the UserHubs, reconnects them read-only, and makes the Worker reject writes.
-- **Scheduled exports** (optional; weekly by default when enabled) keep the latest 4. Exports count towards R2 storage.
+- **Passkey public keys** are included in **workspace** exports, so a restore onto the same canonical origin keeps passkeys working (Identity §2). They aren't secrets, but they're credentials metadata, so they're **never** in per-member exports.
+- **Packing:** the Workflow writes the parts to `exports/<id>/`, then packs them into a single `export.tar` in R2 with a multipart upload, re-chunking into equal parts across Workflow steps and persisting the upload state between steps. The parts are deleted once packing succeeds. Packing needs about twice the archive's size in R2 temporarily, so the budget check at start counts double (Admin §11.1).
+- **Download:** the Worker streams that one object and supports `Range` requests, so an interrupted download resumes. Archives over **20 GB** aren't packed; they stay as parts and are downloaded with the command-line tool (`officebox export pull`), which resumes. The tool **downloads through the Worker**: it signs in with device sign-in, needs step-up re-authentication, passes the same engine check and uses download tokens. The exports bucket never has public access or a custom domain.
+- **Step-up and download tokens:** a download start needs `sessions.fresh_auth_at` (a passkey assertion) within the last 10 minutes, otherwise it returns `reauth_required` and the client re-authenticates with `POST /me/reauth` (§8.1, Admin §11.3). A successful start issues a download token valid for 1 hour and bound to the session; only its HMAC hash is stored in `download_tokens`. A browser gets it as an HttpOnly cookie scoped to the download path and the command-line tool sends it in a header, so it never appears in a URL. **Every request** re-checks the session, the engine (including a per-member subject's current role) and that the export isn't deleted, expired or cancelled.
+- **Consistency:** each object is internally consistent, but without maintenance mode the export isn't one instant across the workspace. An owner can export **in maintenance mode** for a fully consistent snapshot (Admin §13.4):
+  - Maintenance state lives in `maintenance_windows` and is derived from the row and the clock on every read. Each change increments `installation.maintenance_epoch` (Admin §13.2).
+  - The Worker refuses writes through the settings cache (30 seconds at most). Durable Objects check the epoch lazily before a refused write, from a 10-second cached value and the epoch in each socket's attachment, so hibernated DOs aren't woken.
+  - On each transition the Worker calls a room-level **`setMaintenance(epoch, active)`** RPC on open rooms only, found through the UserHub room registry. The room sets a read-only flag separate from each socket's role and sends `status.changed`. **No socket is closed or reconnected**, and `updateAccess` isn't used (§3.5).
+  - **Consistency barrier:** before the snapshot, the export waits until the settings cache has expired, every open room has acknowledged `setMaintenance`, and the projection outbox has drained. It times out after 2 minutes; the export then fails and a window it started ends.
+  - Which writes are refused, exempt or deferred during maintenance is set by Admin §13.3.
+- **Schema changes mid-run:** the export records `schema_version` at the start and fails with a clear message if a deploy changes the schema during the run.
+- **Cancel and failure:** a running export can be cancelled; a cancelled or failed export deletes its partial objects. A failure raises `export_failed` (§7.3).
+- **Scheduled exports** (`scheduled_export`; off by default, weekly when enabled, files included) run at a weekday and time in `workspace_timezone`. An hourly dispatcher job claims the slot with compare-and-set on `installation.scheduled_export_last_slot`; a missed slot runs within 24 hours, then is skipped (Admin §11.1). They keep the latest 4 complete exports, deleting older ones only after a new one completes.
+- **Retention:** on-demand exports are deleted 45 days after completion (`export_retention_days`), per-member exports after 7 days. Downloads check `expires_at` themselves; the daily job removes expired archives. Deleting an export marks it deleted at once, so its tokens stop working on their next request, and the object is removed within the hour. Exports aren't rewritten when a member is later deleted (Admin §11.2).
+- **Storage:** exports count towards R2 usage. Above `r2_hard_budget_gb`, new exports are refused. Exports are allowed in protective mode (§7.7).
+- **Per-member exports** (`kind = 'member_export'`) cover one member's data for a data-protection request, with the scope and exclusions in Admin §12 (no credentials, no assistant conversations or memory, nothing written by others). They are packed and downloaded like workspace exports. The subject gets a `security_notice` when the export completes.
+- **Audit:** the `export.*` and `member_export.*` events (Admin §7).
 
 **Restore:**
 
@@ -1646,16 +1679,17 @@ CREATE TABLE exports (
 2. The archive is uploaded through the Worker with R2 multipart upload. Very large archives can instead be placed in the bucket with Wrangler, and `officebox-restore` then starts the Workflow.
 3. The Restore Workflow checks the manifest and checksums. It accepts exports from the same Officebox version or older, and maps older logical schemas forward.
 4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`. Derived file text and vectors are rebuilt by the assistant back-fill (§5.2) once the assistant is enabled; assistant memory is not part of a restore (Assistant §13).
-5. It completes setup and records the restore's origin as the canonical origin. **If it equals the export's canonical origin, exported passkeys keep working** and members sign in as before. Otherwise the passkeys are dropped: the restoring owner (chosen from the export's owners by email) registers a passkey, as in §6.8; members sign in with a magic link (email configured) or a recovery link; admins and owners get recovery links. The restore summary lists who needs one. All sessions are invalid, and users with MFA must re-enrol.
+5. It completes setup and records the restore's origin as the canonical origin. **If it equals the export's canonical origin, exported passkeys keep working** and members sign in as before. Otherwise the passkeys are dropped: the restoring owner (chosen from the export's owners by email) registers a passkey, as in §6.8; members sign in with a magic link (email configured) or a recovery link; admins and owners get recovery links. The restore summary lists who needs one. All sessions are invalid, and users with MFA must re-enrol. The Workflow writes a restore report (`exports.restore_report`) listing what members and owners must redo (Admin §11.4).
 
 **Coverage** ([Platform](specs/platform.md) §6 is authoritative):
-- **Added:** **passkey public keys** (with credential IDs, counters, names and how each was created; product owner, 15 Nov 2026), calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, and `call_notes` and `call_transcript_segments` within retention (Assistant §13).
+- **Added:** **passkey public keys** (with credential IDs, counters, names and how each was created; product owner, 15 Nov 2026), calendars, events, attendees, time off (with type and note), drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, `personal_reminders`, and `call_notes` and `call_transcript_segments` within retention (Assistant §13).
 - **Excluded:**
   - sessions, better-auth's `auth_accounts` and `auth_verifications`, `magic_link_issues`, `user_devices`, `auth_tokens`, `ws_tickets` and MFA secrets
   - ICS feed tokens, and ICS-in subscription URLs (subscriptions are exported without URLs and must be re-entered)
   - `poll_secret`
-  - **assistant conversations and memory** (they live only in Assistant DOs, which admins can't read) and **personal reminders**; members get both through their personal export, "Download my assistant data" (Assistant §4.3, §13)
-  - `file_derived_text`, rebuilt like `search_index`.
+  - **assistant conversations, including the assistant DM, and memory** (they live only in Assistant DOs, which admins can't read). Nobody can export them; members see their memory in "What Butler remembers" (Admin §2, Assistant §13). There is no member self-export.
+  - `file_derived_text`, rebuilt like `search_index`
+  - the operational tables listed above.
 
 **Testing:** CI exports a fixture installation, restores it into a fresh one and compares them, on every release.
 
@@ -1702,17 +1736,22 @@ CREATE TABLE object_sizes (          -- reported by DOs after compaction or dail
 
 | Store | How it's measured | Thresholds and actions |
 |---|---|---|
-| D1 (10 GB hard limit) | Database size from D1 query result metadata, sampled hourly *(confirm the metadata field at implementation)* | Warn at 70% and 85%. At 95%, **protective mode** (below). At 98%, D1 copying pauses and DO outboxes hold events safely until space is freed. |
+| D1 (10 GB hard limit) | Database size from D1 query result metadata, sampled hourly *(confirm the metadata field at implementation)* | Thresholds come from the `storage_thresholds` setting (Platform §7; 70, 85, 95 and 98 % by default). Warn at the first two. At the third, **protective mode** (below). At the fourth, D1 copying pauses and DO outboxes hold events safely until space is freed. |
 | Durable Objects (10 GB each) | `ctx.storage.sql.databaseSize`, reported into `object_sizes` | Warn when any object passes 5 GB |
-| R2 (no hard limit) | Calculated from D1: `files.size_bytes`, plus export and snapshot objects. No API token needed. | Optional owner budget: warn above it; block uploads above an optional hard budget |
+| R2 (no hard limit) | Calculated from D1: `files.size_bytes`, plus export and snapshot objects. No API token needed. | Optional owner budget (`r2_budget_gb`): warn above it; block uploads and new exports above an optional hard budget (`r2_hard_budget_gb`) |
 
-**Protective mode.** The Worker refuses to create channels, documents, folders, drives, files, calendars, events, polls, time off and invitations. Messages continue: they are stored in their channel DOs, and the D1 copy keeps up until the 98% point.
+Each threshold raises the matching Admin §4 alert (`storage`, `protective_mode`, `d1_copy_paused`), which clears with hysteresis.
+
+**Protective mode.** The Worker refuses to create channels, documents, folders, drives, files, calendars, events, polls, time off and invitations. Messages continue: they are stored in their channel DOs, and the D1 copy keeps up until the 98% point. Exports are allowed, because they write mostly to R2.
+
+**Priority writes.** Audit, alert and export-status writes are small and continue in protective mode. At the fourth threshold the D1 copy pauses, but these writes continue ([Admin](specs/admin.md) §9).
 
 **Recovery.** The admin UI guides the owner to free space:
 
 - **Shorten search copy retention** (`installation.settings.search_copy_months`). This trims D1 `messages` and `search_index` rows older than N months. Those messages stay in their channel DOs, in the channel view and in exports; they just leave search.
 - Empty Trash early.
 - Enable retention policies.
+- Delete old exports.
 - Export and delete archived channels.
 
 **Growth guide:** 100 members × 100 messages a day is about 2 GB a year, including the FTS index. Trimming the search copy keeps D1 bounded indefinitely.
@@ -1724,6 +1763,11 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | Job | Schedule | Section |
 |---|---|---|
 | Snooze wake-ups | 5 minutes | PRD §5.3 |
+| Health checks, alert raise and clear (compare-and-set on `health_checks` and `admin_alerts`) | 5 minutes | §7.1, §7.3, Admin §4 |
+| Maintenance: clock transitions, notices and the 24-hour cap | 5 minutes | §7.5, Admin §13 |
+| Scheduled-export slot (claimed with compare-and-set; a missed slot runs within 24 hours) | Hourly | §7.5, Admin §11.1 |
+| Export and member-export expiry; expired download tokens and job previews | Daily | §7.5, Admin §16 |
+| Sending pending CSV invitations (wait while maintenance or protective mode is on) | Daily | Admin §5.1 |
 | Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
 | Purge due objects, time-based retention (audit log, inbox items, expired sessions and `auth_verifications`, `magic_link_issues` and `auth_tokens` 7 days after use or expiry, `user_devices` unused for 400 days, invitations, tickets, huddle records) | Daily | §2.3 |
 | Identity repair: complete setup if the owner has a passkey; roll forward or release partial invitation accepts (§8.1); expire setup claims and pending domain moves | Hourly | §6.8, §8.1 |
@@ -1736,7 +1780,8 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | RSVP-response batch per organiser | Hourly | Notifications §3 |
 | Hourly and daily email digests (members with an hourly or daily delay) | Hourly | Notifications §6, Platform §11 |
 | Room-registry sweep | Daily | Platform §12 |
-| Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
+
+During maintenance, purges, retention sweeps, ICS refresh, content-creating timers and scheduled exports are **deferred** until it ends; reminders and other notification-only triggers fire on time (Admin §13.3). The audit-log purge uses `audit_retention_days`, keeping `export.*` and `member_export.*` entries for at least 365 days (Admin §7).
 
 Timers that aren't cron jobs (Platform §11):
 - **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry), `email_release` (email holds longer than 24 hours), and from M9 `assistant_brief`, `assistant_prep` and `personal_reminder`.
@@ -1812,6 +1857,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - **Step-up** (product owner, 15 Nov 2026; Identity §4.5). `sessions.fresh_auth_at` records the last passkey assertion on the session (at sign-in, or through `POST /me/reauth`, which runs better-auth's passkey authentication for the signed-in user and updates the current session instead of keeping a new one; the mechanism is an M1a-0 item). Adding or removing a passkey, starting a domain move, changing a role or promoting, issuing a recovery link and changing an email need `fresh_auth_at` within **10 minutes**, otherwise the typed error **`reauth_required`**. The check runs after the permission engine. A magic-link sign-in records `fresh_auth_method = 'magic_link'`, which doesn't satisfy step-up, except for a member with no passkeys adding their first **(default)**. Registration through an enrolment ticket needs no step-up.
 - **Security-notice banner** (product owner; Identity §4.6a). Notices are appended to the `users.pending_security_notice` list and shown as a banner after sign-in; email goes out when configured. `POST /me/security-notices/ack` needs a fresh **passkey** assertion, so a stolen session can't hide a notice.
 - **Two-step domain move** (product owner; Identity §4.4). `POST /admin/domain` (owner, step-up) stores `pending_origin` with a 24-hour expiry **(default)** and returns a single-use move link for the new origin. While pending, the new host answers only the move-completion routes, with a better-auth instance built for the pending origin. The move link's POST sets an enrolment ticket there; the owner's **passkey registration with the new origin as relying party commits the move**: the canonical origin is switched (nonce-checked against the pending row), the old host is appended to `allowed_hosts`, every session is revoked, old-origin magic links, invitations and enrolment tickets are revoked, the other owners get a `security_notice`, and it's audited. No server-side fetch verifies the host, so there's no SSRF path. Afterwards the old host answers **302 (GET/HEAD) or 307** to the same path on the canonical origin, built from the installation record (never a request-supplied host), with `Cache-Control: no-store`, never 301. `allowed_hosts` entries come only from the setup claim and committed moves.
+- **Step-up for sensitive downloads** ([Admin](specs/admin.md) §11.3): export archives, member and audit CSVs and per-member exports use the same `fresh_auth_at` rule (a passkey assertion within 10 minutes) and `reauth_required`. `POST /me/reauth` is limited to 5 attempts per 10 minutes per session (Platform §8); failures also count toward the per-IP passkey sign-in limit (there is no per-account password throttle any more) and are audited (`auth.reauth_failed`).
 - **Promotion.** Promoting to admin requires at least one passkey; promoting to owner requires two passkeys or a `RECOVERY_TOKEN` that is set and not yet consumed (a value with no row in `recovery_token_uses`). Both need step-up.
 - **No CORS.** Auth routes, and every `/api` route, never send `Access-Control-Allow-*` headers.
 - **Passkey counter rule.** The M0 spike's rule stays: a counter **at or below** the stored value, unless both are 0, is `clone_detected`; no session is left behind, and the member and owners get a `security_notice` (Notifications §3). SimpleWebAuthn may already refuse such assertions, so **the M1a-0 spike decides** between:

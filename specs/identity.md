@@ -1,7 +1,7 @@
 # Spec: Identity & Access
 
 **Status:** Approved (product owner, 15 Nov 2026). **Revised 15 Nov 2026: passwordless sign-in on better-auth** (product-owner decision; §2 rows marked "changed 15 Nov 2026"). The product owner answered that revision's open questions and two rounds of review findings the same day (§2 rows marked "decided 15 Nov 2026"). **The spec stays Approved; the new rows and items marked (default) await the product owner's review.**
-**Revision:** Revised after independent review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: reserved `assistant` handles, reserved non-user senders); revised for passwordless sign-in with better-auth (15 Nov 2026: passwords, password reset and peppers removed)
+**Revision:** Revised after independent review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: reserved `assistant` handles, reserved non-user senders); updated for the [Admin](admin.md) spec (15 Nov 2026: exports become an owner and admin power, not owner-only; step-up re-authentication for sensitive downloads, now the passkey step-up in §4.5; bulk member tools and member CSV; admin screens defined in Admin §3); revised for passwordless sign-in with better-auth (15 Nov 2026: passwords, password reset and peppers removed)
 **Feature name:** Identity & Access (marketing name to be decided later)
 **Milestone:** M1 ([PLAN](../PLAN.md)) · **Related:** PRD §6, §10.1; TDD §3.1, §6.8, §8.1; [Permissions](permissions.md), [Platform](platform.md), [Notifications](notifications.md)
 
@@ -72,19 +72,21 @@ The permission engine that every feature relies on is specified in [Permissions]
 | Guests | **Phase 2** (the role value is reserved in the schema) |
 | What M1 creates | **Only identity objects**: users, handles, groups, invitations, sessions, better-auth's accounts and verifications, passkeys, auth tokens and settings. `channels` and `channel_members` are **not** created in M1. `#general`, default channels and the welcome post arrive in **M3a**; personal, workspace and group calendars in **M5a**; My files, group drives, the Channels drive and channel folders in **M6a**. Each milestone provisions its own objects for existing people and groups with an idempotent backfill job (platform §13 Provisioning and backfill). |
 | Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** access to a group drive or folder, **needs an owner**. It's audited (permissions §6 Admin powers). |
+| Exports | **Owners and admins** run workspace and per-member exports; members can't export their own data. Changed from owner-only by [Admin §2](admin.md), which makes exporting an admin power. |
+| Step-up re-authentication | Sensitive downloads (exports, member and audit CSVs) need authentication within the last **10 minutes (default)** ([Admin §11.3](admin.md)). Added by the Admin spec; **merged 15 Nov 2026 into the passwordless step-up** (row "Step-up for sensitive actions" above): one session field, `sessions.fresh_auth_at`, set only by a passkey assertion, and one route, `POST /me/reauth`, replacing Admin's `authenticated_at` and `POST /auth/reauth`. |
 | Recovery links without email | Admins may issue them for members, **loudly flagged**: the member sees a notice on the **sign-in page** ("An admin reset your account on …"), and **every owner sees it flagged** on the member list until an owner acknowledges it. |
 
 ## 3. Users and roles
 
 | Role | Can |
 |---|---|
-| **Owner** | Everything an admin can, plus: invite and promote admins; change email, issue recovery links, disable, delete and sign out **admins and owners**; transfer ownership; installation settings (upgrades, export, email, policies). At least one active owner must exist. |
-| **Admin** | Invite **members**; for **members only**: disable, re-enable, delete, change email, issue recovery links, sign out all sessions. Manage groups and group managers (but **adding themselves** to a group needs an owner); set default channels; workspace settings except owner-only ones (platform §7 Admin settings); view the audit log. |
+| **Owner** | Everything an admin can, plus: invite and promote admins; change email, issue recovery links, disable, delete and sign out **admins and owners**; transfer ownership; installation settings (upgrades, email, policies). At least one active owner must exist. |
+| **Admin** | Invite **members**; for **members only**: disable, re-enable, delete, change email, issue recovery links, sign out all sessions. Manage groups and group managers (but **adding themselves** to a group needs an owner); set default channels; workspace settings except owner-only ones (platform §7 Admin settings); view the audit log; run and download **workspace and per-member exports** ([Admin §11, §12](admin.md); a per-member export of an admin or owner needs an owner). |
 | **Member** | Use the workspace, edit their own profile, manage their own sign-in methods and devices. |
 | **Group manager** | A member (or admin) who manages one group's membership. This is a property of group membership, not a workspace role. |
 | *Guest* | Phase 2 |
 
-Admins can't read private content they haven't been given access to, and can't add themselves to private channels (permissions §6 Admin powers). The full matrix of who can do what to people and groups is permissions §4.6.
+Admins can't read private content they haven't been given access to in the app, and can't add themselves to private channels (permissions §6 Admin powers). Workspace exports, which owners and admins run, do include private content; the privacy statement says so ([Admin §2](admin.md)). The full matrix of who can do what to people and groups is permissions §4.6.
 
 ## 4. Functional requirements
 
@@ -213,9 +215,11 @@ An invite opened by someone already signed in as another member shows "You're si
   - moving the domain (starting the move)
   - changing a role, including promoting someone to admin or owner
   - issuing a recovery link
-  - changing someone's email address.
+  - changing someone's email address
+  - **sensitive downloads** ([Admin §11.3](admin.md)): an export archive, a per-member export, the member CSV or the audit CSV.
 
   Without a fresh assertion the API returns the typed error **`reauth_required`**, and the UI asks for a passkey and retries. Re-authentication uses better-auth's passkey authentication through our route, which checks that the assertion belongs to the signed-in user and updates the current session's `fresh_auth_at` (M1a-0 checks how to do this without creating a second session). A magic-link sign-in doesn't set it, with one exception **(default)**: a member with **no passkeys** may add their first one within 10 minutes of a magic-link sign-in, or they'd have no way back to passkeys. Registering through an enrolment ticket (setup, acceptance, recovery, domain move) needs no step-up, because the ticket is the proof.
+- **Re-authentication limits:** `POST /me/reauth` is limited to **5 attempts per 10 minutes per session (default)** (platform §8). Failures are audited (`auth.reauth_failed`, Admin §11.3) and count toward the per-IP passkey sign-in limit; there is no per-account password throttle any more. Admin §11.3's download tokens build on `fresh_auth_at`.
 - **Disabling a member** revokes all their sessions and closes all their open connections within seconds (TDD §3.5).
 - **CSRF** is unchanged from M1a: state-changing requests, including better-auth's routes, need the `X-Officebox-Request` header and an `Origin` equal to the canonical origin, on top of better-auth's own origin check (TDD §8.2).
 
@@ -306,6 +310,11 @@ There are no passwords to reset, so recovery always means **registering a new pa
   - disable and re-enable; delete (anonymise, PRD §10.2); change email; issue a recovery link; sign out all sessions (better-auth's revoke-all for that user, called by our permission-checked route; better-auth's admin plugin isn't used, decided 15 Nov 2026, §2).
 
   **Admins can do these for members only; for admins and owners, an owner must act** (permissions §6 Admin powers). What disabling and deleting do in each feature is set out in platform §3 Member lifecycle.
+- **Bulk tools** ([Admin §5](admin.md)), following the same per-member rules:
+  - **CSV invite** with a preview of every row before anything is sent ([Admin §5.1](admin.md))
+  - **bulk group changes**: add to or remove from a group ([Admin §5.2](admin.md))
+  - **bulk disable**, confirmed by typing the count, never including the actor or the last owner ([Admin §5.3](admin.md)). There is no bulk delete **(default)**.
+- **Member CSV download** of the filtered member list, with step-up re-authentication (§4.5) and audited ([Admin §5.4](admin.md)).
 - **Email change:**
   - **Needs step-up** (§4.5).
   - When email is configured, the new address must be confirmed before it takes effect. The pending address (normalised) is held in an `email_change` token's payload. The link (`/me/email/confirm#t=…`, built from the canonical origin) opens a confirmation page, and only its POST applies the change (platform §10 Email links).
@@ -486,6 +495,8 @@ ALTER TABLE sessions ADD COLUMN fresh_auth_at INTEGER;      -- last passkey asse
 ALTER TABLE sessions ADD COLUMN fresh_auth_method TEXT;     -- passkey | magic_link (only a passkey satisfies step-up, §4.5)
 ```
 
+`sessions.fresh_auth_at` is the step-up field that [Admin §16](admin.md) calls `sessions.authenticated_at`: one column, set only by a passkey assertion (§4.5). It's in M1's baseline.
+
 The canonical origin and allowed hosts are core columns of `installation` (TDD §2.1), written at the setup claim and by the owner's domain move.
 
 Settings keys (defined in platform §7 Admin settings): `default_channels`, `welcome_post_enabled`, `allowed_invite_domains`, `magic_link_enabled`. (`min_password_length` is removed.)
@@ -533,6 +544,9 @@ Paths are relative to the Worker's `/api` prefix (for example `POST /api/setup`)
 | `GET /me/security-notices` · `POST /me/security-notices/ack` | Member; ack needs a fresh passkey sign-in | The banner list, and acknowledging it (§4.6a) |
 | `GET/POST /groups` · `PATCH/DELETE /groups/:id` · `PUT/DELETE /groups/:id/members/:userId` | Admin / manager (an admin adding themselves needs an owner) | Groups |
 | `GET /handles/:handle/available` | Member | Handle check |
+| Bulk tools, member CSV, exports | Admin (as [Admin §17](admin.md)) | Defined in [Admin §17](admin.md) |
+
+Shared error codes gain **`reauth_required`**, returned by sensitive actions and downloads that need step-up re-authentication (§4.5; [Admin §11.3, §16](admin.md)).
 
 **Removed 15 Nov 2026:** `POST /auth/password`, `POST /auth/refresh`, `POST /auth/forgot`, `GET/POST /auth/reset/:token`, `PUT /me/password`, our own `POST /auth/passkey/options` and `/verify`, and `POST /me/passkeys/options` · `POST /me/passkeys` (now better-auth's passkey routes). Token-in-path routes (`/auth/recover/:token`, `/invitations/:token`, `/me/email/confirm/:token`) became fragment pages plus body POSTs after review.
 
@@ -545,7 +559,7 @@ Paths are relative to the Worker's `/api` prefix (for example `POST /api/setup`)
 5. Recovery link and owner recovery (register a new passkey)
 6. Profile settings: profile, status, passkeys (how each was created, the `*.workers.dev` warning and the owners' second-passkey reminder), my devices
 7. Member directory and profile card
-8. Admin: members, invitations (with the owners' second-passkey gate), groups, default channels, policies, audit log, and "Move workspace to a new address" (owners)
+8. Admin: the admin area's pages are defined in [Admin §3](admin.md); this spec adds the owners' second-passkey gate on Invitations and "Move workspace to a new address" (owners)
 
 ## 8. Edge cases
 
@@ -627,6 +641,7 @@ Paths are relative to the Worker's `/api` prefix (for example `POST /api/setup`)
   - "sign out" for a single session, for all other devices and everywhere works, and the revoked session's next request fails at once (no cookie cache, primary reads)
   - each revocation closes that session's open sockets within 5 seconds; a session whose `expires_at` has passed loses its sockets at the UserHub's next recheck, even if its row still exists (socket checks run from M2, when sockets exist; PLAN M2 exit criteria)
   - "My devices" never returns a session token
+  - `fresh_auth_at` is set only by a passkey assertion (sign-in or `POST /me/reauth`), never by a magic-link sign-in or the sliding expiry; failed step-ups are audited and count toward the per-IP passkey limit (the download step-up criteria are in [Admin §18](admin.md))
   - disabling a member closes their open connections within 5 seconds (from M2), and their next REST request fails.
 - **CSRF:** a state-changing request to our routes or to better-auth's without `X-Officebox-Request`, or with an `Origin` other than the canonical origin, is refused.
 - **Rate limits:** the limits in platform §8 for magic-link requests (per email and per IP), passkey sign-in, setup, recovery and invitation acceptance are enforced by our middleware before better-auth and return `rate_limited` at the threshold; unknown emails count the same as real ones; repeated requests for one email inside the window send no more mail and **don't extend the window**; emails differing only in case or Unicode form share one key.
@@ -661,7 +676,7 @@ Paths are relative to the Worker's `/api` prefix (for example `POST /api/setup`)
 
 ## 10. Later
 
-TOTP two-factor (less needed with passkeys; revisit) · **WebAuthn related-origin requests**, so passkeys can survive a domain move · Google/Microsoft or SSO sign-in · guests · member self-service email change, account deletion or data export · custom roles.
+TOTP two-factor (less needed with passkeys; revisit) · **WebAuthn related-origin requests**, so passkeys can survive a domain move · Google/Microsoft or SSO sign-in · guests · member self-service email change or account deletion · custom roles. (Member self-export is not planned: exports are an admin power, [Admin §2](admin.md).)
 
 ## 11. Open questions
 

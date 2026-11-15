@@ -1,7 +1,7 @@
 # Spec: Chat
 
 **Status:** Draft for review
-**Revision:** Revised after independent review (14 Nov 2026); revised after the second review (channel config in the DO, unread definition, message size caps, in-call chat kind); updated for the [Assistant](assistant.md) spec (15 Nov 2026: assistant DM, `assistant` sender and message kinds, assistant mentions)
+**Revision:** Revised after independent review (14 Nov 2026); revised after the second review (channel config in the DO, unread definition, message size caps, in-call chat kind); updated for the [Assistant](assistant.md) spec (15 Nov 2026: assistant DM, `assistant` sender and message kinds, assistant mentions); updated for the [Admin](admin.md) spec (15 Nov 2026: workspace exports are run by owners and admins and include DMs and group DMs; the assistant DM is never exported, Admin §11.1)
 **Feature name:** Chat (marketing name to be decided later)
 **Milestone:** M3 ([PLAN](../PLAN.md)), in slices M3a–M3c (§18) · **Related:** PRD §5.4, §8; TDD §2.2, §3.3–3.5; [Identity & Access](identity.md), [Permissions](permissions.md), [Notifications](notifications.md), [Platform](platform.md)
 
@@ -36,7 +36,7 @@ Real-time team conversation:
 | Sidebar | **Starred section, custom sections, unreads-first view, mute and hide** |
 | Public/private conversion | **Public → private only**, by channel admins |
 | Private channel discovery | **Hidden** from non-members |
-| Private channels and admins | **Workspace admins can't join or read private channels** unless a member adds them ([Permissions §6](permissions.md)) |
+| Private channels and admins | **Workspace admins can't join or read private channels** unless a member adds them ([Permissions §6](permissions.md)). Admin-run workspace exports still include them, with DMs and group DMs ([Admin §2, §11.1](admin.md)). |
 | Files | **Owned by the message.** The Files tab is read-only. "Save to folder" makes an independent drive copy. DM files stay in the conversation. |
 | Forward | **Live reference**, no content copies |
 | Create from message / reply privately | **Copies the text**, at the user's choice; later changes to the source don't affect the copy |
@@ -66,7 +66,7 @@ Real-time team conversation:
   - asks for a channel name, then **re-types the conversation in place**: `type` becomes `private`, `dm_key` is cleared, the name is set, and the current participants become members. The first converter becomes channel admin.
   - history is kept, because the participants already had it
   - **(default):** re-type rather than copy, so links and threads keep working.
-- **Assistant DM** ([Assistant §3](assistant.md), M9a): every member with assistant access has a private conversation with the assistant, **pinned at the top of their Direct messages section** (§3.3). It is **stored only in the member's Assistant DO** **(default)**: it is **not a `channels` row**, has no ChatChannel DO, no D1 message copy, isn't in workspace search (§12), and is never in the owner export. None of the conversation rules in this spec apply to it; [Assistant §4](assistant.md) defines it.
+- **Assistant DM** ([Assistant §3](assistant.md), M9a): every member with assistant access has a private conversation with the assistant, **pinned at the top of their Direct messages section** (§3.3). It is **stored only in the member's Assistant DO** **(default)**: it is **not a `channels` row**, has no ChatChannel DO, no D1 message copy, isn't in workspace search (§12), and is never in an admin export (workspace or per-member, [Admin §11.1, §12](admin.md)), because it lives only in the Assistant DO. None of the conversation rules in this spec apply to it; [Assistant §4](assistant.md) defines it.
 - **#general** is created at setup (M3a provisioning, [Platform §13](platform.md)). Everyone is in it, and members can't leave it **(default)**.
 - **Read-only #general** is the `general_read_only` setting ([Platform §7](platform.md)), owner-only. Turning it on sets #general's `posting_policy = 'posters'` with **only owners and admins as posters**; turning it off restores `posting_policy = 'everyone'`. It's implemented through the normal posting policy, not a separate mechanism.
 
@@ -355,6 +355,8 @@ Message state adds:
 - reactions capped at 50 distinct emoji (§4.4).
 
 The DO's `meta` table also stores the channel configuration and its version (§3.4).
+
+**Export.** The admin export ([Admin §11.1](admin.md), [Platform §6](platform.md)) includes every conversation in these tables, **including DMs and group DMs**. The assistant DM has no rows here and is never exported (§3.1).
 
 Polls: a `polls` table in the DO (`id`, `message_id`, `options`, `multiple`, `anonymous`, `closes_at`, `poll_secret`, `closed_at`) and `poll_votes` (`poll_id`, `voter_key`, `option_ids`). For non-anonymous polls `voter_key` is the user ID; for anonymous polls it's the HMAC key (§9).
 
