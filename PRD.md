@@ -271,21 +271,20 @@ It does not depend on Tiptap's paid cloud features. Comments are stored in Offic
 
 ### 5.6 Projects, boards, issues and tasks
 
-Projects and issue tracking are a planned Phase 2 capability.
+Projects, tasks and issue tracking are specified in [specs/projects.md](specs/projects.md) (Milestone M10).
 
-Expected capabilities:
+Capabilities:
 
-- Projects.
-- Boards and configurable workflow columns.
-- Issues/tasks with title, description, status, assignee and due date.
-- Comments and activity.
-- Links to documents, conversations and meetings.
-- Assignment and mention events surfaced in the Personal Inbox.
-- Basic filtering and search.
-
-Officebox evaluates mature open-source React board components before building custom UI, and avoids components that create a disconnected application, separate identity model or competing source of truth.
-
-**Recommendation:** build the board UI with a permissively licensed drag-and-drop toolkit (dnd-kit, MIT) on Officebox's own project and issue data in D1. Do not embed a standalone tracker such as Plane or Focalboard. Those bring their own data model, identity and deployment footprint, which the integration principles rule out.
+- **Living project ecosystem:** creating a project (or promoting an existing channel) automatically provisions four connected surfaces governed by one unified permission grant (**Project Lead · Editor · Commenter · Viewer**):
+  1. **`ProjectRoom` Durable Object** for real-time issues, boards, comments, checklists and activity (projected to D1 via outbox for workspace-wide views, search and capacity planning).
+  2. **Project Channel** (`#proj-<slug>` or the promoted channel) with a split-pane drawer and low-noise `project_event` system messages.
+  3. **Project Drive** (`drives.kind = 'project'`) for specs, whiteboards and files.
+  4. **Project Calendar** (`calendars.kind = 'project'`) for milestones, releases (`type = 'release'`), demos (`type = 'demo'`) and meetings.
+- **Unified issues & personal tasks:** project issues (`ENG-42`) and projectless personal tasks (`TASK-12`, in `ProjectRoom("personal")`) share the `issues` model with configurable workflow columns mapped to 5 status categories (`backlog`, `unstarted`, `started`, `completed`, `cancelled`), priority, single assignee, optional `issue_reviewers` (`pending` / `approved` / `changes_requested` / `cancelled`), 1 level of sub-issues, checklists, `effort_days`, and `blocks` / `blocked_by` / `relates_to` / `duplicate_of` relations. Moving an issue between projects keeps permanent `issue_key_aliases`.
+- **Views:** 5 tabs per project (*Overview (Pulse)*, *Issues* [List, Kanban board via `dnd-kit` MIT, Table], *Calendar & Capacity*, *Docs & Files*, *Channel*) plus workspace-wide **My Work** and **All Projects**.
+- **Capacity planning:** overlays team members' declared `time_off` (dates only, never private type or note), public/company holidays and working hours against assigned open issue `effort_days` (`On track ≤ 80%`, `Tight 80–100%`, `Overallocated > 100%`).
+- **Butler, Project Pulse & Shared Project Memory (M10c):** cited health updates (`project_pulses`), curated `project_memories` (`decision`, `convention`, `context`, `risk`) with prompt-injection tainting (`pending` until a Lead/Editor confirms) and source-deletion auto-purge, and 7 project/issue tools.
+- **Cross-app tissue:** live `ENG-42` / `TASK-12` chips everywhere, "Create issue from message", explicit "Promote checkbox to issue" in documents, and ad-hoc calls on issues.
 
 ### 5.7 Files
 
@@ -309,7 +308,7 @@ Realtime is fundamental to Officebox. The architecture uses two distinct realtim
 
 Media for **calls** (called "huddles" in earlier drafts) uses Cloudflare Realtime SFU. Detail is in [specs/calls.md](specs/calls.md).
 
-- **Ad-hoc, audio-first calls:** start one from a channel, DM, document or calendar event. Each context has one active call, and it ends 30 seconds after the last person leaves. There are no persistent rooms.
+- **Ad-hoc, audio-first calls:** start one from a channel, DM, document, calendar event or issue. Each context has one active call, and it ends 30 seconds after the last person leaves. There are no persistent rooms.
 - **Who is alerted:**
   - **Channel calls never ring or ping anyone.** The channel shows a "call in progress" banner plus start and end messages.
   - **DM and group-DM calls ring** the others for 30 seconds. Unanswered rings become a "missed call".
@@ -319,9 +318,9 @@ Media for **calls** (called "huddles" in earlier drafts) uses Cloudflare Realtim
 - **Video:** optional, and off by default.
 - **Screen sharing and present mode:** see below.
 - **Visible context:** each call shows where it started and links back to it, and the context shows who is in the call. When a call ends, a short summary (duration, participants) is posted to the context.
-- **In-call chat** is kept afterwards: as a thread in channel and DM calls, and with the document or event otherwise.
+- **In-call chat** is kept afterwards: as a thread in channel and DM calls, and with the document, event or issue otherwise.
 - **Size:** up to 25 participants per call by default.
-- **Controls:** mute, camera, share screen, reactions, raise hand (an ordered queue), noise suppression and leave. Moderation (muting, stopping a share, lowering hands, removing someone) belongs to the host and to channel admins, document owners or event organisers. It passes on if the host leaves.
+- **Controls:** mute, camera, share screen, reactions, raise hand (an ordered queue), noise suppression and leave. Moderation (muting, stopping a share, lowering hands, removing someone) belongs to the host and to channel admins, document owners, event organisers or Project Leads. It passes on if the host leaves.
 - **Encryption:** media is encrypted in transit. It passes through Cloudflare's SFU and is not end-to-end encrypted, and Officebox says so plainly.
 - **TURN:** provided by Cloudflare Realtime, sharing the SFU free tier: the first 1,000 GB of egress per month is free, then $0.05/GB. For small-team audio calls this is effectively free.
 
@@ -394,7 +393,7 @@ The first AI release (Phase 3, PLAN M9) gives every member a **personal assistan
 - **Voice:** push-to-talk and call notes (M9c), and live spoken conversation (M9d). Call notes and captions follow §5.8.
 - **Proactive help:** a daily brief, meeting prep and commitment nudges, each off until the member turns it on.
 - **Rollout:** an admin turns it on for the workspace or chosen groups. Owners set a monthly budget and admins set usage caps.
-- **Tasks and issues** stay with projects (Phase 2). They are not part of the first AI release.
+- **Projects, tasks and issues** integrate with the assistant in Milestone M10c ([specs/projects.md](specs/projects.md) §8): Project Pulse health updates, curated Shared Project Memory (`project_memories`), and 7 project/issue tools.
 
 AI actions that modify data or affect external systems require confirmation and permission checks. The assistant shows a preview card and nothing changes until the member confirms. Sensitive actions are auditable.
 
@@ -601,12 +600,12 @@ Channel roles are *channel admin* (rename, manage members, archive), *poster* (a
 
 **Restoring from Trash** follows one rule everywhere: the item's owner, the person who deleted it, drive managers of its drive, and admins.
 
-**Projects (Phase 2).** Public or private, like channels.
+**Projects ([specs/projects.md](specs/projects.md), PLAN M10).** Public or private. One unified grant list on the project (**Project Lead · Editor · Commenter · Viewer**) governs its issues, project channel, project drive and project calendar. Personal tasks (`TASK-n`) are private to their creator by default until assigned, shared or moved into a project.
 
 **Administrative access to private content.**
 
-- Admins and owners **cannot read** private channels, DMs or restricted documents in the app unless they are granted access.
-- Admins and owners **can export** the whole workspace, including private content: DMs, private channels, restricted documents, time-off type and note, and personal reminders (§13). Every export is audited, and the privacy statement says so plainly ([admin §2](specs/admin.md), [permissions §11](specs/permissions.md)).
+- Admins and owners **cannot read** private channels, DMs, private projects, personal tasks or restricted documents in the app unless they are granted access.
+- Admins and owners **can export** the whole workspace, including private content: DMs, private channels, private projects, personal tasks, restricted documents, time-off type and note, and personal reminders (§13). Every export is audited, and the privacy statement says so plainly ([admin §2](specs/admin.md), [permissions §11](specs/permissions.md)).
 - Admins can see that private objects exist (name, member count, size) and can delete them. Every such action is audited.
 - Officebox states clearly that the Cloudflare account owner has direct technical access to all stored data. Content is not end-to-end encrypted.
 
@@ -622,7 +621,7 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 | Document revisions | Same as the parent document | Purged with the parent. |
 | Files | Kept until deleted | Moved to Trash for 30 days, then the R2 object and its metadata are purged. Files attached to a deleted message are purged with it. |
 | Inbox items | 90 days after being completed or dismissed | Purged automatically. Underlying objects are unaffected. |
-| User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, passkeys, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents passes to an admin. |
+| User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, passkeys, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents and open personal tasks passes to an admin. |
 | Audit log | 365 days, configurable | Purged automatically. It never stores message or document content. |
 | Workspace exports (on demand) | 45 days after completion **(default)**, set by an owner (`export_retention_days`) | Deleted automatically, or earlier by an admin. Exports aren't rewritten when a member is deleted, so that member's data can remain in an archive until it expires ([admin §11.2](specs/admin.md)). |
 | Workspace exports (scheduled) | The latest 4 complete exports | Older ones are deleted only after a new one completes. |
@@ -634,11 +633,13 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 | Call (huddle) history | 365 days | Metadata only (context, participants, times, rings). No audio, video or screen content is ever recorded. Text transcripts exist only when someone turns on call notes (next row). Separate from in-call chat. |
 | Call notes and transcripts | Notes: life of their context. Transcripts: 90 days **(default)**, set by an owner (`call_transcript_retention_days`). | Transcripts are purged with their search vectors. Deleting the channel, event or document deletes its notes and transcripts. |
 | In-call chat | Life of its context | Channel and DM calls: a thread in the conversation. Document and event calls: kept with the document or event, not purged with the call record. |
-| Calendars and events | Kept until deleted | Trash for 30 days, restorable under the Trash rule (§10.1). Purged group and channel calendars move their events to the organisers' personal calendars. |
+| Calendars and events | Kept until deleted | Trash for 30 days, restorable under the Trash rule (§10.1). Purged group, channel and project calendars move their events to the organisers' personal calendars. |
 | Time off | Until the member deletes it | No Trash: a deleted entry is kept for audit and hard-deleted 30 days later. Erased when the member is deleted (it can contain sensitive types). |
 | External attendee emails | 90 days after the event ends (the last occurrence, for a series) | Purged automatically |
 | Drives and folders | Kept until deleted | Trash for 30 days, restorable under the Trash rule (§10.1) |
-| Comments | Life of the document | Deleted immediately when the author, the document owner, an editor or an admin deletes them |
+| Projects, issues and personal tasks | Kept until deleted | Archive is reversible. Delete moves a project (or single issue) to Trash for 30 days, restorable under the Trash rule (§10.1). Purging a project moves documents and files in its Project Drive to their creators' My files (keeping explicit shares), moves meeting events on its calendar to their organisers' personal calendars, and deletes its issues, channel, pulses and Project Memory. |
+| Project Memory (`project_memories`) | Life of the project (undecided `pending` items expire after 30 days) | Purged with the project, or deleted immediately when a cited source object is deleted. |
+| Comments | Life of the document or issue | Deleted immediately when the author, the document/project owner, an editor or an admin deletes them |
 | File versions | With their file (at most 100 versions; the oldest are dropped first) | Purged with the file |
 | Polls and votes | Life of the channel | Votes are stored only as per-poll hashed keys |
 | Saved items | Until removed, or until access is lost or the message is deleted | — |
@@ -1032,7 +1033,8 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Call notes | Visible and stoppable: banner naming who started them and who can read them; mandatory notice on joining; anyone can stop; captions separate and never stored | Agreed |
 | AI Gateway logging | Off for assistant traffic (default) | Agreed |
 | AI privacy scope | The guarantee holds within Officebox; content goes to the configured model provider; Cloudflare account access is outside Officebox's control; memory may hold what a member said about others (§11) | Agreed |
-| AI task and issue actions | Arrive with projects, not in the first AI release | Agreed |
+| AI task and issue actions | Arrive with projects in M10c (`create_issue`, `update_issue`, `comment_on_issue`, `propose_project_memory`, `search_issues`, `get_project_pulse`, `check_project_capacity`), plus shared Project Memory | Agreed ([projects](specs/projects.md)) |
+| Projects, tasks & issues | Milestone M10: auto-provisioned project channel, drive, calendar and `ProjectRoom` DO; unified `issues` model for project issues (`ENG-42`) and private-by-default personal tasks (`TASK-12`); capacity planning with holidays and time off; Project Pulse and shared Project Memory | Agreed ([projects](specs/projects.md)) |
 | Guest accounts | Guest role in Phase 2 with access to explicitly shared channels and documents only | Agreed |
 | Editor licensing | MIT Tiptap packages only; no paid Tiptap cloud dependency | Agreed |
 | Board UI | dnd-kit on Officebox's own data model | Agreed |
@@ -1065,7 +1067,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 ## Appendix B — Related documents
 
 - [Technical Design Document (TDD)](TDD.md): architecture, Durable Object design, D1 schema, Yjs sync, AI pipeline, deployment, upgrades and operations.
-- [Feature specs](specs/): [identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md), [assistant](specs/assistant.md), [admin](specs/admin.md); cross-cutting [permissions](specs/permissions.md), [notifications](specs/notifications.md) and [platform rules](specs/platform.md).
+- [Feature specs](specs/): [identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md), [assistant](specs/assistant.md), [admin](specs/admin.md), [projects](specs/projects.md); cross-cutting [permissions](specs/permissions.md), [notifications](specs/notifications.md) and [platform rules](specs/platform.md).
 - [Build plan](PLAN.md): milestones, slices and the definition of done.
 - [AGENTS.md](AGENTS.md): how we work, for people and coding agents.
 - Open-Source Component Evaluation Register: candidate projects, licences, maturity, integration model, data ownership and replacement strategy.

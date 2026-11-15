@@ -69,7 +69,7 @@ It replaces TDD §2.1's "stop at first match" resolution with a **union** rule.
 | **Resource roles:** owner · editor · commenter · viewer | Documents, whiteboards, folders, files, drives, calendars | Owners and managers of the resource, or inherited |
 | **Freebusy** | Calendars | Default for others on personal calendars, or granted |
 
-**Role ranking** (highest first): owner > manager > editor > commenter > viewer > freebusy. Manager applies to drives only; on other resources the highest role is owner.
+**Role ranking** (highest first): owner > manager > editor > commenter > viewer > freebusy. Manager applies to drives only; on projects, `owner` is displayed as **Project Lead**; on other resources the highest role is owner.
 
 ### 3.3 Principals
 
@@ -143,6 +143,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | My files | Owner only | Owner, plus anyone an item is shared with (that item only) | Owner | Owner (admins for leavers) |
 | Group drive | **Every member** (name only) | Group members, plus explicit shares | Group members (editor by default) | Group managers and admins (an admin **granting themselves** a role needs an owner) |
 | Shared drive | Those with a grant on the drive, or on something inside it | Per drive grants | Editors and managers | Drive managers |
+| Project drive | Per project visibility and grants (§4.7) | Per project role (viewer or above), plus explicit item/folder shares | Project Leads and Editors | Project Leads (and admins for archiving/deletion; an admin **granting themselves** a role on a private project needs an owner) |
 | Channels drive | Every member (but private-channel folders are hidden from non-members) | Per channel folder: channel members, or everyone for public channels (viewer) | **Channel members (editor)** | **Admins manage the drive.** Channel folders follow their channel; the drive itself grants no content access. |
 
 **DM files** have no folder. They live only in the conversation's Files view.
@@ -154,6 +155,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Personal | The member | Members the owner shares with | Members the owner shares with | **Everyone else** |
 | Group | Group managers and admins | **Group members** | **Every member** | — |
 | Channel | Channel admins | Channel members | Everyone (public channel) or members (private channel) | — |
+| Project | Project Leads | Project Leads and Editors | Project Commenters and Viewers (plus everyone for public projects) | — |
 | Standalone | Creator (owner) | Per grants and general access | Per grants and general access | Per grants |
 | Workspace | Admins | Admins | Every member | — |
 | Public holidays | — (generated) | — | Every member | — |
@@ -187,9 +189,10 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | DM / group DM | A participant | Participants | Host |
 | Document / whiteboard | **Anyone who can open it** (viewer or above) | Anyone with access to the document | Host, document owner |
 | Calendar event | Organiser or attendee | Invitees, plus full-details viewers (§4.4) | Host, event organiser |
+| Project / Issue | Anyone who can view the project or issue | Anyone with access to the project or issue | Host, Project Lead (or issue creator for personal tasks) |
 
-- Archived channels can't host calls.
-- If the host leaves, moderation passes to a moderator who is present (channel admin, document owner or event organiser). Otherwise, in DM and group-DM calls, any participant may stop a screen share. Otherwise, moderation passes to the earliest remaining participant **(default)**. [Calls](calls.md) §6.7 says the same.
+- Archived channels and archived projects can't host calls.
+- If the host leaves, moderation passes to a moderator who is present (channel admin, document owner, event organiser or Project Lead). Otherwise, in DM and group-DM calls, any participant may stop a screen share. Otherwise, moderation passes to the earliest remaining participant **(default)**. [Calls](calls.md) §6.7 says the same.
 - Losing access to the context removes the person from an active call: the call's socket closes with code **4403** and its SFU tracks are closed (platform §3 Member lifecycle). Disabling a member closes it with 4401.
 
 ### 4.6 Profiles, directory and groups
@@ -206,35 +209,64 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Add or remove group members | — | — | Own group | ✓ (adding **themselves** needs an owner) | ✓ |
 | View the audit log | — | — | — | ✓ | ✓ |
 
+### 4.7 Projects, Tasks & Issues ([Projects](projects.md))
+
+A project has a unified grant list (`resource_type = 'project'`, roles `owner` [displayed as **Project Lead**], `editor`, `commenter`, `viewer`) plus `projects.general_access` (`restricted`, `workspace_view`, `workspace_comment`, `workspace_edit`). Effective role on the project automatically governs its issues, channel, drive and calendar (§5.1).
+
+| Action | Project Lead (`owner`) | Editor | Commenter | Viewer | Workspace Admin (no role on private project) |
+|---|---|---|---|---|---|
+| See project exists, open Overview, Board, List, Calendar & Capacity, Docs & Files, Project Memory | ✓ | ✓ | ✓ | ✓ | Public ✓; private: name, key, member count and size in admin views only |
+| Read issues, comments, attachments and Project Memory | ✓ | ✓ | ✓ | ✓ | Public ✓; **private —** |
+| Comment on issues, react, and create issues in `backlog` | ✓ | ✓ | ✓ **(default)** | — | Public only if granted |
+| Create issues in any column; edit, move, assign, add/remove reviewers, link or close issues; toggle checklists | ✓ | ✓ | — | — | — |
+| Submit own review decision (`approved` / `changes_requested`) when listed in `issue_reviewers` | ✓ (if reviewer) | ✓ (if reviewer) | ✓ (if reviewer) | ✓ (if reviewer) | — |
+| Add, edit or confirm `pending` Project Memory items; generate/post Project Pulse | ✓ | ✓ | — | — | — |
+| Delete an issue (to Trash) | ✓ | Own issues **(default)** | — | — | ✓ (on projects they can access; audited) |
+| Delete any issue comment (moderation) | ✓ | — (own comments only) | — (own comments only) | — | ✓ (on projects they can access; audited) |
+| Configure workflow columns, labels, milestones, project settings, visibility (public → private) | ✓ | — | — | — | Public ✓; private — |
+| Manage project grants and roles | ✓ | ✓ (up to `editor` **(default)**) | — | — | Adding **themselves** to a private project needs an **owner** (audited) |
+| Archive / unarchive or delete project (to Trash); restore from Trash | ✓ | — (restore if they deleted it) | — | — | ✓ (without reading private content; audited) |
+
+**Personal tasks (`project_id IS NULL`, key `TASK-n`):**
+- Private to the creator (`owner`) by default. Nobody else, including workspace admins, can see or read them.
+- Assigning a personal task to a member, or adding them as a reviewer, automatically grants them `editor` on that task (`resource_type = 'issue'`). The creator can also share a personal task via `resource_grants` (`resource_type = 'issue'`).
+- Moving a personal task into a project requires `editor` on the task and `editor` on the target project; the issue then inherits the project's access while keeping any explicit `issue` grants.
+
 ## 5. Containers and inheritance
 
 ### 5.1 The union rule
 
-For documents, whiteboards, files and folders:
+For documents, whiteboards, files, folders, projects and issues:
 
 ```text
 effective role(user, item) = max(
   grants on the item            (user, any of the user's groups, any channel the user is in),
   grants on each ancestor folder up to the drive root (same principals),
-  grants on the drive           (same principals, plus built-in drive roles: My files owner, group drive → group members),
+  grants on the drive or project (same principals, plus built-in roles: My files owner, group drive → group members, project drive/calendar/channel/issues → project effective role),
   channel folder rule           (channel members → editor; public channel → everyone viewer),
   general access of the item and of each ancestor (workspace_view / workspace_comment / workspace_edit)
 )
 ```
 
 - The **highest role wins**. There is **no "deny"** and no way to narrow below what a container gives. Sharing can only widen.
+- **Projects** propagate their effective role to all four of their surfaces:
+  - **Project Issues:** `effective role(user, issue) = max(effective role(user, project), grants on the issue)`. For personal tasks (`project_id IS NULL`), `effective role(user, issue) = max(creator → owner, assignee/reviewer → editor, grants on the issue)`.
+  - **Project Drive:** `effective role(user, project_drive) = max(effective role(user, project), grants on the drive)`. Items and folders inside the project drive inherit from the project drive and can be widened with explicit folder/item grants.
+  - **Project Calendar:** `effective role(user, project_calendar) = max(effective role(user, project) [commenter maps to viewer], grants on the calendar)`.
+  - **Project Channel:** Project Leads are channel admins; Editors and Commenters are channel members who can post; Viewers can read (and join calls). A project channel's membership and visibility (`public` / `private`) are locked to the project's grants and `general_access` ([Projects §3.3](projects.md)): direct channel membership or visibility mutations are rejected (`conflict: managed_by_project`) or routed through project grants.
 - **Calendars** use the same rule, without folders: grants on the calendar, its built-in kind rules (§4.4) and its general access. Event visibility then filters the result (§4.4).
-- **Channels and messages** don't use grants. Access is channel membership, channel type and DM participation (§4.1).
+- **Channels and messages** outside projects don't use grants. Access is channel membership, channel type and DM participation (§4.1).
 
 ### 5.2 New items follow the container
 
 | Created in | Starting access |
 |---|---|
-| My files | Private to the creator (owner) |
+| My files or Personal tasks (`project_id IS NULL`) | Private to the creator (owner) |
 | Group drive or a folder in it | Inherited: group members edit |
+| Project (issue, project doc/board/file, project event) | Inherited from the project |
 | Shared drive or folder | Inherited from the drive and folders |
 | Channel folder | Inherited: channel members edit; public channel → everyone can view |
-| From a chat message ("Create from message") | The channel's folder for channels (as above); the creator's My files for DMs **(default)** |
+| From a chat message ("Create from message") | The project or channel's folder for channels (as above); the creator's My files / Personal tasks for DMs **(default)** |
 
 - No item has workspace-wide general access unless someone sets it, or its container has it.
 - This replaces PRD §10.1's "a document created from scratch: workspace can edit".
@@ -264,7 +296,7 @@ effective role(user, item) = max(
 | Change email, issue recovery link, disable, re-enable, delete, sign out all sessions: **members** | ✓ | ✓ |
 | **Move the workspace's domain** (two steps, Identity §4.4) | — | ✓ |
 | Same actions on **admins or owners** | — | ✓ (an owner can't disable or delete the last owner) |
-| Transfer content of leavers (My files, organised events, owned calendars) | ✓ | ✓ |
+| Transfer content of leavers (My files, organised events, owned calendars, open personal tasks) | ✓ | ✓ |
 | Archive, delete or remove members of **any** channel, including private ones (without reading) | ✓ | ✓ |
 | Join or read **private channels, DMs or restricted items** they haven't been given | **—** | **—** |
 | Delete messages in private channels they're a member of (added by a member) | ✓ | ✓ |
@@ -290,12 +322,12 @@ effective role(user, item) = max(
   - an audit entry is written.
 - Using a recovery link also signs out all the person's existing sessions and closes their sockets (Identity §4.6).
 
-**Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents **in the app**. These things are stated plainly:
-- **Exports** ([Admin](admin.md) §2, §11, §12). Owners and admins can **export the whole workspace, including private content**: DMs, group DMs, private channels, restricted documents, time-off type and note, personal reminders, and passkey public keys (not secret; there are no password hashes, because sign-in is passwordless, [Identity](identity.md) §2). They can also run a per-member export for a data-protection request, which never contains credentials. Every export is audited. Members aren't told about workspace exports; the subject of a per-member export gets a notice.
+**Privacy statement** (help and admin guide): admins can't read private channels, DMs, private projects, personal tasks or restricted documents **in the app**. These things are stated plainly:
+- **Exports** ([Admin](admin.md) §2, §11, §12). Owners and admins can **export the whole workspace, including private content**: DMs, group DMs, private channels, private projects, personal tasks, restricted documents, time-off type and note, personal reminders, and passkey public keys (not secret; there are no password hashes, because sign-in is passwordless, [Identity](identity.md) §2). They can also run a per-member export for a data-protection request, which never contains credentials. Every export is audited. Members aren't told about workspace exports; the subject of a per-member export gets a notice.
 - **Export expiry and erasure** ([Admin](admin.md) §11.1, §11.2). On-demand exports are deleted after 45 days **(default)**, scheduled exports keep the latest 4, and per-member exports are deleted after 7 days **(default)**. Exports **aren't rewritten** when a member is deleted, so a deleted member's data can remain in an archive until it expires, and restoring an older export brings it back.
 - **Direct R2 access.** Reading export archives directly from R2 (Wrangler or R2 credentials) needs **Cloudflare account access**, which is outside Officebox's control ([Admin](admin.md) §11.1).
 - **Recovery links.** An admin could sign in as an ordinary **member** by issuing them a recovery link. Officebox emails the member (if email is configured), shows a notice on their sign-in page, flags it to every owner when email isn't configured, and audits it. The member may only find out at their next sign-in, so this is visible, not prevented.
-- **Deleted members' files.** Deleting a member hands their private My files to an admin, who can then read them (platform §3 Member lifecycle).
+- **Deleted members' files and open personal tasks.** Deleting a member hands their private My files and open personal tasks to an admin, who can then read them (platform §3 Member lifecycle).
 - **Groups.** An admin can't add themselves to a group or grant themselves group-drive access without an owner, because that would expose everything shared with the group.
 - **Assistant** ([Assistant](assistant.md) §1, §9, §11):
   - **Scope.** The assistant's privacy guarantee holds **within Officebox**. Anyone with direct access to the Cloudflare account (for example Durable Object storage) is outside Officebox's control.
@@ -315,6 +347,7 @@ The Cloudflare account owner has direct technical access to all stored data (PRD
 |---|---|---|
 | Document, whiteboard, file, folder | "You don't have access to this *document*." **The title is shown only if the object sits in a space the viewer can see** (a public channel folder, a group drive listed to them, or shared metadata); otherwise "this item". | ✓ |
 | Drive | "You don't have access to this drive." The name is shown for group drives (listed to all); hidden otherwise. | ✓ (to drive managers) |
+| Project or issue | "You don't have access to this *project* / *issue*." **No title, key or status is shown** when the project is private or the issue is a private personal task. | ✓ (projects and project issues: to Project Leads and Editors; personal tasks: **—**) |
 | Calendar or event | "You don't have access to this *event*." No title. | ✓ (to calendar owners; for events, to the organiser) |
 | Private channel | "This conversation is private." No name. | **—** |
 | Message (in a private channel, DM or embedded) | "A message you don't have access to." | **—** |
@@ -329,12 +362,13 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 | Document, whiteboard, file | Owner and editors |
 | Folder | Owner and editors of the folder |
 | Drive | Drive managers |
+| Project or project issue | Project Leads and Editors |
 | Calendar | Calendar owner (personal: the member; group: group managers; workspace: admins) |
 | Event | The organiser |
 
 - A request goes to approvers' inboxes (notifications §3 Notification events: `access_request`).
 - **What approving does:**
-  - documents, whiteboards, files, folders and drives: the approver grants a role up to their own
+  - documents, whiteboards, files, folders, drives and projects: the approver grants a role up to their own
   - **calendars:** the approver grants a calendar role (viewer, editor, or freebusy)
   - **events have no grants:** the organiser approves by **adding the requester as an attendee**, which gives them full details (§4.4).
 - Approvers can also decline.
@@ -348,11 +382,11 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 |---|---|
 | HTTP routes | Every route that reads or writes user content calls the engine. No ad-hoc checks (AGENTS §4.1). |
 | WebSocket upgrades | The Worker resolves the role before forwarding (TDD §3.1). The DO stores it in the socket attachment. |
-| Revocation | Total loss of access is `updateAccess(userId, null)`: sockets close with `4403` through the UserHub room registry (TDD §3.5). Disabling a member closes everything with `4401`. The registry covers ChatChannel, DocRoom, BoardRoom, HuddleRoom **and the Assistant DO** (kind `assistant`: losing assistant access closes with `4403`), and is persisted (platform §12). |
+| Revocation | Total loss of access is `updateAccess(userId, null)`: sockets close with `4403` through the UserHub room registry (TDD §3.5). Disabling a member closes everything with `4401`. The registry covers ChatChannel, DocRoom, BoardRoom, HuddleRoom, **ProjectRoom** **and the Assistant DO** (kind `assistant`: losing assistant access closes with `4403`), and is persisted (platform §12). |
 | **Maintenance mode** ([Admin](admin.md) §13.2) | Maintenance is **not a role change**. On each maintenance transition the Worker calls a room-level **`setMaintenance(epoch, active)`** RPC on open rooms only, through the UserHub room registry (platform §12). The room sets a **read-only flag separate from each socket's role** and sends `status.changed { maintenance }`; when maintenance ends the flag clears and each socket's own role applies again, with no reconnect. `updateAccess` is not used for maintenance. Closed DOs check the maintenance epoch lazily before any refused write. |
-| **Access change on open sockets** | When a person's effective role on an open document, whiteboard, channel or call context changes (for example editor → viewer, or they leave a group), the Worker calls **`updateAccess(userId, role | null)`** on the affected DOs through the room registry. The DO updates the attachment and sends **`{ type: "access.changed", role }`**. A DocRoom then rejects that socket's updates (read-only) and the client switches to view mode without reconnecting. When `role` is **null** (all access lost), the DO closes the socket with **4403**. This is the only name for the mechanism (platform §12, TDD §3.5). |
+| **Access change on open sockets** | When a person's effective role on an open document, whiteboard, channel, project or call context changes (for example editor → viewer, or they leave a group), the Worker calls **`updateAccess(userId, role | null)`** on the affected DOs through the room registry. The DO updates the attachment and sends **`{ type: "access.changed", role }`**. A DocRoom or ProjectRoom then rejects that socket's updates (read-only) and the client switches to view mode without reconnecting. When `role` is **null** (all access lost), the DO closes the socket with **4403**. This is the only name for the mechanism (platform §12, TDD §3.5). |
 | Search, previews, embeds, forwards, notifications, AI | Filtered through the engine at read time (TDD §2.4, §5.3) |
-| **AI assistant** ([Assistant](assistant.md) §4, §5, §6) | **Private surfaces** (assistant DM, Talk, live voice, proactive): every tool runs **as the member** through the engine, with their current access; confirmed writes re-check permission. **Mentions in shared conversations** use the **audience rule**: only sources the **whole audience** can open (public channel: public-channel messages, this conversation's files and `workspace_view` objects; private channel: plus objects shared with the channel; DMs, group DMs and private channels of 8 or fewer: plus objects the engine confirms **each** member can open **(default)**), re-checked when the reply is posted. **Personal memory is isolated:** it lives only in the member's own Assistant DO, addressed only by the authenticated member's ID, never used to answer anyone else, and not readable by admins. Cited sources are re-checked on every recall; lost access hides them immediately. |
+| **AI assistant** ([Assistant](assistant.md) §4, §5, §6) | **Private surfaces** (assistant DM, Talk, live voice, proactive): every tool runs **as the member** through the engine, with their current access; confirmed writes re-check permission. **Mentions in shared conversations** use the **audience rule**: only sources the **whole audience** can open (public channel: public-channel messages, this conversation's files and `workspace_view` objects; project channel: plus that project's issues, project drive root documents, project calendar non-private events and `active` Project Memory; private channel: plus objects shared with the channel; DMs, group DMs and private channels of 8 or fewer: plus objects the engine confirms **each** member can open **(default)**), re-checked when the reply is posted. **Personal memory is isolated:** it lives only in the member's own Assistant DO, addressed only by the authenticated member's ID, never used to answer anyone else, and not readable by admins. Cited sources are re-checked on every recall; lost access hides them immediately. |
 | Offline edits | Queued offline edits are rejected if the role no longer allows editing when they reach the server. The client keeps them locally and offers "Copy your changes" **(default)**. |
 
 ## 9. Data model
@@ -360,11 +394,11 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 **Final value lists, part of the baseline schema** (platform §14 Schema reconciliation). These replace the CHECK constraints in TDD §2.1.
 
 ```sql
-resource_grants.resource_type  IN ('document', 'whiteboard', 'folder', 'file', 'drive', 'calendar', 'project')
+resource_grants.resource_type  IN ('document', 'whiteboard', 'folder', 'file', 'drive', 'calendar', 'project', 'issue')
 resource_grants.principal_type IN ('user', 'group', 'channel')
 resource_grants.role           IN ('owner', 'manager', 'editor', 'commenter', 'viewer', 'freebusy')
 users.role                     IN ('owner', 'admin', 'member', 'guest')      -- guest reserved, not assignable until Phase 2
-general_access (documents, folders, files, drives, calendars)
+general_access (documents, folders, files, drives, calendars, projects)
                                IN ('restricted', 'workspace_freebusy', 'workspace_view', 'workspace_comment', 'workspace_edit')
                                -- workspace_freebusy: calendars only
 group_members.role             IN ('manager', 'member')
@@ -384,7 +418,7 @@ The engine is internal. It's exposed only through:
 
 ## 11. Acceptance criteria
 
-- **Matrix test.** An automated test enumerates every object type × role × action in §4 and checks the engine's answer. It runs in CI, and a change to §4 must update the test. **It grows per milestone:** M1 covers workspace roles, groups and profiles; M3a adds channels, DMs and messages; M4 adds calls; M5a adds calendars and events; M6a adds documents, folders, drives and files; M7 adds the admin pages and endpoints, `workspace.export` and `member.export` ([Admin](admin.md) §18).
+- **Matrix test.** An automated test enumerates every object type × role × action in §4 and checks the engine's answer. It runs in CI, and a change to §4 must update the test. **It grows per milestone:** M1 covers workspace roles, groups and profiles; M3a adds channels, DMs and messages; M4 adds calls; M5a adds calendars and events; M6a adds documents, folders, drives and files; M7 adds the admin pages and endpoints, `workspace.export` and `member.export` ([Admin](admin.md) §18); M10a adds projects, issues and personal tasks.
 - **Union:** a viewer grant on a folder plus an editor grant on an item inside gives editor. An item can't be restricted below its folder.
 - **New items:** a document created in My files is private; one created in a channel folder is editable by channel members; none starts workspace-wide.
 - **Channel made private:** non-members lose access to messages, attachments and the folder within 5 seconds, open sockets included. Items with explicit wider shares keep them, and those items were listed in the conversion dialog.
@@ -397,7 +431,7 @@ The engine is internal. It's exposed only through:
   - a recovery link or email change sends an email to the old address, shows the sign-in notice, and revokes pending tokens
   - without email configured, a recovery link flags the member to every owner until acknowledged
   - an admin adding themselves to a group, or granting themselves a group-drive role, gets 403; an owner can do it for them.
-- **Admins and private content:** an admin can't join or read a private channel or DM in the app. They can remove members from it and archive it. An admin who was added to a private channel by a member can delete messages in it. An admin **can export** private content: a workspace export they run includes DMs, private channels, time-off type and note, personal reminders and passkey public keys ([Admin](admin.md) §18 Exports).
+- **Admins and private content:** an admin can't join or read a private channel, DM, private project or personal task in the app. They can remove members from it and archive it. An admin who was added to a private channel by a member can delete messages in it. An admin **can export** private content: a workspace export they run includes DMs, private channels, private projects, personal tasks, time-off type and note, personal reminders and passkey public keys ([Admin](admin.md) §18 Exports).
 - **Exports:** the matrix test covers `workspace.export` and `member.export` for every workspace role, at start and at download. Members are denied both. An admin is denied `member.export` when the subject is an admin or owner, including at download when the subject was promoted after the export started; an owner is allowed.
 - **Comments:** an editor can delete another person's comment; a commenter can't.
 - **Document calls:** a viewer can start a call on a document.

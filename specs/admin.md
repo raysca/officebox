@@ -63,7 +63,7 @@ Every export is audited and disclosed in the privacy statement.
 |---|---|
 | Owner and admin split | **Split by risk.** Owners alone: upgrades and channel, usage and cost, the post-deploy checklist, telemetry and diagnostics, maintenance mode. Owners and admins: members, groups, invitations, workspace settings (per key, Platform §7), the audit log, health, storage, assistant oversight (Assistant §10–§11), and **exports**. |
 | Who exports data | **Owners and admins only.** This is an organisation's workspace. Owners hold every admin power, so "admins" below includes owners. |
-| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, restricted documents, **time-off type and note, and personal reminders**. Exceptions: sessions, tokens and MFA secrets (Platform §6), and assistant memory, which no admin can read. **Passkey public keys are included in workspace exports** (Identity §2), so a restore onto the same canonical origin keeps them working; they're never in per-member exports. There are no password hashes: sign-in is passwordless (this replaces the earlier "password hashes included" default). Confirmed by the product owner: admins export everything (this changes Permissions §11 and Assistant §7.1 and §13). |
+| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, **private projects, personal tasks**, restricted documents, **time-off type and note, and personal reminders**. Exceptions: sessions, tokens and MFA secrets (Platform §6), and assistant memory, which no admin can read. **Passkey public keys are included in workspace exports** (Identity §2), so a restore onto the same canonical origin keeps them working; they're never in per-member exports. There are no password hashes: sign-in is passwordless (this replaces the earlier "password hashes included" default). Confirmed by the product owner: admins export everything (this changes Permissions §11 and Assistant §7.1 and §13). |
 | Disclosure | **Privacy statement and audit log** **(default)**. The privacy statement says admins can export everything, including private content. Every export is audited. Members see no history of **workspace** exports. |
 | Member self-export | **None.** Members can't download their own data. This **removes** "Download my assistant data" from the approved Assistant spec (§19). |
 | Data-protection requests | **Admin per-member export.** An admin runs an export scoped to one member and hands it over. The member gets a confirmation notice (§12). |
@@ -241,6 +241,7 @@ Downloads the current filtered list: name, handle, email, role, status, groups, 
   - Calls
   - Calendar
   - Documents & files
+  - Projects
   - Assistant
   - Email
   - Storage & data.
@@ -430,6 +431,7 @@ For data-protection access requests. Members can't run these themselves.
   - **Messages:** messages they wrote in every conversation, including DMs, with conversation names and their message-owned attachments.
   - **Reactions and saved items:** their reactions, saved items, stars and non-anonymous poll votes.
   - **Documents and files:** documents, whiteboards and files they own, with versions, including items in Trash.
+  - **Projects, issues and personal tasks:** issues and personal tasks they created or are assigned to, their `issue_reviewers` rows and `issue_follows`, issue comments they wrote, and their issue-owned attachments ([Projects](projects.md) §10.4).
   - **Calendar:** events they organise or attend, their time off (with type and note) and personal reminders.
   - **Comments** they wrote.
   - **Calls:** call-note transcript segments they spoke.
@@ -491,9 +493,9 @@ Reading works everywhere. Writes fall into three classes **(default)**:
 
 | Class | What | Behaviour |
 |---|---|---|
-| **Refused** | Creating, editing or deleting user content (messages, documents, files, events, polls, channels); settings changes; invitations; uploads; assistant requests; starting a call | Typed `maintenance` result; the app shows "The workspace is read-only for maintenance" |
+| **Refused** | Creating, editing or deleting user content (messages, documents, files, events, polls, channels, projects, issues, personal tasks, milestones, Project Memory, Project Pulses); settings changes; invitations; uploads; assistant requests; starting a call | Typed `maintenance` result; the app shows "The workspace is read-only for maintenance" |
 | **Exempt** | Sign-in and sign-out (better-auth's routes and our sign-in confirmation routes), the session's sliding expiry, and passkey registration through an enrolment ticket; step-up re-authentication (`POST /me/reauth`); **disabling a member, signing out all sessions and recovery** by owners and admins (so a compromised account can be handled); ending, rescheduling or cancelling maintenance; personal state that isn't shared content (read markers, presence, drafts, push subscriptions); everything inside **active calls** (in-call chat, call notes and transcript segments); system writes (audit, alerts, health, export status, outbox progress, inbox and notification delivery, outgoing email); the running export | Proceeds normally |
-| **Deferred** | Content-creating timers and alarms (scheduled sends, poll auto-close); ICS refresh; purges and retention sweeps; scheduled exports | Wait until maintenance ends, then run. Reminders and other notification-only triggers fire on time, as system writes. |
+| **Deferred** | Content-creating timers and alarms (scheduled sends, poll auto-close, scheduled `project_pulse` runs); ICS refresh; purges and retention sweeps; scheduled exports | Wait until maintenance ends, then run. Reminders (including `issue_due`) and other notification-only triggers fire on time, as system writes. |
 
 Members can still sign in **(default)**. Active calls continue, but no new calls start **(default)**.
 - **Reconnects:** when maintenance ends, sockets return to their normal roles through `access.changed`, with no mass reconnect.
@@ -741,7 +743,7 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 - [ ] **Scheduled slot:** a missed slot runs within 24 hours, and is skipped after that. Two concurrent dispatcher runs claim it once. A failing SFU disables call buttons with the notice, and members see no workspace-wide banner.
 
 **Exports**
-- [ ] **Contents:** a workspace export run by an admin includes DMs, private channels, time-off notes, personal reminders and passkey public keys. It excludes credentials, assistant memory and the operational tables.
+- [ ] **Contents:** a workspace export run by an admin includes DMs, private channels, private projects, personal tasks, time-off notes, personal reminders and passkey public keys. It excludes credentials, assistant memory and the operational tables.
 - [ ] **Step-up re-authentication:**
   - A download with `fresh_auth_at` older than 10 minutes returns `reauth_required`. At 10 minutes exactly, it's allowed.
   - The sliding expiry and a magic-link sign-in don't set `fresh_auth_at`; only a passkey assertion does.

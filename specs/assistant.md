@@ -227,8 +227,10 @@ Every tool runs **as the member** through the permission engine; on shared surfa
 | `remember` / `forget` | memory | M9a | ✓ | ✗ | Edits the member's own memory with a chip and Undo; pending or confirmed when retrieved content was present (§4.2) |
 | `read_file` | read | M9a (PDF/Office), M9c (images, audio) | ✓ | ✓ audience sources only | Uses derived text (§9) |
 | `call_notes` | read | M9c | ✓ | ✗ | Notes and transcripts of calls whose context the member can open |
+| `search_issues`, `get_project_pulse`, `check_project_capacity` | read | M10c | ✓ | ✓ (project channel: this project) | Search issues/tasks, get live Project Pulse & active `project_memories`, or compute milestone/window capacity ([Projects](projects.md) §8.3) |
+| `create_issue`, `update_issue`, `comment_on_issue`, `propose_project_memory` | **write** | M10c | ✓ | `propose_project_memory` (`pending` only); others ✗ | Confirmed writes with `idempotency_key` and `expectedVersion` (Projects §8.3) |
 
-Tasks and issues (PRD §5.9) arrive when projects exist. They are not part of M9.
+Tasks and issues (PRD §5.9) arrive with Milestone M10c ([Projects](projects.md) §8).
 
 **Output rendering.** Assistant output is rendered as restricted Markdown, sanitised on the server:
 - links only to Officebox objects (each shown with the normal no-access handling)
@@ -249,7 +251,7 @@ The sanitiser converts this to the message rich-text format (Chat §4.1). Mentio
    - **Done.** `done` stores a reference to what was created.
 4. **Idempotency and versions on target services.** Calendar (events, RSVPs), Documents (create), status, reminders and Chat (`post_message`, using its existing `clientId`) each accept an idempotency key. Calendar and Documents updates also accept `expectedVersion`. They store it with the created object for **24 hours (default)** and return the existing result on a repeat (§17).
 5. **Expiry.** Pending actions expire after **10 minutes (default)**, or when the member's sessions are revoked. Cancelling a turn cancels its pending actions. Expired confirms return `action_expired`. Finished, cancelled and expired actions are deleted after 24 hours.
-6. **Only the asker confirms.** Write tools aren't available on shared surfaces (§5), so no card is ever posted into a shared conversation.
+6. **Only the asker confirms.** Write tools aren't available on shared surfaces (§5), so no action card is ever posted into a shared conversation (except `propose_project_memory` in a project channel when invoked by an Editor/Lead, which stages a `status = 'pending'` suggestion in `project_memories` for a Project Lead or Editor to confirm or discard; [Projects §8.2, §8.3](projects.md)).
 7. **Injection can't skip it.** After reading untrusted content, the model may *propose* writes but can never run them without confirmation.
 8. **Audit.** Confirmed write actions go to the **audit log** with the actor (the member), the tool and its target, and `"via": "assistant"` in `metadata`. For writes into DMs and group DMs, only the object type is recorded, not the conversation ID (Permissions §4.1).
 9. **Accessibility.** Each card is a labelled group. Focus moves to it only if focus is already in the message list; otherwise the card is announced politely, so it never steals focus from the composer. Confirm and Cancel are buttons. Expiry is announced ("expires in 10 minutes") and shown as text, not colour alone.
@@ -351,7 +353,7 @@ Each feature is off until the member turns it on, either in the assistant's sett
 
 | Type | How it's read | When |
 |---|---|---|
-| Documents, whiteboards (text), messages | Their search-text projection (TDD §2.4) | Indexed on change |
+| Documents, whiteboards (text), messages, issues/tasks (`issue`, M10a), confirmed project memories (`project_memory`, M10c) | Their search-text projection (TDD §2.4) | Indexed on change |
 | Call notes and transcripts | As text | Indexed when notes are finalised; transcripts purged with retention |
 | PDF, DOCX, XLSX, PPTX, text, Markdown, CSV | Converted to text with Workers AI `toMarkdown`. Supported formats and limits are verified in M9a; any format it doesn't support is treated as unsupported. | **Indexed on upload (default)**, per file version, through `indexing` |
 | Images (PNG, JPEG, WebP, GIF) | Vision model: description plus text in the image | **On demand (default)**; cached per file version |
@@ -362,9 +364,12 @@ Each feature is off until the member turns it on, either in the assistant's sett
 
   | Object | `scope_id` | D1 check (TDD §5.3 step 5) |
   |---|---|---|
-  | Derived file text | The file's folder or drive, or its message's channel | As the file |
+  | Derived file text | The file's folder or drive, its message's channel, or its issue (`project:<projectId>` / `issue:<issueId>`) | As the file |
+  | Issues & personal tasks (`issue`, M10a) | The project (`project:<projectId>`) or personal task (`issue:<issueId>`) | As the issue |
+  | Confirmed project memories (`project_memory`, M10c) | The project (`project:<projectId>`) | As the project |
   | Call notes and transcripts from channel or DM calls | The channel | As the channel |
   | Call notes and transcripts from document calls | The document | As the document |
+  | Call notes and transcripts from issue calls (M10b) | The project (`project:<projectId>`) or personal task (`issue:<issueId>`) | As the issue |
   | Call notes and transcripts from event calls | Not vector-indexed | Reached through the event (`find_events`, `call_notes`), with event access checked |
 
 - **Derived text follows the file.**
@@ -494,7 +499,8 @@ Admins can see **that** a member used the assistant and which objects were touch
      - public channel: "everyone in the workspace"
      - private channel or DM: "everyone in this conversation"
      - event: "attendees, and anyone who can see this event's details"
-     - document: "anyone who can open this document". The banner is a labelled region announced once (`role="status"`), and doesn't steal focus.
+     - document: "anyone who can open this document"
+     - issue (M10b): "anyone who can open this issue". The banner is a labelled region announced once (`role="status"`), and doesn't steal focus.
    - **Joining while notes are on:** `POST /calls/:id/join` returns `notes_ack_required` with the notice text instead of joining.
      - The client shows a **modal dialog**, with focus trapped and Escape meaning "Don't join". It offers **Join** or **Don't join**, even if the member's devices would otherwise skip the pre-join screen.
      - **Join** repeats the request with `ackNotes: true`. "Don't join" leaves cleanly.
@@ -523,12 +529,13 @@ Admins can see **that** a member used the assistant and which objects were touch
    | Channel or DM call | A `call_notes` message in the conversation, linking to the transcript | Conversation members |
    | Event call | On the event, in a **"Call notes"** section (separate from personal event notes) | Organiser, attendees, details-level viewers (Calls §3) |
    | Document call | The document's **Activity** section (Calls §3, Documents §6.1) | Anyone who can open the document |
+   | Issue call (M10b) | The issue's **Activity & Comments** timeline ([Projects §6.3](projects.md), Calls §3) | Anyone who can open the issue |
 
-7. **Action items** are suggestions. Each person named sees "Add to my reminders" (§7.1) on items assigned to them. Nothing is created for anyone automatically.
+7. **Action items** are suggestions. Each person named sees "Add to my reminders" (§7.1) and, from M10c, **"Create issue"** ([Projects §6.3](projects.md), opening a pre-filled confirm card to create a project issue or personal task) on items assigned to them. Nothing is created for anyone automatically.
 8. **Injection.** Transcripts are untrusted (rule 4). Words spoken in a call ("Butler, post this to #general") never cause a tool to run; the notetaker has no tools.
 9. **Transcript access and retention.** Access follows the context. The transcript is kept for `call_transcript_retention_days`, then purged (with its vectors) by the daily purge job; the notes stay for the life of the context.
 10. **Removed participants.** A participant removed from the call's context loses access to notes and transcript like any other content (Permissions §8).
-11. **Cascades.** Deleting the channel, event or document deletes its call notes, transcripts and their vectors (Platform §4).
+11. **Cascades.** Deleting the channel, event, document or issue deletes its call notes, transcripts and their vectors (Platform §4).
 
 ### 12.4 Live captions (M9c)
 
@@ -981,7 +988,6 @@ This section sits outside the AGENTS §3.1 order because it records where this s
 - Acting while the member is away (auto-replies, delegated RSVPs)
 - Web browsing and outbound fetching (through Platform §9 rules)
 - External integrations (email, third-party calendars) via connectors
-- Tasks and issues, once projects exist
 - Workspace-level custom instructions ("our fiscal year starts in April")
 - Video file transcription (if not resolved in §19)
 - Guests using the assistant (Phase 2)

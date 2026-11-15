@@ -25,6 +25,7 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 - [Documents, Whiteboards & Files](specs/documents.md)
 - [Assistant](specs/assistant.md)
 - [Admin & Operations](specs/admin.md)
+- [Projects, Tasks & Issues](specs/projects.md)
 
 **Cross-cutting specs** (every feature follows these):
 - [Permissions](specs/permissions.md)
