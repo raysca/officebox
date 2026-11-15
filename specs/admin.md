@@ -333,7 +333,7 @@ The app learns availability from two endpoints:
   - delete old exports
   - export and delete archived channels.
 - **What members see:** a refused creation fails with "The workspace is low on storage. Ask an admin." Messaging continues.
-- **Priority writes:** audit, alert and export-status writes are small, and continue at 95 %. At 98 %, they are the only D1 writes besides the protected ones TDD §7.7 lists.
+- **Priority writes:** audit, alert and export-status writes are small, and continue at 95 %. At 98 %, the D1 message copy pauses and DO outboxes hold their events (TDD §7.7), while these small writes continue.
 
 ## 10. Usage & cost
 
@@ -532,7 +532,11 @@ Owners see the following (TDD §6.7); admins can view them:
 - migration status from the last deploy, as observable by the running app: schema against code, and being behind the latest release (§4).
 
 **Auto-merge and channel.** These live in the customer's repository, in `.officebox/config.json` (TDD §6.3): `channel`, and `auto_merge`, which is one of `none`, `security` or `patch`.
-- `auto_merge` defaults to **`none`**. Owners opt in by editing the file. Minor and major releases are never auto-merged.
+- `auto_merge` defaults to **`none`**. Owners opt in by editing the file:
+  - `security` auto-merges patch releases flagged as security releases
+  - `patch` auto-merges every patch release, including security ones.
+
+  Minor and major releases are never auto-merged, even when they carry a security fix **(default)**.
 - The running app holds no GitHub credentials (PRD §13). So the build embeds both values, and the Updates page shows them **as deployed**, with instructions for changing them.
 
 ## 15. Setup checklist
