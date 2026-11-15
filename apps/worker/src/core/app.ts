@@ -68,6 +68,8 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) c.header(name, value);
     const isApi = path === "/api" || path.startsWith("/api/") || path === "/health";
     c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
+    // API responses carry user data: never cached, whichever helper built the response.
+    if (isApi) c.header("Cache-Control", "no-store");
     // Assets fall-through and health probes are noisy and carry nothing worth keeping.
     if (path.startsWith("/api/") || path === "/api") {
       log.info("request", {

@@ -14,8 +14,10 @@ import { rootLogger, type Logger } from "./log";
  * - **Overlap guard:** each run takes a lease on its schedule in D1 (`cron_leases`). If the previous
  *   run of the same schedule still holds it (for example a slow 5-minute run), the new trigger skips.
  *   The lease expires after `LEASE_MS` so a crashed run can't block the schedule for good. The job
- *   timeouts of one schedule must add up to less than `LEASE_MS` (checked at registration), so a
- *   live run never outlasts its lease.
+ *   timeouts of one schedule must add up to less than `LEASE_MS` (checked at registration), so the
+ *   dispatcher itself finishes within its lease. A timed-out job's promise keeps running in the
+ *   background, though, so it can outlive the lease and overlap the next run of that job; jobs must
+ *   be idempotent anyway.
  * - **If the lease can't be checked** (D1 unavailable, or the table not there yet mid-deploy), the
  *   jobs run unguarded and the error is logged **(default)**. Jobs are idempotent, so an occasional
  *   overlap is harmless, while skipping could stall purges and retention for as long as D1 errors.

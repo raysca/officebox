@@ -58,7 +58,7 @@ export default defineConfig(
         {
           patterns: [
             {
-              group: ["**/log-unredacted", "**/log-unredacted.ts"],
+              group: ["**/log-unredacted", "**/log-unredacted.*", "**/log-unredacted.js", "**/log-unredacted.ts"],
               message: "logUnredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
             },
           ],
@@ -69,6 +69,12 @@ export default defineConfig(
         {
           selector: "ImportExpression[source.value=/log-unredacted/]",
           message: "logUnredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
+        },
+        {
+          // A computed specifier could name any module, including log-unredacted. The Worker has no
+          // need for dynamic imports of computed paths.
+          selector: "ImportExpression[source.type!='Literal']",
+          message: "Dynamic import() needs a literal specifier in the Worker (see eslint.config.js).",
         },
       ],
     },

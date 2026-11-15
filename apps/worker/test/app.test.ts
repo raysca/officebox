@@ -24,6 +24,7 @@ const bodySchema = z.strictObject({ name: z.string().min(1) });
 // A sample feature exercising the result-to-HTTP mapping.
 const sample = new Hono<AppEnv>()
   .get("/ok", (c) => respond(c, ok({ hello: "world" })))
+  .get("/raw", (c) => c.json({ raw: true }))
   .post("/items", async (c) => {
     const body = await readJson(c, bodySchema, 64);
     if (!body.ok) return respond(c, body);
@@ -181,6 +182,15 @@ describe("request body limits", () => {
     const bytes = new Uint8Array([0x7b, 0xff, 0x7d]);
     const result = await post(bytes);
     expect(!result.ok && result.error.code).toBe("validation_failed");
+  });
+});
+
+describe("API caching", () => {
+  it("marks every API response no-store, whichever helper built it", async () => {
+    const { call } = makeApp();
+    for (const path of ["/api/sample/ok", "/api/sample/raw", "/api/sample/denied", "/api/nope"]) {
+      expect((await call(path)).headers.get("Cache-Control"), path).toBe("no-store");
+    }
   });
 });
 

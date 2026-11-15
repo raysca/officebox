@@ -564,7 +564,7 @@ This replaces v1.3's "stop at the first match".
 
 ### 2.2 Durable Object SQLite schemas
 
-**Core tables in every DO** (`apps/worker/src/core/do/base.ts`, M0b). Every Durable Object extends the core base class, which owns three tables, versioned separately from the feature schema (`meta.core_schema_version`):
+**Core tables in every DO** (`apps/worker/src/core/do/base.ts`, M0b). Every Durable Object extends the core base class, which owns four tables, versioned separately from the feature schema (`meta.core_schema_version`):
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);   -- schema_version, core_schema_version, feature keys
@@ -584,9 +584,13 @@ CREATE TABLE core_outbox (                                -- generic transaction
   next_attempt_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE core_outbox_dead (                           -- rows given up on (core migration 2); same columns
+  id INTEGER PRIMARY KEY, stream TEXT NOT NULL, body TEXT NOT NULL, bytes INTEGER NOT NULL,
+  attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, dead_at INTEGER NOT NULL
+);
 ```
 
-Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. Rows that keep failing to send while the queue is otherwise up are moved to `core_outbox_dead` after 10 attempts **(default)**, and the base class adds that table in its second core migration. **Nothing reads or re-drives `core_outbox_dead` until M7**, which adds it to admin health with a re-drive action; until then dead rows are visible only in the error log and `Outbox.stats()` (admin note).
+Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. Rows that keep failing to send while the queue is otherwise up are moved to `core_outbox_dead` after 10 attempts **(default)**, and the base class adds that table in its second core migration. Attempts only count when the queue is known to be up (something else was sent in the same drain); a drain that sends nothing backs the whole stream off instead, recorded in `meta` as `outbox_outage_until:<stream>` (next retry, epoch ms) and `outbox_outage_count:<stream>`, cleared by the next successful send. **Nothing reads or re-drives `core_outbox_dead` until M7**, which adds it to admin health with a re-drive action; until then dead rows are visible only in the error log and `Outbox.stats()` (admin note).
 
 **ChatChannel DO** — one per channel. This is the source of truth for the channel's messages.
 

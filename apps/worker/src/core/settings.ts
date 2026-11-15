@@ -181,7 +181,8 @@ export class SettingsStore<R extends SettingsRegistry> {
    * The write is guarded on the value it read (compare-and-set), so the audited `old` value is exact
    * even with concurrent writers; if another writer got in between, it re-reads and tries once more,
    * then returns `conflict`. Both sides of the comparison go through SQLite's `json_extract`, so
-   * objects and arrays compare in SQLite's own canonical JSON text, not JavaScript's.
+   * objects and arrays compare in SQLite's own canonical JSON text, not JavaScript's. Integers beyond
+   * 2^53 aren't supported (JavaScript numbers lose them); bound numeric settings in their Zod schema.
    *
    * A malformed column is replaced with a fresh object holding only this key, and the audit entry
    * says so (`repaired: true`). **Any other settings in the malformed column are discarded**: they
