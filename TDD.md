@@ -156,8 +156,8 @@ Every kind of data has exactly one source of truth. Copies are derived from it, 
 
 | Data | Source of truth | Derived copies |
 |---|---|---|
-| Channel messages, edits, deletions, reactions, threads | ChatChannel DO SQLite (`events`, `messages`) | D1 `messages` (search, inbox, notifications, cross-channel views); Vectorize (Phase 3) |
-| Document and whiteboard content | DocRoom / BoardRoom DO SQLite (Yjs) | R2 snapshot copies (export and recovery); search text projection (see §10); Vectorize (Phase 3) |
+| Channel messages, edits, deletions, reactions, threads | ChatChannel DO SQLite (`events`, `messages`) | D1 `messages` (search, inbox, notifications, cross-channel views); Vectorize (M9; upserts only while the assistant is enabled, §5.2) |
+| Document and whiteboard content | DocRoom / BoardRoom DO SQLite (Yjs) | R2 snapshot copies (export and recovery); search text projection (see §10); Vectorize (M9; upserts only while the assistant is enabled, §5.2) |
 | Identity, roles, groups, channel membership, grants, object metadata, inbox, audit | D1 | — |
 | File bytes | R2 | — (metadata in D1 `files`) |
 | Presence, typing, awareness | DO memory and WebSocket attachments | — (never persisted) |
@@ -521,7 +521,7 @@ CREATE TABLE purge_jobs (
   UNIQUE (object_type, object_id)
 );
 
-CREATE TABLE embedding_jobs (        -- Phase 3
+CREATE TABLE embedding_jobs (        -- Phase 3 (M9); upserts only while assistant_enabled (§5.2)
   id TEXT PRIMARY KEY,
   source_type TEXT NOT NULL,
   source_id TEXT NOT NULL,
@@ -933,7 +933,7 @@ Other embeds (messages, events, document previews, link previews) refresh throug
 
 Tabs of the same browser elect a leader with `BroadcastChannel` and share one hub socket.
 
-**Unread state** (Chat §7). On connect, the client loads unread and mention counts over REST. Unread counts **top-level messages and "also send to channel" copies** in D1 with `seq > channel_members.last_read_seq`, excluding the member's own messages, system messages, `call_chat` messages, deleted messages and thread replies. Assistant messages (`sender_id = 'assistant'`) count like user messages **(default, Chat §7)** (tracked per followed thread in `thread_follows`). The D1 copy can lag a few seconds; tests wait for it to converge. Read cursors are written by the client, debounced, and only move forward. The mention count comes from unread inbox records. After that, counts are kept current by hub events.
+**Unread state** (Chat §7). On connect, the client loads unread and mention counts over REST. Unread counts **top-level messages and "also send to channel" copies** in D1 with `seq > channel_members.last_read_seq`, excluding the member's own messages, system messages, `call_chat` messages, deleted messages and thread replies (tracked per followed thread in `thread_follows`). Assistant messages (`sender_id = 'assistant'`) count like user messages **(default, Chat §7)**. The D1 copy can lag a few seconds; tests wait for it to converge. Read cursors are written by the client, debounced, and only move forward. The mention count comes from unread inbox records. After that, counts are kept current by hub events.
 
 **Fan-out.** After applying a batch, the message projection consumer (§3.3, step 5):
 
@@ -1153,20 +1153,36 @@ Present mode uses no media:
 
 ## 5. AI design (BYOK, permission-aware RAG)
 
+The AI release is the workspace assistant, milestone M9 (Phase 3). [Assistant](specs/assistant.md) is authoritative for its behaviour, rules and feature tables; this section is the technical design. AI stays optional: with the assistant off or its model unreachable, every other feature works unchanged.
+
 ### 5.1 BYOK flow
 
-1. Administrator configures provider keys in AI Gateway → Provider Keys. AI Gateway stores them in Secrets Store; the application never handles the raw key.
+Every model role (`chat`, `summaries`, `stt`, `tts`, `vision`) uses **Workers AI by default**, so the assistant works straight after deploy. An owner can move a role to their own provider through AI Gateway (`assistant_models`, Assistant §10.1), where AI Gateway supports that role:
+
+1. An owner configures provider keys in AI Gateway → Provider Keys. AI Gateway stores them in Secrets Store; the application never handles the raw key.
 2. The Worker calls AI Gateway with the provider path (e.g. /openai/chat/completions) and cf-aig-authorization for gateway auth.
 3. AI Gateway substitutes the stored provider key at runtime.
 4. Key rotation is done in the dashboard with no code changes.
 
+Logging and caching controls for assistant traffic are in §5.10.
+
 ### 5.2 Ingestion pipeline
+
+**Gate** (Assistant §9). The pipeline **upserts only while `assistant_enabled` is on**, and only content that **at least one member with assistant access can read** (with `assistant_access = everyone`, that is all content). Deletions, invalidations and vector deletes **always run**, even while the assistant is off, so the index never holds deleted content. Turning the assistant on for the first time **back-fills** the index through the `indexing` queue; turning it off stops new ingestion but keeps existing vectors and derived text current through deletions, so re-enabling back-fills only the gap. An owner's **Delete assistant index** (`DELETE /admin/assistant/index`, audited) purges every vector and all derived text.
 
 1. On document save or message creation, the Worker enqueues an embedding_jobs record in D1 and a message on a Queue.
 2. A queue consumer Worker loads the content (from D1 or DO), chunks it, generates embeddings via Workers AI, and upserts vectors into Vectorize.
 3. Each vector carries only scope metadata: `object_type`, `object_id`, `scope_id` (the channel ID for messages, the document or folder ID otherwise) and `chunk`. Only `object_type` and `scope_id` are metadata indexes, using 2 of the 10 allowed. **Vectors hold no user or role lists.** Permission changes therefore never require rewriting vectors. Only deleting or moving an object does.
 4. On deletion, or when a message moves out of a channel, the Worker queues an invalidation job that deletes the object's vectors.
 5. Changing the embedding model requires a new index, because index dimensions are fixed at creation, followed by a full re-index. This is delivered as a release migration that builds the new index before switching to it.
+
+**Object types** (Assistant §9 has the scope table):
+- messages, documents and whiteboards, from their search-text projection (§2.4)
+- **derived file text** (`file_derived_text`, per file version; version `1` for files without versions). PDF, Office, text, Markdown and CSV files are converted with Workers AI `toMarkdown` on upload; images (vision model) and audio (speech-to-text, in chunks) are processed on demand and cached per version. All of it runs as `indexing` jobs. The same text feeds `search_index` (§2.4). Unsupported or oversize files, including video, are indexed by name and metadata only.
+- **call notes and transcripts** of channel, DM and document calls, when notes are finalised (`scope_id` the channel or document). Event-call notes are not vector-indexed.
+- **Events are never indexed**; the assistant reads them only through the calendar permission rules (`find_events`, `my_day`).
+
+Derived text follows its file: Trash removes it from retrieval, restore re-indexes it, and purge deletes it and its vectors (§2.3). Transcripts past retention are deleted with their vectors by the daily purge job.
 
 ### 5.3 Retrieval flow
 
@@ -1180,9 +1196,72 @@ Present mode uses no media:
 
 Design rule: permission filtering happens before model invocation, not after. No vector is passed to the model unless the requesting user is authorised to see its source.
 
+**Who the scopes belong to.** In the member's private surfaces, step 3 uses the member's access. For an `@mention` reply, step 3 uses the **audience's** allowed set (Assistant §6.4), which is usually larger than the filter limit, so the unfiltered path with D1 checks and FTS top-up is used; for small conversations step 5 also checks that **each** member can open the candidate (§5.8). Retrieved snippets, file text, transcripts and recalled memory are all placed in the prompt as marked, untrusted data (Assistant §1 rule 4).
+
 ### 5.4 Audit
 
-AI tool invocations and mutating actions are written to audit_log with actor, action, target, model/provider and outcome. Retention is configurable; default retention is defined before Phase 3.
+The audit split (Assistant §11):
+- **Every assistant invocation** writes one row to D1 **`assistant_interactions`**: member, time, surface, model role, provider and model, tools run, IDs of objects read and changed, outcome, and token and audio-second counts. Never prompts, replies, tool arguments or memory. Retention is `assistant_interaction_retention_days` (default 30 days, PRD §10.2). Owners and admins see it through `GET /admin/assistant/interactions` with object IDs and types only; titles are resolved only for objects the viewing admin can open. Members see their own rows.
+- **`audit_log`** receives only confirmed write actions (actor = the member, the tool and its target, `metadata.via = "assistant"`; for DMs and group DMs the object type only, Permissions §4.1), assistant settings changes, call-notes start and stop, "Forget everything", personal exports, index deletion and transcript purges.
+
+### 5.5 Assistant Durable Object
+
+One SQLite-backed **Assistant DO per member**, holding that member's conversations, turns, remembered items, embeddings, source references, pending actions and prefs. The schema, named timers and RPC surface are in [Assistant §14.1](specs/assistant.md).
+
+- **Base class.** It extends the core DO base class (AGENTS §4.2): `schema_version` with lazy migration (§6.5), the alarm multiplexer and the hibernation rules (§3.2). Cloudflare's `agents` SDK is a source of patterns only, unless a spike shows it can wrap the base class cleanly.
+- **Addressing.** `idFromName(user_id)`, where the Worker takes the ID **only** from the authenticated session or, for system jobs, from a D1 row it has just status-checked. No route accepts a user ID for this DO; a route-enumeration test proves it. Every path checks the member's status in D1 first, so a queue consumer or alarm never creates a DO for a deleted member.
+- **Socket.** `/ws/assistant` streams turns (`assistant.delta`, `assistant.done`, `assistant.action_result`), registered in the UserHub room registry as kind `assistant` (§3.5) and counted in the socket budget.
+- **Typed results.** Every RPC returns `Result<T, AssistantError>` with concrete fields and never throws an expected denial (AGENTS §4.1).
+- **Named timers:** `retention_sweep` (daily; also reconciles the D1 mirror, §5.7), `conversation_close:<id>` (summary and extraction after 8 hours idle), `incognito_expire:<id>` and `pending_expire` (§5.9).
+- **Deletion** is one DO transaction; SQLite triggers clear FTS rows, pending actions and source references, including on foreign-key cascades (Assistant §14.1).
+
+### 5.6 Memory search inside the DO
+
+Memory never leaves the member's DO and is never written to the shared Vectorize index.
+- **Keyword:** FTS5 tables `turns_fts` and `memory_fts` inside the DO, maintained by triggers that skip incognito turns.
+- **Semantic:** item and conversation-summary embeddings (the §5.2 model) are stored as float32 BLOBs in the DO. A query computes cosine similarity in chunks over all active embeddings, up to 5,000 **(default)**, and fuses the result with the FTS5 ranks (reciprocal rank fusion). Over the cap, the oldest embeddings are dropped, summaries first; their rows stay searchable by keyword.
+- **Recall** reads only `status = 'active'` items and non-incognito turns, and re-checks every cited source through the permission engine before anything enters the prompt; sources the member can no longer open are hidden. The cost of that re-check for long histories is measured in M9a (§10).
+
+### 5.7 Source mirror and purge
+
+- **Mirror.** The DO's `source_refs` table records which turn, item or summary cites which object. After any transaction that changes it (including trigger-driven deletes on cascades, sweeps and incognito expiry), the DO recomputes the reference count per object and, **through the outbox helper (§3.3)**, inserts a D1 `assistant_source_refs (user_id, object_type, object_id)` row when the count goes from 0 to 1 and deletes it when it returns to 0. The mirror holds object references only, never content, and no route reads it. The daily `retention_sweep` reconciles the mirror with the DO.
+- **Purge fan-out.** The deletion pipelines (§2.3) look up the mirror and enqueue one `assistant-purge` job per affected member. The consumer checks the member's status in D1 and skips **only deleted** members (their DO storage is already gone); it runs for disabled members, members without assistant access and while the assistant is off. It then calls `purgeSources(refs)`, which ignores refs the DO doesn't hold and deletes dependent reply text, items and conversation summaries.
+- **`purge_epoch`.** Summary and extraction jobs make model calls that DO input gates don't cover. The DO keeps a `purge_epoch` counter, incremented by `purgeSources`, `deleteConversation`, `forgetAll` and pausing memory. A job records the epoch before its model call; its final write transaction discards the result if the epoch changed or a source it used is now hidden or purged, and re-queues the job with the new epoch unless its conversation was deleted or memory is paused.
+- **Access loss** hides content at recall time immediately (§5.6). The daily sweep also re-checks citations in bounded batches and deletes content hidden for 7 days **(default)**.
+- **Reconcile on return.** When a member is re-enabled, or `assistant_enabled` is turned back on, each affected DO runs a reconcile pass before serving requests: it re-checks every `source_refs` object for existence and access, purges what's gone and hides what's no longer accessible.
+
+### 5.8 Queue consumers: mentions, nudges and proactive runs
+
+Each queue has a dead-letter queue (§6.1). Every consumer except `assistant-purge` checks the member's status, assistant access and the relevant setting in D1 before doing work, and drops work for disabled or deleted members.
+
+- **`assistant-mentions`: the stateless audience worker** (Assistant §6). Mentions never run in the asker's Assistant DO, so the asker's memory is structurally out of reach. The worker re-reads the mention message (cancelling if the mention was edited away or the message deleted), computes the audience and its allowed sources, retrieves (§5.3), builds a prompt from those sources, the question and the last 50 messages, and runs the model with the shared tool set only. It recomputes the audience before posting and regenerates once or drops the reply if a new member can't open a cited source. The reply is inserted through the assistant-message RPC with `clientId = 'assistant:' + mentionMessageId` (§2.2), so concurrent or repeated deliveries post one reply. On failure or DLQ, no shared reply is posted and the asker gets a notice in their assistant DM.
+- **`assistant-nudges`.** Fed only for opted-in authors by the projection consumer (§3.3). The consumer skips messages that were deleted or edited before it runs, classifies the text, keeps nothing beyond the check, and offers a reminder in the member's assistant DM.
+- **`assistant-proactive`.** Fed by ReminderScheduler `assistant_brief` and `assistant_prep` triggers (§2.2). The consumer checks the member's opt-in in `assistant_optins`, then calls `runProactive(kind)` on the member's DO. Delivery follows DND, focus time and time off (Notifications §5), with no inbox preview.
+- **`assistant-purge`.** §5.7.
+
+### 5.9 Confirmation state machine
+
+Write tools never run from model output (Assistant §5.1). A write creates a **pending action** in the Assistant DO with the Zod-validated arguments and, for edits, the target's current version. The preview card is rendered from those arguments by deterministic code.
+
+- **States:** `pending → executing → done | failed`, plus `pending → cancelled | expired`. Confirm moves `pending → executing` with a compare-and-set, so a second confirm returns the current state and never writes twice.
+- **Execute.** The DO re-checks permission, then calls the target service with the **action ID as the idempotency key** and the stored version as **`expectedVersion`**. Calendar (events, RSVPs), Documents (create), status, personal reminders and Chat (`post_message`, using its existing `clientId`) accept the key and keep it with the created object for 24 hours, returning the existing result on a repeat. Calendar and Documents updates apply only if the version still matches, as an atomic compare-and-set, and otherwise return `conflict`; the action moves to `failed` and a fresh card is offered.
+- **Resume.** If the DO is evicted or the call times out while `executing`, the next confirm or the `pending_expire` timer resumes the same call with the same key. Before resuming, the DO re-checks the member's status, assistant access, an active session and permission; if any fails, or the action is more than 10 minutes past its confirmation, it moves to `failed`.
+- **Expiry and cleanup.** Pending actions expire after 10 minutes or when the member's sessions are revoked; finished, cancelled and expired actions are deleted after 24 hours.
+- Write tools aren't available on shared surfaces, so a card is only ever shown to the asker.
+
+### 5.10 Model access and AI Gateway controls
+
+- **`ModelProvider`.** Every assistant model call goes through one `ModelProvider` interface, per role (`chat`, `summaries`, `stt`, `tts`, `vision`, resolved from `assistant_models`; embeddings stay on the §5.2 model). Tests use a **deterministic fake** that records prompts; the spec's "captured prompt" criteria assert on that record (Assistant §16).
+- **Logging and caching off.** Every assistant model call goes through the configured gateway (`assistant_gateway_id`) with logging and caching off: BYOK requests send `cf-aig-collect-log: false` and `cf-aig-skip-cache: true`, and Workers AI binding calls pass the equivalent gateway options. With no gateway configured, Workers AI calls bypass the gateway, so nothing is gateway-logged. Whether these controls work per request is verified in M9a (§10).
+- **Worker logs** never contain prompts, replies, transcripts or tool arguments; only IDs, counts and outcomes.
+- **Output** is restricted Markdown, sanitised on the server into the message rich-text format: links only to Officebox objects, no external images or embeds, no raw HTML (Assistant §5).
+- **Caps and cost.** Daily per-member caps (requests, voice seconds, media reads) and the workspace call-notes cap are D1 `rate_counters`; the burst limit uses the Rate Limiting binding. Expected cap hits are typed `rate_limited` results with `retryAfter`. Cost is estimated from the token and audio-second counts in `assistant_interactions` (§7.9).
+
+### 5.11 Voice pipelines
+
+- **Push-to-talk (M9c).** `POST /assistant/talk` uploads a clip of at most 2 minutes. The Worker runs speech-to-text through `ModelProvider`, discards the audio, and continues the turn over `/ws/assistant`. Replies are read aloud with text-to-speech only when the member turned that on.
+- **Call notes and captions (M9c).** Per-track streaming transcription in the HuddleRoom (§3.6).
+- **Live voice (M9d).** `POST /assistant/live` returns SFU session details. The member's audio travels over the Realtime SFU (§3.6) to their Assistant DO through the WebSocket audio adapter; the DO runs speech-to-text, the model and text-to-speech and streams audio back the same way. The DO is active (billed for wall time) while streaming, which is one reason sessions are capped at 30 minutes, one at a time per member. Spoken confirmation is a **deterministic phrase matcher**, never the model, accepted only after the card's preview has been read aloud; audio captured during text-to-speech playback is ignored. The session's text transcript is saved as a conversation. If the voice spike shows the SFU path doesn't work, live voice falls back to a direct WebSocket audio stream to the Assistant DO (§10).
 
 ## 6. Deployment and upgrades
 
@@ -1190,7 +1269,7 @@ Upgrades are delivered as **release-sync pull requests** in the customer's own r
 
 ### 6.1 Deploy to Cloudflare
 
-The repository's `wrangler.jsonc` grows to include the bindings below. It is added to milestone by milestone, so a fresh deploy never provisions unused resources: M0 ships the bindings M0 and M1 need, and each later milestone adds its own bindings and Durable Object migration tags (Vectorize and AI in Phase 3, Workflows in M7, feature DOs and queues with their milestone). The full set:
+The repository's `wrangler.jsonc` grows to include the bindings below. It is added to milestone by milestone, so a fresh deploy never provisions unused resources: M0 ships the bindings M0 and M1 need, and each later milestone adds its own bindings and Durable Object migration tags (Vectorize and AI in M9a (Phase 3), Workflows in M7, feature DOs and queues with their milestone). The full set:
 
 - Durable Object namespaces (ChatChannel, DocRoom, BoardRoom, UserHub, WorkspacePresence) as SQLite-backed classes.
 - Workflows (export and restore).
@@ -1207,6 +1286,11 @@ The repository's `wrangler.jsonc` grows to include the bindings below. It is add
   - the **ReminderScheduler** Durable Object (§2.2)
   - Queues: `link-preview-fetch` and `ics-fetch` (outbound fetching, §8.2), and `unread-email`, whose delayed messages (`delaySeconds`, at most 12 hours) implement the per-recipient offline-email timer, deduplicated by the D1 `pending_emails` table; longer holds use ReminderScheduler `email_release` triggers (Platform §11)
   - the admin settings keys listed in Platform §7 (for example `external_invites`, `holiday_regions`, `offline_documents_enabled`, `welcome_post_enabled`, `default_channels`, `screen_share` and `link_previews_enabled`), stored in `installation.settings`.
+- **v1.6 additions** (M9, Assistant §14.3):
+  - the **`Assistant`** Durable Object class (SQLite-backed, new migration tag)
+  - Queues, each with a dead-letter queue: `assistant-mentions` (the audience worker), `assistant-nudges`, `assistant-proactive` and `assistant-purge` (§5.8, §5.7); the existing `indexing` queue gains file conversion, audio transcription and back-fill jobs
+  - the Vectorize index and Workers AI binding, built in M9a with the ingestion pipeline (§5.2)
+  - the assistant settings keys (Assistant §10.1), including `assistant_gateway_id`.
 
 The Deploy to Cloudflare button copies the repository into the customer's GitHub account, provisions the supported resources and runs the deploy command:
 
@@ -1227,7 +1311,8 @@ node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangl
 | Custom domain | Manual; recommended before inviting the team | Stable sign-in, PWA and push |
 | Email provider API key or SMTP credentials | Manual (Worker secrets) | Email invitations, resets and notifications |
 | Realtime SFU app and TURN key | Manual (Worker secrets) | Calls and screen sharing (M4) |
-| AI Gateway and provider keys | Manual | AI (Phase 3) |
+| AI Gateway | Manual; **recommended** for assistant logging control: set `assistant_gateway_id` so every assistant call runs with logging and caching off (§5.10). The checklist tells owners that logging stays off for assistant traffic. | Assistant (M9a); Workers AI works without it |
+| BYOK provider keys | Optional (AI Gateway Provider Keys); switching a role needs the owner to acknowledge that content goes to that provider | Assistant roles on another provider |
 | Read-only analytics API token | Optional (Worker secret) | Usage panel with Cloudflare's own figures |
 | Cloudflare billing notifications | Recommended (dashboard) | Cost alerts |
 | R2 lifecycle rule for noncurrent versions | Recommended | Retention guarantee (§2.3) |
@@ -1438,7 +1523,7 @@ CREATE TABLE exports (
 | Path | Content |
 |---|---|
 | `manifest.json` | Format version, Officebox version, D1 schema version, creation time, row/object counts, SHA-256 for every part, each channel's exported `seq`, each document's state vector |
-| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `mfa_factors`, setup fields, job tables, `passkeys`, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6). |
+| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `mfa_factors`, setup fields, job tables, `passkeys`, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6). From M9 also `file_derived_text` (rebuilt like `search_index`), `personal_reminders` (personal export only) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
 | `channels/<id>/messages.jsonl` | Current message state from the ChatChannel DO, including tombstones |
 | `docs/<id>/state.ystate` | Native Yjs state |
 | `docs/<id>/content.md` or `content.json` | Readable rendering (Markdown for documents, JSON for whiteboards) |
@@ -1457,16 +1542,18 @@ CREATE TABLE exports (
 1. The first-run setup page of a fresh installation offers **Restore from export**, which still requires the setup token (§6.8).
 2. The archive is uploaded through the Worker with R2 multipart upload. Very large archives can instead be placed in the bucket with Wrangler, and `officebox-restore` then starts the Workflow.
 3. The Restore Workflow checks the manifest and checksums. It accepts exports from the same Officebox version or older, and maps older logical schemas forward.
-4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`.
+4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`. Derived file text and vectors are rebuilt by the assistant back-fill (§5.2) once the assistant is enabled; assistant memory is not part of a restore (Assistant §13).
 5. It completes setup. All sessions are invalid and users with MFA must re-enrol.
 
 **Coverage** ([Platform](specs/platform.md) §6 is authoritative):
-- **Added:** calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads.
+- **Added:** calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, and `call_notes` and `call_transcript_segments` within retention (Assistant §13).
 - **Excluded:**
   - sessions, `auth_tokens`, `ws_tickets` and MFA secrets
   - **passkeys** (bound to the domain; members re-register after a restore to a new domain)
   - ICS feed tokens, and ICS-in subscription URLs (subscriptions are exported without URLs and must be re-entered)
-  - `poll_secret`.
+  - `poll_secret`
+  - **assistant conversations and memory** (they live only in Assistant DOs, which admins can't read) and **personal reminders**; members get both through their personal export, "Download my assistant data" (Assistant §4.3, §13)
+  - `file_derived_text`, rebuilt like `search_index`.
 
 **Testing:** CI exports a fixture installation, restores it into a fresh one and compares them, on every release.
 
@@ -1528,6 +1615,7 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
 | Snooze wake-ups | 5 minutes | PRD §5.3 |
 | Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
 | Purge due objects, time-based retention (audit log, inbox items, sessions, invitations, tickets, huddle records) | Daily | §2.3 |
+| Assistant purge jobs: expired `assistant_interactions`, transcripts past retention and their vectors, `file_derived_text` for purged versions, finished `personal_reminders` (M9) | Daily | §2.3, Assistant §14.3 |
 | ChatChannel event-log trimming, D1 copy reconciliation, version thinning | Daily | §2.2, §3.3, §4.3 |
 | Release manifest check | Daily | §6.7 |
 | Usage panel refresh | Daily | §7.9 |
@@ -1539,17 +1627,19 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
 | Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
 
 Timers that aren't cron jobs (Platform §11):
-- **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry) and `email_release` (email holds longer than 12 hours).
+- **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry), `email_release` (email holds longer than 12 hours), and from M9 `assistant_brief`, `assistant_prep` and `personal_reminder`.
 - **Delayed `unread-email` queue messages**, deduplicated by `pending_emails`. When one fires during DND or time off the email is held; when that ends it's re-evaluated and, if still unread, sent after the remaining delay or immediately if the delay has passed.
 - **Channel DO** poll auto-close.
 - **UserHub:** ring timeout, and the DND-end "while you were away" summary.
-- **HuddleRoom:** call end and hand-over deadline.
+- **HuddleRoom:** call end and hand-over deadline; from M9c `notes_idle` and `notes_finalize` (§3.6).
+- **Assistant DO** (M9): `retention_sweep` (daily, per member; also mirror reconcile and hidden-source purge), `conversation_close:<id>`, `incognito_expire:<id>` and `pending_expire` (§5.5).
 
 ### 7.9 Usage, cost and telemetry
 
 - **Usage panel:**
   - With an optional read-only account analytics API token (a Worker secret), the daily job queries Cloudflare's GraphQL Analytics API. It reads Workers requests; DO requests, duration and storage; D1 rows and storage; R2 storage and operations; Queues operations; and Realtime SFU egress. The panel shows month-to-date usage against the Workers Paid allowances, with projected overage.
   - Without the token, the panel shows Officebox's own counters (messages, file bytes, D1 size, huddle minutes, share minutes) and links to Cloudflare billing.
+  - **Assistant section** (M9, Assistant §10.2): requests, voice minutes, call-notes minutes and **estimated cost** by model role and by surface, with aggregates per member and never content. Because gateway logging is off for assistant traffic, cost is estimated from the token and audio-second counts in `assistant_interactions` with a price table per model. Background work (summaries, extraction, indexing, nudge classification) is counted here even though it doesn't count against member caps. Once an owner sets `assistant_monthly_budget`, owners and admins get warn-only notices at 50, 80 and 100 %; the assistant keeps working (whether to allow a hard stop is open, Assistant §19).
 - **Billing alerts:** owners are prompted to set Cloudflare billing notifications, because Cloudflare has no hard spending cap.
 - **Telemetry:** off by default. When enabled, a weekly anonymous report sends Officebox:
   - a random installation ID
@@ -1618,8 +1708,8 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - **First-run setup:** protected by a one-time setup token with an atomic claim, and disabled after use (§6.8).
 - **Upgrades:** the running application holds no Cloudflare or GitHub credentials. Release tags are signature-verified against a pinned key before a sync PR is opened (§6.4).
 - **Secrets:** provider keys in the AI Gateway Secrets Store. Email, Realtime and TURN credentials as Worker secrets. No provider keys in D1 or browser code.
-- **AI:** retrieval is permission-filtered, retrieved content is treated as untrusted input (prompt injection), tool calls are permission-checked server-side, and mutating actions require confirmation.
-- **Audit:** administrative and AI-sensitive actions are written to `audit_log`.
+- **AI:** retrieval is permission-filtered, retrieved content is treated as untrusted input (prompt injection), tool calls are permission-checked server-side, and mutating actions require confirmation. For the assistant (§5.3–§5.10): the assistant is a system actor, never a principal; recalled memory is untrusted data too; workspace content, file text, transcripts and long pasted text taint a conversation for good, so memory written from it is only pending (Assistant §4.2); model-proposed tool arguments are Zod-validated; confirmation cards are rendered from validated arguments, never model text; shared replies are built without the asker's memory or private sources; output is sanitised restricted Markdown; and prompts, replies and transcripts never reach Worker logs or, with a gateway configured, AI Gateway logs.
+- **Audit:** administrative and destructive actions are written to `audit_log`. For the assistant, only confirmed writes and its admin and destructive events go there; every invocation's metadata goes to `assistant_interactions` (§5.4).
 
 ### 8.3 Files
 
@@ -1630,7 +1720,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - Only allow-listed types are served inline: PNG, JPEG, GIF, WebP, PDF, MP4, WebM, MP3 and OGG.
   - Everything else, including HTML and SVG, is sent with `Content-Disposition: attachment`.
   - Every file response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
-- **Previews:** images and PDFs render in the browser, with PDFs in a sandboxed frame. Whether Chrome's built-in PDF viewer renders under `Content-Security-Policy: sandbox` must be verified in the M0 foundation spike; if not, PDFs are served with a narrower CSP or rendered with a JS viewer. Office documents are not converted server-side in the first release.
+- **Previews:** images and PDFs render in the browser, with PDFs in a sandboxed frame. Whether Chrome's built-in PDF viewer renders under `Content-Security-Policy: sandbox` must be verified in the M0 foundation spike; if not, PDFs are served with a narrower CSP or rendered with a JS viewer. Office documents are not converted server-side for preview. From M9a their text is extracted with Workers AI `toMarkdown` for search and the assistant only, while the assistant is enabled (§5.2).
 - **Malware scanning** is out of scope (PRD §14), and the documentation says so.
 - **Avatars** accept PNG, JPEG or WebP only, and are cropped on the client (Identity §4.7).
 - **Three file kinds:** chat attachments belong to their message and are deleted with it; images and file cards pasted into a document belong to the document and are deleted with it; drive files live in folders and are versioned. "Save to folder" creates an independent drive file from a message-owned one (Documents §6).
@@ -1639,6 +1729,8 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 
 - **WebSockets:** cookie or one-time ticket, `Origin` check, role stored in the attachment, and revocation (§3.1, §3.5).
 - **Huddles:** track subscriptions are confined to their huddle, and the SFU secret stays in the Worker (§3.6).
+- **Call notes and captions** (M9c): nobody joining a call with notes on publishes audio, or is transcribed, before acknowledging the notice (`notes_ack_required` / `ackNotes`); everyone sees the notes banner and the "Captions on" indicator because audio then goes to the model provider; the notetaker has no tools, so words spoken in a call never run one (§3.6).
+- **Assistant socket:** `/ws/assistant` reaches only the authenticated member's own Assistant DO; disabling closes it with `4401` and losing assistant access with `4403` (§3.5, §5.5).
 - **Offline data:**
   - On sign-out, the client deletes the workspace's IndexedDB stores, Cache Storage entries and service-worker caches.
   - A socket closed with code `4401` triggers the same wipe.
@@ -1658,7 +1750,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Hibernation test: idle channel for >5 minutes; client remains connected; sending a message wakes the DO and delivers to all clients.
 - Yjs sync test: two clients edit the same document concurrently; both converge; a stock Yjs client can connect.
 - Persistence test: restart/evict DO; document state survives via snapshot + update replay.
-- Permission test: viewer cannot write Yjs updates. (AI retrieval permission tests move to Phase 3.)
+- Permission test: viewer cannot write Yjs updates. (AI retrieval permission tests arrive with M9; the assistant's acceptance criteria, Assistant §16, run against the deterministic `ModelProvider` fake, §5.10.)
 - Setup test: a fresh deployment refuses setup without the token. Concurrent setup requests create exactly one owner. `/setup` returns 404 afterwards. Both the secret and generated-token modes are tested.
 - Message durability test: with the projection queue blocked or D1 writes failing, messages are still acknowledged, ordered and replayable from the DO. After recovery, D1 converges with no duplicates or loss. Duplicate `clientId` sends create one message.
 - Edit/delete test: edits and deletions reach connected clients, reconnect replay and D1. A deleted message's content is absent from DO events, the D1 copy and search.
@@ -1767,6 +1859,13 @@ The SFU client matches the documented Realtime API. Two implementation notes:
 - Return typed results for expected denials rather than throwing across Durable Object RPC, which logs them as uncaught exceptions.
 - Simulcast negotiation and TURN still need a run against a real Realtime app.
 
+**New in v1.6** (Assistant §19, technical questions; the product questions stay in the spec):
+- **Voice spike (gates M9c and M9d):** on production Cloudflare, confirm that the Realtime SFU's WebSocket audio adapter (beta) can deliver each participant's audio track to a Durable Object and stream audio back; which Workers AI speech-to-text model supports streaming; the live-voice latency target (under 1.5 s from end of speech to first audio, a spike result, not a CI test); and the memory, CPU and wall time of transcribing 25 tracks in one HuddleRoom versus a separate per-call transcriber DO. If the SFU path fails, live voice falls back to a direct WebSocket audio stream to the Assistant DO (§3.6, §5.11).
+- **AI Gateway controls (verify in M9a):** whether `cf-aig-collect-log` and `cf-aig-skip-cache` can be set per request and a per-request "no log" is honoured; whether the Workers AI binding accepts equivalent gateway options; which providers AI Gateway supports for speech-to-text, text-to-speech and vision (roles without support stay on Workers AI) (§5.10).
+- **Video files:** Workers can't run ffmpeg. Options are Cloudflare Stream's audio extraction (a new dependency and cost), transcribing only containers that speech-to-text accepts directly, or deferring video. Until decided, video is unsupported and indexed by name and metadata only (§5.2).
+- **Recall re-check cost:** re-checking every cited source on every recall may be slow for long histories. Measure in M9a and, if needed, cache access decisions per request (§5.6).
+- **`toMarkdown` formats and limits:** confirm in M9a which of PDF, DOCX, XLSX, PPTX, text, Markdown and CSV Workers AI `toMarkdown` supports, and its limits; any format it doesn't support is treated as unsupported (§5.2).
+
 **Still to confirm by measurement, not decision:** a Phase 1 load test should confirm or adjust these numeric defaults:
 - compaction thresholds
 - outbox batching
@@ -1802,6 +1901,8 @@ The SFU client matches the documented Realtime API. Two implementation notes:
 | Vectorize | topK up to 50 with values or metadata, 100 without. 10 metadata indexes per index. 10 KiB metadata per vector. Filter operators `$eq $ne $in $nin $lt $lte $gt $gte`. Filter JSON under 2,048 bytes. |
 | Workers TCP sockets | Outbound port 25 blocked. STARTTLS supported. |
 
+**Not yet checked, for the assistant (M9; Assistant §19, §10 here).** These are assumptions in §3.6 and §5 until checked against documentation and production: the Realtime SFU WebSocket audio adapter (described as beta) delivering per-participant audio to a Durable Object and back; a streaming Workers AI speech-to-text model; per-request AI Gateway log and cache controls (`cf-aig-collect-log`, `cf-aig-skip-cache`) and their equivalent on the Workers AI binding; AI Gateway provider support for speech-to-text, text-to-speech and vision; and the formats and limits of Workers AI `toMarkdown`. Results are recorded here when checked.
+
 ## Appendix B — Cost model (25-person team, before load testing)
 
 **Assumptions (per month):**
@@ -1828,6 +1929,7 @@ The SFU client matches the documented Realtime API. Two implementation notes:
 | R2 storage | 10–50 GB typical | *(confirm current free tier and price)* | Depends entirely on files |
 | Queues operations | ~150,000 | *(confirm current allowance)* | About 3 operations per message |
 | Realtime SFU egress | audio ~1 GB, screen sharing ~5 GB, video varies | 1,000 GB | Then $0.05/GB |
+| Assistant (M9): Workers AI or BYOK model usage, speech-to-text and text-to-speech minutes, Vectorize, Assistant DO duration, SFU audio to DOs | Not yet estimated | — | Measured in the voice spike and M9a, then added here. Each installation's estimate appears in the usage panel's assistant section (§7.9), capped by `assistant_daily_caps` and `assistant_call_notes_monthly_minutes`. |
 
 **Not yet modelled (v1.4):**
 - ReminderScheduler alarms: low thousands of triggers per 48 hours at 100 members
@@ -1837,4 +1939,4 @@ The SFU client matches the documented Realtime API. Two implementation notes:
 
 All are expected to be small next to chat traffic. The load test should include them.
 
-**Conclusion:** a 25-person team should fit within the Workers Paid allowances. Even at four times these figures, Durable Object request overage would be under $1 a month. These are estimates. The Phase 1 load test (§10) replaces them with measurements, and the usage panel (§7.9) shows each installation's real figures.
+**Conclusion:** a 25-person team should fit within the Workers Paid allowances. This excludes the assistant (M9), which is off by default and not yet estimated (above). Even at four times these figures, Durable Object request overage would be under $1 a month. These are estimates. The Phase 1 load test (§10) replaces them with measurements, and the usage panel (§7.9) shows each installation's real figures.
