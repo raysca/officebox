@@ -1,7 +1,9 @@
 {
-  // Playwright runs in Node; page code is typed through Playwright's own types.
+  // Playwright runs in Node. The DOM libs type the callbacks passed to page.evaluate(), which run in
+  // the browser.
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
+    "lib": ["es2022", "dom", "dom.iterable"],
     "types": ["node"]
   },
   "include": ["tests", "playwright.config.ts"]

@@ -2,7 +2,7 @@
 
 A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar, documents and files in one deployment. It runs in your own Cloudflare account, is open source under AGPL-3.0, and has no per-seat fees.
 
-> **Status:** early development (milestone M0, Foundation). The deployed app is a placeholder page and a `/health` endpoint. See [`PLAN.md`](PLAN.md) for the roadmap.
+> **Status:** early development (milestone M0, Foundation). The deployed app is the application shell (navigation, themes, empty areas) and a `/health` endpoint; there's no sign-in yet. See [`PLAN.md`](PLAN.md) for the roadmap.
 
 ## Deploy
 
@@ -38,6 +38,24 @@ npm run dev                      # Worker on :8787, web app with hot reload on h
 | `npm test` | Unit tests (shared, web) and Worker integration tests in the Workers runtime |
 | `npm run e2e` | Builds, then runs Playwright against `wrangler dev` |
 | `npm run deploy` | Preflight, remote D1 migrations, deploy |
+
+## Web app
+
+`apps/web` is a React 19 single-page app built with Vite and served through Workers Assets.
+
+| Path | Contents |
+|---|---|
+| `src/app/router.tsx` | Routes, declared in code with TanStack Router (no route generator). Features add theirs under the root route. |
+| `src/app/layout` | The shell: skip link, header, sidebar (a modal drawer below the `md` breakpoint), main content, footer |
+| `src/app/messages.ts` | Interface text, kept in one place for translation later |
+| `src/index.css` | Tailwind CSS and the design tokens (colours, spacing, radius, typography) for the light and dark themes |
+| `src/lib/ui` | Small accessible primitives: Button, IconButton, Link, VisuallyHidden, EmptyState, Dialog, Toaster |
+| `src/lib/api` | Typed `fetch` wrapper returning `Result`s, TanStack Query defaults and `useHealth()` |
+
+- **Styling:** Tailwind utilities on the semantic tokens only (`bg-surface`, `text-muted`, `border-border-strong`, …); the default palette is removed. Both themes meet WCAG AA contrast, checked by `src/app/tokens.test.ts`.
+- **Theme:** follows the system by default; the header's Theme control stores Light or Dark on the device (`localStorage`, key `officebox.theme`). `public/theme-init.js` applies it before first paint.
+- **API calls:** use `apiRequest(path, { schema })` and `unwrap()` inside query functions. Writes get the `X-Officebox-Request: 1` header automatically. Queries retry only network errors, timeouts and 5xx; mutation failures show a toast unless `meta.errorToast` is `false`.
+- **Accessibility:** focus moves to the page's `h1` after each navigation, every page sets its document title through `<Page title>`, and Playwright runs axe (WCAG 2.2 AA) on every shell route in both themes.
 
 ## Repository layout
 
