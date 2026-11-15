@@ -820,7 +820,7 @@ CREATE VIRTUAL TABLE search_index USING fts5(
    - `ob_refresh`: a 30-day rotating refresh token, scoped to `/auth/refresh` and stored hashed in `sessions`.
 
    JavaScript can't read either token, and neither ever appears in a URL.
-2. The client opens WebSockets to `/ws/hub`, `/ws/channels/:id`, `/ws/docs/:id` or `/ws/calls/:id` (after `POST /calls/:id/join`, §3.6). Browsers send same-origin cookies with the upgrade request.
+2. The client opens WebSockets to `/ws/hub`, `/ws/channels/:id`, `/ws/docs/:id`, `/ws/calls/:id` (after `POST /calls/:id/join`, §3.6) or, from M9, `/ws/assistant` (always the member's own Assistant DO, §5.5). Browsers send same-origin cookies with the upgrade request.
 3. The Worker validates the cookie and checks the `Origin` header against the installation's origin, which blocks cross-site WebSocket hijacking. It then resolves the user's role for the target and forwards the request to the Durable Object.
 4. The DO accepts the socket with `ctx.acceptWebSocket(server)` and stores the user ID, session ID, role and connection ID with `serializeAttachment`.
 5. Sockets deliberately outlive the 15-minute token. Revocation closes them (§3.5), not token expiry. The client refreshes the access cookie in the background so reconnects succeed.
@@ -873,6 +873,9 @@ Limits: body up to 40 KB, which stays far below the 8 MB DO row limit; up to 20 
 - **Mentions of non-members:** in a public channel they notify; in a private channel the composer offers to add the person instead.
 - **Rate limits** follow Platform §8: 10 messages per 10 s per conversation, `@channel` / `@here` once per 5 minutes, and in-call chat 20 per 10 s per call, all counted in the DO.
 - **Size:** the full message state sent to the queue stays under 110 KB (100 KB format cap, 50 distinct reactions, 3 previews), inside the 128 KB queue message limit.
+- **Assistant (M9, Assistant §6, §8):**
+  - `message.send` recognises the `assistant` mention token (offered only when the assistant and `assistant_mentions` are on and the sender has assistant access) and enqueues to `assistant-mentions`, limited to 5 per 60 seconds per conversation in the DO. It creates no inbox record and no "add to channel?" prompt.
+  - Replies arrive through the assistant-message RPC (§2.2).
 
 **Write path:**
 
@@ -892,6 +895,8 @@ Limits: body up to 40 KB, which stays far below the 8 MB DO row limit; up to 20 
        WHERE excluded.last_event_seq > messages.last_event_seq
    ```
    Because each delivery carries full state guarded by `last_event_seq`, duplicate or out-of-order delivery is harmless. The consumer also advances `channels.projected_seq` and creates or updates inbox records for mentions, DMs and thread replies, using the Notifications §3 dedupe keys (one record per DM conversation; one per mention), then hands them to notification delivery. Message deletion retracts matching records (Notifications §3.1). Failed batches retry, then go to a dead-letter queue. DLQ depth is shown in admin health.
+   - **Sender `assistant`** (M9): the consumer projects assistant messages like user messages, including unread counts (Chat §7, §3.5 below), but creates no mention inbox record for the assistant itself.
+   - **Commitment nudges** (M9, Assistant §8): for each new message, the consumer checks D1 `assistant_optins` and enqueues to `assistant-nudges` **only** when the author has nudges on (and the assistant and `assistant_proactive.nudges` are enabled). Other members' messages are never sent for classification.
 6. **Reconciliation:** a daily Cron Trigger compares `channels.projected_seq` with each recently active DO's latest `seq` and asks lagging DOs to re-enqueue the missing range. An admin action, **Rebuild message index**, replays every channel's full `messages` state into D1.
 
 **Read paths:**
@@ -922,12 +927,13 @@ Presence is never the source of truth for durable data.
 3. **Document socket** to the DocRoom or BoardRoom DO of the item on screen.
 4. **Call socket** to the HuddleRoom while in a call.
 5. **Embedded whiteboard** sockets, only while "edit in place" is active.
+6. **Assistant socket** (`/ws/assistant`, M9) to the member's Assistant DO, only while an assistant surface is on screen (Assistant §3).
 
 Other embeds (messages, events, document previews, link previews) refresh through hub `activity` events and never open sockets. **Hard cap: 6 sockets per tab.** Opening another closes the least recently used embedded-board socket.
 
 Tabs of the same browser elect a leader with `BroadcastChannel` and share one hub socket.
 
-**Unread state** (Chat §7). On connect, the client loads unread and mention counts over REST. Unread counts **top-level messages and "also send to channel" copies** in D1 with `seq > channel_members.last_read_seq`, excluding the member's own messages, system messages, `call_chat` messages, deleted messages and thread replies (tracked per followed thread in `thread_follows`). The D1 copy can lag a few seconds; tests wait for it to converge. Read cursors are written by the client, debounced, and only move forward. The mention count comes from unread inbox records. After that, counts are kept current by hub events.
+**Unread state** (Chat §7). On connect, the client loads unread and mention counts over REST. Unread counts **top-level messages and "also send to channel" copies** in D1 with `seq > channel_members.last_read_seq`, excluding the member's own messages, system messages, `call_chat` messages, deleted messages and thread replies. Assistant messages (`sender_id = 'assistant'`) count like user messages **(default, Chat §7)** (tracked per followed thread in `thread_follows`). The D1 copy can lag a few seconds; tests wait for it to converge. Read cursors are written by the client, debounced, and only move forward. The mention count comes from unread inbox records. After that, counts are kept current by hub events.
 
 **Fan-out.** After applying a batch, the message projection consumer (§3.3, step 5):
 
@@ -950,12 +956,14 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 - The DO updates the socket attachment and sends **`{ type: "access.changed", role }`**. A DocRoom then treats the socket as read-only. When `role` is null (all access lost) the DO closes the socket with **`4403`**. This is the only name for the mechanism (Permissions §8, Platform §12).
 - **Offline edits** that reach the server after access was lost are rejected. The client keeps them locally and offers to export them.
 
-**Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel, document or call context, the Worker calls `closeConnections(userId, reason, scope)`. The room registry kinds are `channel`, `doc` and **`huddle`**, so revocation also closes HuddleRoom sockets and the user's SFU tracks:
+**Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel, document or call context, the Worker calls `closeConnections(userId, reason, scope)`. The room registry kinds are `channel`, `doc`, **`huddle`** and **`assistant`**, so revocation also closes HuddleRoom sockets and the user's SFU tracks, and the member's `/ws/assistant` sockets:
 
 - on the user's UserHub, and
-- on every affected ChatChannel, DocRoom, BoardRoom or HuddleRoom DO.
+- on every affected ChatChannel, DocRoom, BoardRoom or HuddleRoom DO, and the member's Assistant DO.
 
-To find every affected DO, each ChatChannel, DocRoom, BoardRoom and HuddleRoom registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, call contexts) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
+Losing assistant access (removal from `assistant_access`) closes `/ws/assistant` sockets with `4403`; disabling closes them with `4401` (Assistant §10.1, §13).
+
+To find every affected DO, each ChatChannel, DocRoom, BoardRoom, HuddleRoom and Assistant DO registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, call contexts, and the member's own Assistant DO, which is always included for a user-wide revocation or loss of assistant access) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
 
 
 ### 3.6 Calls (huddles): audio, video and screen sharing
@@ -991,7 +999,7 @@ CREATE TABLE huddle_participants (
 );
 ```
 
-Huddle records hold metadata only. No media is ever recorded.
+Huddle records hold metadata only. No media is ever recorded. When call notes are on (M9c), the transcript is stored as text in D1; audio is never stored (below).
 
 **HuddleRoom DO state** is kept in memory and mirrored to SQLite `meta`, so it survives eviction. It holds:
 
@@ -1002,7 +1010,7 @@ Huddle records hold metadata only. No media is ever recorded.
 
 **Join flow:**
 
-1. The client calls `POST /calls` to start a call from a context, then **`POST /calls/:id/join`**. The Worker checks access to the context. When starting, it inserts the `huddles` row; the partial unique index means a concurrent start for the same context joins the existing call. Join returns `409 { currentCallId }` when the person is already in another call, unless `{ leaveCurrent: true }` is sent, and `409 { full }` at 25 participants. `POST /calls/:id/leave` leaves explicitly.
+1. The client calls `POST /calls` to start a call from a context, then **`POST /calls/:id/join`**. The Worker checks access to the context. When starting, it inserts the `huddles` row; the partial unique index means a concurrent start for the same context joins the existing call. Join returns `409 { currentCallId }` when the person is already in another call, unless `{ leaveCurrent: true }` is sent, and `409 { full }` at 25 participants. While call notes are on, it returns `notes_ack_required` unless `{ ackNotes: true }` is sent (below). `POST /calls/:id/leave` leaves explicitly.
 2. The client opens `/ws/calls/:id` to the HuddleRoom DO, authenticated as in §3.1. The upgrade is refused unless the call was joined.
 3. The client creates one `RTCPeerConnection`. Its ICE servers are Cloudflare's STUN plus short-lived TURN credentials minted by the Worker.
 4. **Publishing:** the client adds its local tracks and sends an SDP offer to `POST /calls/:id/tracks/publish`. Using the app secret, the Worker creates the participant's SFU session on first use and adds the tracks. It returns the SDP answer and tells the DO which track names the participant now publishes.
@@ -1058,6 +1066,18 @@ Example: a 30-minute share to 8 viewers at 2 Mbps is about 3.6 GB. The usage pan
   - channel and DM calls post it as `call_chat` thread replies under `started_message_id`, through a typed ChatChannel RPC (no follows, notifications or unread counts)
   - document and event calls write `huddle_messages`, keyed to the **context**, through an **outbox**; it's kept for the life of the context and doesn't cascade from `huddles`.
 - **Raise-hand queue and reactions** are relayed through the HuddleRoom and never stored.
+
+**Call notes and captions** (M9c; [Assistant](specs/assistant.md) §12.3, §12.4 are authoritative for behaviour, §14.2 for `call_notes` and `call_transcript_segments`):
+- **Notetaker.** `POST /calls/:id/notes` (a participant with assistant access, while `assistant_call_notes` is on and the workspace call-notes cap isn't reached) adds a **virtual notetaker** to HuddleRoom state. It is shown in the roster, has no tracks, isn't a `huddle_participants` row and doesn't count toward the 25-person limit. One notetaker per call. `DELETE /calls/:id/notes` stops it (any participant). Start and stop are serialised in the DO in arrival order; a restart is refused for 10 seconds after a stop. Each start and stop posts a system message to in-call chat and is written to `audit_log`.
+- **HuddleRoom state** adds the notes windows (`start`, `stop`, `started_by`, `stopped_by`, by HuddleRoom server time), the open `call_notes` ID and the set of participants with captions on, mirrored to SQLite `meta` like the rest of its state.
+- **Mandatory join notice.** While notes are on, `POST /calls/:id/join` without `ackNotes: true` returns `notes_ack_required` with the notice text (who started notes, who will see them, and whether captions are on), even when the client would skip the pre-join screen. Until the person repeats the join with `ackNotes: true` they are not in the call, publish nothing and are not transcribed. A notes start that races a join applies the same check.
+- **Per-track transcription.** The HuddleRoom receives each participant's audio track from the SFU through the Realtime **WebSocket audio adapter** and transcribes each track separately with streaming speech-to-text through `ModelProvider` (§5.10), so speakers are attributed by track. Audio is transcribed only while a window is open by HuddleRoom time; audio in flight at a stop is dropped. Audio is never stored. **This path is gated by the voice spike** (§10): whether the adapter can deliver 25 tracks to one DO, and whether one HuddleRoom has the memory, CPU and wall time for it or a separate per-call transcriber DO is needed.
+- **Captions.** `POST` / `DELETE /calls/:id/captions` turns captions on or off for the caller only (when `call_captions` is on). They use the same per-track pipeline and store nothing. While anyone has captions on, the DO broadcasts a "Captions on" indicator to every participant.
+- **Segments and durability.** Transcript segments are written to D1 `call_transcript_segments` in batches through the outbox helper (§3.3). The HuddleRoom holds a segment only until its D1 write succeeds and keeps nothing after finalising, so **D1 is the only lasting copy** and retention and cascades act on D1 and vectors alone. After eviction or a redeploy mid-call, the DO reconnects transcription on wake and records a transcription gap in `call_notes.gaps`.
+- **HuddleRoom timers** (alarm multiplexer): `notes_idle` stops notes when no human participants remain; `notes_finalize` writes the notes (summary, decisions, action items) after the call ends or after a crash, retrying the model 3 times with backoff before posting the "transcript available" fallback, and discarding the result if the context was deleted meanwhile.
+- **Output.** Channel and DM calls get a `call_notes` message through the assistant-message RPC (§2.2); event calls a "Call notes" section on the event; document calls the document's Activity section. Notes and transcripts are then indexed per §2.4 and §5.2.
+- **Caps and cost.** Call minutes while notes or anyone's captions are on count against `assistant_call_notes_monthly_minutes` (D1 `rate_counters` scope `assistant_call_notes`).
+- **Injection.** The notetaker has no tools; transcripts are untrusted input wherever they are later read (§5.5).
 
 ## 4. Collaborative editing design (Yjs on Durable Objects)
 
