@@ -3,7 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>Officebox</title>
+    <!--
+      Applies the stored theme before first paint. It is an external file, not an inline script,
+      because the Content-Security-Policy allows only 'self' scripts (TDD §8).
+    -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

@@ -28,7 +28,11 @@ export type ErrorCode = z.infer<typeof errorCodeSchema>;
 /** The error carried by a typed result, and the `error` member of an API error body. */
 export const apiErrorSchema = z.object({
   code: errorCodeSchema,
-  /** Human-readable and safe to show; never contains secrets or internal detail. */
+  /**
+   * A human-readable description for logs and developers. It never contains secrets or internal
+   * detail, but clients don't show it to people verbatim: they map `code` to their own translatable
+   * copy, with a generic fallback.
+   */
   message: z.string(),
   /** Field-level problems for `validation_failed`, keyed by a dotted path (`""` for the whole value). */
   fields: z.record(z.string(), z.array(z.string())).optional(),

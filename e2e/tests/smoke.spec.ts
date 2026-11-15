@@ -7,15 +7,18 @@ import {
 } from "@officebox/shared";
 import { expect, test } from "@playwright/test";
 
-test("the placeholder page loads", async ({ page }) => {
+test("the app shell loads", async ({ page }) => {
   await page.goto("/");
-  await expect(page).toHaveTitle("Officebox");
-  await expect(page.getByRole("heading", { level: 1, name: "Officebox" })).toBeVisible();
+  await expect(page).toHaveTitle("Home · Officebox");
+  await expect(page.getByRole("heading", { level: 1, name: "Home" })).toBeVisible();
+  await expect(page.getByRole("banner")).toContainText("Officebox");
 });
 
 test("client-side routes fall back to the web app", async ({ page }) => {
+  // An unknown path is served index.html by the SPA fallback; the router shows its not-found page.
   await page.goto("/some/client/route");
-  await expect(page.getByRole("heading", { level: 1, name: "Officebox" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Page not found" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();
 });
 
 test("/health responds ok, even as a browser navigation", async ({ page, request }) => {
@@ -59,7 +62,7 @@ test("security headers are set on the app and the API, and the page has no CSP v
   // Served by Workers Assets from apps/web/public/_headers; must match the shared source of truth.
   expect(headers["content-security-policy"]).toBe(APP_CONTENT_SECURITY_POLICY);
   for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) expect(headers[name.toLowerCase()]).toBe(value);
-  await expect(page.getByRole("heading", { level: 1, name: "Officebox" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Home" })).toBeVisible();
   expect(await page.evaluate("window.cspViolations")).toEqual([]);
   expect(consoleErrors.filter((text) => /Content Security Policy/i.test(text))).toEqual([]);
 

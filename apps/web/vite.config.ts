@@ -1,4 +1,5 @@
 /// <reference types="vitest/config" />
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -6,7 +7,7 @@ import { defineConfig } from "vite";
 const WORKER_ORIGIN = process.env.WORKER_ORIGIN ?? "http://127.0.0.1:8787";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
     proxy: {
@@ -21,5 +22,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["src/test/setup.ts"],
+    // Let ?raw CSS imports through (tokens.test.ts reads index.css); Vitest empties CSS otherwise.
+    css: { include: [/index\.css/] },
   },
 });

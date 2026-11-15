@@ -1289,6 +1289,8 @@ Merging to the production branch triggers Workers Builds:
 
 If any step fails, the build stops and the previous Worker version stays live.
 
+**Alternative: GitHub Actions** (`.github/workflows/deploy.yml`). A repository can deploy from GitHub Actions instead of Workers Builds, using a Cloudflare API token and account ID stored as `production` environment secrets. The workflow runs after CI passes on the production branch. It deploys the exact commit CI tested, and only if that commit is still the branch tip. It runs `npm run deploy:ci` (`scripts/deploy-ci.mjs`): preflight, then it creates the D1 database by name if it's missing, then the same migrations-then-deploy steps. It skips with a notice until the secrets exist, so it is inert in Deploy-button copies. **Use one path or the other, not both:** two deploy pipelines on the same branch would race. A repository that adds the secrets disconnects Workers Builds (Worker → Settings → Builds).
+
 Migrations run **before** the new code goes live, and can be partly applied if a build fails. So every release follows an **expand/contract** rule: its schema must work with both its own code and the code of every version back to `rollback_safe_to`.
 
 - **Allowed in any release:** new tables, new nullable or defaulted columns, new indexes, and backfills that older code tolerates.
