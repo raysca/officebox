@@ -56,6 +56,8 @@ export class TestObject extends CoreDurableObject {
       maxDrainMs: () => Number(this.getMeta("max_drain_ms") ?? "240000"),
       // No jitter unless a test asks: deterministic retry times keep alarm timing predictable.
       jitter: () => Number(this.getMeta("jitter") ?? "0"),
+      // The production gap unless a test sets `meta.strike_gap_ms`.
+      minStrikeGapMs: () => Number(this.getMeta("strike_gap_ms") ?? "600000"),
     });
     this.onTimer("record", (timer) => this.record(timer));
     this.onTimer("flaky", (timer) => {
@@ -104,6 +106,8 @@ export class TestObject extends CoreDurableObject {
     const delay = Number(this.getMeta("send_delay_ms") ?? "0");
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     if (this.getMeta("outbox_fail") === "1") throw new Error("queue unavailable");
+    // `flip`: every other send fails (a queue alternating between success and failure).
+    if (this.getMeta("flip") === "1" && this.sendCalls % 2 === 0) throw new Error("flapping");
     const failAfter = Number(this.getMeta("outbox_fail_after") ?? "-1");
     if (failAfter >= 0 && this.sendCalls > failAfter) throw new Error("queue went down");
     if (bodies.some((b) => (b as { poison?: boolean }).poison === true)) throw new Error("message rejected");
@@ -249,20 +253,37 @@ export class TestObject extends CoreDurableObject {
     attempts: number;
     next_attempt_at: number;
     strikes: number;
-    strike_seq: number | null;
+    last_strike_at: number | null;
   }> {
     return this.sql
-      .exec<{ body: string; attempts: number; next_attempt_at: number; strikes: number; strike_seq: number | null }>(
-        "SELECT body, attempts, next_attempt_at, strikes, strike_seq FROM core_outbox ORDER BY id",
-      )
+      .exec<{
+        body: string;
+        attempts: number;
+        next_attempt_at: number;
+        strikes: number;
+        last_strike_at: number | null;
+      }>("SELECT body, attempts, next_attempt_at, strikes, last_strike_at FROM core_outbox ORDER BY id")
       .toArray()
       .map((r) => ({
         id: (JSON.parse(r.body) as { id: string }).id,
         attempts: r.attempts,
         next_attempt_at: r.next_attempt_at,
         strikes: r.strikes,
-        strike_seq: r.strike_seq,
+        last_strike_at: r.last_strike_at,
       }));
+  }
+
+  /** Adds `count` rows of about `bytes` each (so few fit in a chunk). One transaction. */
+  addBigRows(prefix: string, count: number, bytes: number): void {
+    this.ctx.storage.transactionSync(() => {
+      for (let i = 0; i < count; i++) {
+        this.outbox.enqueue({
+          type: "test.item",
+          id: `${prefix}${String(i).padStart(3, "0")}`,
+          pad: "x".repeat(bytes),
+        });
+      }
+    });
   }
 
   /** Adds rows whose ids are given; ids starting with "p" are poison. One transaction. */
@@ -301,6 +322,7 @@ export class TestObject extends CoreDurableObject {
   rewind(ms: number): void {
     this.sql.exec("UPDATE core_timers SET due_at = due_at - ?", ms);
     this.sql.exec("UPDATE core_outbox SET next_attempt_at = next_attempt_at - ?", ms);
+    this.sql.exec("UPDATE core_outbox SET last_strike_at = last_strike_at - ? WHERE last_strike_at IS NOT NULL", ms);
   }
 
   /**

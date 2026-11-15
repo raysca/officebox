@@ -11,6 +11,13 @@ import {
 } from "../src/core/do/outbox";
 import type { TestObject } from "./fixtures/test-object";
 
+/**
+ * Measured drains before the first dead-letter when every other send fails, the gap is off and
+ * fresh traffic arrives every drain: none within 120 drains (20 simulated hours), because good rows
+ * are sent by the successful half of the sends long before they collect 10 strikes.
+ */
+const FLIP_DRAINS_TO_FIRST_DEAD: number | null = null;
+
 // The TestObject's outbox sends through a fake queue sender that records batches in its SQLite, and
 // fails while `meta.outbox_fail` is "1".
 const stub = () => env.TEST_OBJECT.getByName(`outbox-${crypto.randomUUID()}`);
@@ -88,7 +95,7 @@ describe("outbox", () => {
     await runDurableObjectAlarm(s);
     let [row] = await s.outboxRows();
     expect(row?.attempts).toBe(1);
-    expect(row?.strikes).toBe(1);
+    expect(row?.strikes).toBe(0); // nothing succeeded after the failure
     expect(row?.next_attempt_at).toBeGreaterThanOrEqual(t0 + 2000);
     expect(row?.next_attempt_at).toBeLessThanOrEqual(t0 + 2000 + 1000); // 2 s (no jitter in tests)
     // The drain timer follows the retry.
@@ -155,13 +162,15 @@ describe("outbox failures", () => {
     const first = await drainAll(s);
     expect((await s.sentBodies()).map((r) => r.id).sort()).toEqual(["g1", "g2"]);
     const sends = [first?.sends ?? 0];
-    // Periodic good traffic: each drain sends one fresh row, then the poison rows fail again.
+    // Periodic good traffic, 10 minutes apart: the poison rows are tested first and the fresh row's
+    // success after them earns each a strike.
     for (let i = 0; i < 20 && (await s.outboxStats()).dead < 4; i++) {
       await s.addRows([`t${i}`]);
       sends.push((await drainAll(s))?.sends ?? 0);
     }
     expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 4 });
-    expect(sends.length).toBe(MAX_OUTBOX_STRIKES);
+    // pz earned a strike in the first drain; p1-p3 failed after the only success there.
+    expect(sends.length).toBe(MAX_OUTBOX_STRIKES + 1);
     expect(Math.max(...sends)).toBeLessThanOrEqual(DEFAULT_MAX_SENDS_PER_DRAIN);
   });
 
@@ -215,7 +224,7 @@ describe("outbox failures", () => {
       for (const id of dueAtStart) expect(after.get(id) ?? 0).toBeGreaterThanOrEqual(start + 1000);
     }
     const stats = await s.outboxStats();
-    expect(stats).toMatchObject({ pending: 150, dead: 0, maxStrikes: 1 });
+    expect(stats).toMatchObject({ pending: 150, dead: 0, maxStrikes: 0 });
     expect(stats.maxAttempts).toBeGreaterThanOrEqual(MAX_OUTBOX_STRIKES);
     expect(Math.max(...sends)).toBeLessThanOrEqual(DEFAULT_MAX_SENDS_PER_DRAIN);
 
@@ -225,21 +234,85 @@ describe("outbox failures", () => {
     expect((await s.sentBodies()).length).toBe(150);
   });
 
-  it("doesn't dead-letter anything when an outage starts part-way through a drain", async () => {
+  it("adds no strikes when the queue goes down right after a success", async () => {
     const s = await manual();
     await s.addItems("m", 300); // three chunks
     // The first send goes through, every later one fails.
     await s.meta("outbox_fail_after", String((await s.outboxStats()).sendCalls + 1));
     for (let i = 0; i < 25; i++) await drainAll(s);
     const stats = await s.outboxStats();
-    expect(stats).toMatchObject({ pending: 200, dead: 0, successSeq: 1 });
-    expect(stats.maxStrikes).toBe(1); // the failures right after the success; none since
+    expect(stats).toMatchObject({ pending: 200, dead: 0, successSeq: 1, maxStrikes: 0 });
     expect(stats.maxAttempts).toBeGreaterThanOrEqual(MAX_OUTBOX_STRIKES);
 
     await s.meta("outbox_fail_after", "-1");
     await drainUntil(s, async () => (await s.outboxStats()).pending === 0, 20);
     expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 0 });
     expect((await s.sentBodies()).length).toBe(300);
+  });
+
+  it("counts a strike for failures followed by a success in the same drain, then none in an outage", async () => {
+    const s = await manual();
+    // x1 and x2 fail on their own; the fresh rows are sent after them in the same drain.
+    await s.meta("fail_ids", "x1,x2");
+    await s.addRows(["x1", "x2"]);
+    await drainAll(s); // nothing else to send: no strike
+    expect((await s.outboxRows()).map((r) => r.strikes)).toEqual([0, 0]);
+    await s.addRows(["f1", "f2", "f3"]);
+    await drainAll(s); // x1, x2 fail first, then f1-f3 succeed: one strike each
+    expect((await s.outboxRows()).map((r) => [r.id, r.strikes])).toEqual([
+      ["x1", 1],
+      ["x2", 1],
+    ]);
+    // Then a long outage, with fresh rows still arriving: no more strikes.
+    await s.meta("outbox_fail", "1");
+    for (let i = 0; i < 20; i++) {
+      await s.addRows([`o${i}`]);
+      await drainAll(s);
+    }
+    const rows = await s.outboxRows();
+    expect(rows.filter((r) => r.id.startsWith("x")).map((r) => r.strikes)).toEqual([1, 1]);
+    expect((await s.outboxStats()).dead).toBe(0);
+  });
+
+  it("doesn't dead-letter good rows when each drain has one success and then fails (big rows)", async () => {
+    const s = await manual();
+    await s.meta("strike_gap_ms", "0"); // even without the gap
+    await s.addBigRows("b", 60, 100_000); // two rows per chunk
+    for (let i = 0; i < 25; i++) {
+      await s.meta("outbox_fail_after", String((await s.outboxStats()).sendCalls + 1));
+      await drainAll(s); // 10 minutes later each time
+    }
+    const stats = await s.outboxStats();
+    expect(stats.dead).toBe(0);
+    expect(stats.maxStrikes).toBe(0);
+    expect(stats.pending + (await s.sentBodies()).length).toBe(60);
+  });
+
+  it("a queue alternating success and failure per send: dead-letters late without the gap, never within 90 minutes with it", async () => {
+    // Big rows (two per chunk), and fresh traffic every drain, so sends keep alternating.
+    const noGap = await manual();
+    await noGap.meta("strike_gap_ms", "0");
+    await noGap.meta("flip", "1");
+    let drains = 0;
+    let firstDead: number | null = null;
+    while (drains < 120 && firstDead === null) {
+      drains += 1;
+      await noGap.addBigRows(`a${drains}-`, 4, 100_000);
+      await drainAll(noGap);
+      if ((await noGap.outboxStats()).dead > 0) firstDead = drains;
+    }
+    expect(firstDead).toBe(FLIP_DRAINS_TO_FIRST_DEAD);
+    if (firstDead !== null) expect(firstDead).toBeGreaterThanOrEqual(MAX_OUTBOX_STRIKES);
+
+    const withGap = await manual();
+    await withGap.meta("flip", "1");
+    for (let minute = 0; minute < 89; minute++) {
+      await withGap.addBigRows(`b${minute}-`, 4, 100_000);
+      await withGap.rewind(60_000); // one simulated minute per step
+      await runDurableObjectAlarm(withGap);
+    }
+    expect((await withGap.outboxStats()).dead).toBe(0);
+    expect((await withGap.outboxStats()).maxStrikes).toBeLessThanOrEqual(9);
   });
 
   it("doesn't dead-letter after an outage beyond 10 attempts, one success, then more failures", async () => {
@@ -254,7 +327,7 @@ describe("outbox failures", () => {
     for (let i = 0; i < 15; i++) await drainAll(s);
     const stats = await s.outboxStats();
     expect(stats.dead).toBe(0);
-    expect(stats.maxStrikes).toBeLessThanOrEqual(2);
+    expect(stats.maxStrikes).toBe(0);
     expect(stats.pending + (await s.sentBodies()).length).toBe(20);
   });
 
@@ -265,7 +338,7 @@ describe("outbox failures", () => {
     await s.addRows(["p-legacy"]);
     // As left by an older release: many attempts, no strike data.
     await runInDurableObject(s, (_i: TestObject, state) =>
-      state.storage.sql.exec("UPDATE core_outbox SET attempts = 15, strikes = 0, strike_seq = NULL"),
+      state.storage.sql.exec("UPDATE core_outbox SET attempts = 15, strikes = 0, last_strike_at = NULL"),
     );
     await s.addRows(["g1"]);
     await drainAll(s);
@@ -273,21 +346,47 @@ describe("outbox failures", () => {
     expect((await s.outboxRows())[0]).toMatchObject({ id: "p-legacy", attempts: 16, strikes: 1 });
   });
 
-  it("dead-letters a lone poison row at 10 strikes with periodic traffic, and not before", async () => {
+  it("never dead-letters a lone poison row with no other traffic", async () => {
     const s = await manual();
+    await s.meta("strike_gap_ms", "0");
     await s.addRows(["p1"]);
-    // Without other traffic it fails over and over but stays at one strike.
-    for (let i = 0; i < 12; i++) await drainAll(s);
-    expect(await s.outboxStats()).toMatchObject({ pending: 1, dead: 0, maxStrikes: 1 });
+    for (let i = 0; i < 30; i++) await drainAll(s);
+    expect(await s.outboxStats()).toMatchObject({ pending: 1, dead: 0, maxStrikes: 0 });
+  });
 
-    for (let i = 1; i < MAX_OUTBOX_STRIKES; i++) {
+  it("tests a lone poison row alongside sparse traffic even when it isn't due, and dead-letters it at 10 strikes", async () => {
+    const s = await manual();
+    await s.meta("strike_gap_ms", "0");
+    await s.addRows(["p1"]);
+    for (let i = 0; i < 8; i++) await drainAll(s); // long backoff now
+    expect((await s.outboxRows())[0]).toMatchObject({ id: "p1", strikes: 0 });
+    // One fresh row per drain, while p1 is NOT due: it rides along and earns a strike each time.
+    for (let i = 1; i <= MAX_OUTBOX_STRIKES; i++) {
       await s.addRows([`g${i}`]);
-      await drainAll(s);
-      if (i < MAX_OUTBOX_STRIKES - 1) {
-        expect((await s.outboxRows())[0]).toMatchObject({ id: "p1", strikes: i + 1 });
+      const before = Date.now();
+      await drain(s); // only up to the fresh row's drain timer
+      const p1 = (await s.outboxRows()).find((r) => r.id === "p1");
+      if (i < MAX_OUTBOX_STRIKES) {
+        expect(p1?.strikes).toBe(i);
+        expect(p1?.next_attempt_at).toBeGreaterThan(before); // it wasn't due; it rode along
       }
     }
     expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 1 });
+  });
+
+  it("respects the gap between strikes for a riding-along poison row", async () => {
+    const s = await manual(); // production gap: 10 minutes
+    await s.addRows(["p1"]);
+    await drainAll(s);
+    for (let i = 1; i <= 12; i++) {
+      await s.addRows([`g${i}`]);
+      await drain(s); // seconds apart, not minutes
+    }
+    expect((await s.outboxRows())[0]).toMatchObject({ id: "p1", strikes: 1 });
+    await s.rewind(10 * 60_000);
+    await s.addRows(["g-later"]);
+    await drain(s);
+    expect((await s.outboxRows())[0]).toMatchObject({ id: "p1", strikes: 2 });
   });
 
   it("doesn't hold back new rows behind a failing row", async () => {
@@ -300,19 +399,22 @@ describe("outbox failures", () => {
     expect(g1?.next_attempt_at).toBeLessThanOrEqual(before + 1000);
   });
 
-  it("a flapping queue dead-letters a good row only after 10 strikes, each separated by a success", async () => {
+  it("a flapping queue dead-letters a good row only after 10 strikes, each with a later success", async () => {
     const s = await manual();
     // g1 fails whenever it is sent, as if the queue flapped each time.
     await s.meta("fail_ids", "g1");
     await s.addRows(["g1"]);
-    for (let i = 0; i < 5; i++) await drainAll(s); // no success in between: one strike
-    expect((await s.outboxRows())[0]).toMatchObject({ id: "g1", strikes: 1 });
+    for (let i = 0; i < 5; i++) await drainAll(s); // no success after the failures: no strike
+    expect((await s.outboxRows())[0]).toMatchObject({ id: "g1", strikes: 0 });
 
-    for (let i = 1; i < MAX_OUTBOX_STRIKES; i++) {
-      await s.addRows([`h${i}`]); // a success...
-      await drainAll(s); // ...then g1 fails again: one more strike
-      await drainAll(s); // a failure with no success since: no strike
-      if (i < MAX_OUTBOX_STRIKES - 1) expect((await s.outboxRows())[0]).toMatchObject({ id: "g1", strikes: i + 1 });
+    for (let i = 1; i <= MAX_OUTBOX_STRIKES; i++) {
+      await s.addRows([`h${i}`]);
+      await drainAll(s); // g1 fails, then h succeeds after it: one strike (10 minutes apart)
+      if (i < MAX_OUTBOX_STRIKES) {
+        expect((await s.outboxRows())[0]).toMatchObject({ id: "g1", strikes: i });
+        await drainAll(s); // a failure with no success after it: no strike
+        expect((await s.outboxRows())[0]).toMatchObject({ id: "g1", strikes: i });
+      }
     }
     expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 1 });
   });

@@ -17,27 +17,38 @@ import { backoffMs } from "./backoff";
  *
  * **Failures are per row.** Every row that was in a failed send during a drain, and wasn't sent later
  * in it, counts one attempt (`attempts + 1`) and backs off on its own: `next_attempt_at = MAX(existing,
- * now + backoff(attempts))` with up to 20 % jitter (2 s, 4 s, … capped at 5 minutes). Drains take due
- * rows in order of `attempts, id`, so rows that have never failed go first and good rows aren't stuck
- * behind a long run of bad ones. A successful send deletes the row. `attempts` only drives backoff
- * and ordering; it never decides dead-lettering. Only a failure **on its own** (after bisection) can
- * add a strike, so a good row that keeps sharing batches with bad ones is never blamed for them.
+ * now + backoff(attempts))` with up to 20 % jitter (2 s, 4 s, … capped at 5 minutes). A successful send
+ * deletes the row. `attempts` drives backoff and ordering only; it never decides dead-lettering.
  *
- * **Dead-letter rule: strikes separated by proven success.** The stream keeps a success sequence,
- * `outbox_success_seq:<stream>`, incremented the moment each successful send resolves (so it is
- * ordered against failures in the same drain). When a row fails on its own:
- * - with no strike yet (`strike_seq` NULL): `strikes = 1`, `strike_seq` = the current sequence;
- * - if a send has succeeded since its last strike (sequence > `strike_seq`): `strikes + 1`, and
- *   `strike_seq` moves to the current sequence;
- * - otherwise (no success in between) nothing changes.
- * A row is moved to `core_outbox_dead` when it reaches 10 strikes **(default)**. So:
- * - a queue outage of any length, including one that starts part-way through a drain, adds at most
- *   one strike per row, because nothing succeeds in between;
- * - a lone bad row is dead-lettered only after ten failures each separated by another row being sent
- *   (real traffic); with no other traffic it stays, retrying with backoff;
- * - a queue that flaps adds one strike per proven success between failures, so a good row is only
- *   dead-lettered after ten failures each separated by a success. That needs a long, unlucky run, and
- *   is accepted. Rows written before strikes existed start at 0 strikes.
+ * **Order within a drain.** Due rows are taken by `attempts, id` (at most `DRAIN_ROWS`). A drain then
+ * sends in two phases: first the rows that have failed before (the ride-along below, then the due
+ * ones), then the fresh rows (attempts 0). The first phase is capped at half the send budget when
+ * there are fresh rows, so fresh rows always get the other half and are never starved; their
+ * successes come after the earlier failures and serve as proof that the queue was healthy. Failing
+ * chunks are bisected right half first. Under a sustained backlog of more than `DRAIN_ROWS` fresh
+ * rows per drain, rows that have failed before (apart from the ride-along) wait until it clears.
+ *
+ * **Ride-along.** When a drain has fresh rows, up to `RIDE_ALONG_ROWS` (4) rows that have failed
+ * before are tested too, even if they aren't due yet: those with the most strikes, then the most
+ * attempts. So a lone bad row is tested whenever real traffic flows, and judged against it. They
+ * count against the same 32-send budget (at most about 7 sends for 4 rows).
+ *
+ * **Dead-letter rule: strikes need proof of health after the failure **(default)**.** The stream
+ * keeps a success sequence, `outbox_success_seq:<stream>`, incremented the moment each successful
+ * send resolves. When a row fails on its own (after bisection), the sequence at that moment is
+ * noted; at the end of the drain the row gains a strike only if
+ * - a later send in the **same drain** succeeded (end sequence > the sequence at the failure), and
+ * - its previous strike, if any, was at least `minStrikeGapMs` ago (10 minutes **(default)**).
+ * Failures inside multi-row batches never add strikes. A row is moved to `core_outbox_dead` at 10
+ * strikes **(default)**. So:
+ * - a queue outage adds no strikes, and neither does a queue that goes down after a success: nothing
+ *   succeeds after the failures;
+ * - a queue that alternates between success and failure on almost every send needs more than 90
+ *   minutes of that (10 strikes, 10 minutes apart) before it can dead-letter a good row; accepted;
+ * - a lone bad row is dead-lettered once ten drains, at least 10 minutes apart, have had other rows
+ *   sent after it (it rides along with fresh traffic); with no other traffic it is never
+ *   dead-lettered and keeps retrying with backoff;
+ * - rows written before strikes existed start at 0 strikes.
  * Dead rows are logged at error level and counted in `stats()`. Nothing reads or re-drives them
  * until M7.
  *
@@ -53,8 +64,8 @@ import { backoffMs } from "./backoff";
  * **One drain at a time.** A drain that starts while another is still running does nothing and asks
  * to be run again shortly.
  *
- * **Guarantees.** Delivery is at least once. Rows that never failed go out in row-ID order; after
- * failures, newer rows overtake older ones being retried. Consumers must be idempotent and order-tolerant (TDD §3.3:
+ * **Guarantees.** Delivery is at least once, in no guaranteed order: rows that failed before are sent
+ * ahead of fresh ones in a drain, failing chunks are bisected, and rows retry on their own backoff. Consumers must be idempotent and order-tolerant (TDD §3.3:
  * full state plus a version guard).
  *
  * `meta` keys used: `outbox_success_seq:<stream>` (successful sends so far), `outbox_last_success_at:
@@ -69,8 +80,12 @@ export const MAX_OUTBOX_BATCH_BYTES = 240_000;
 /** Queues limit 100 messages per `sendBatch`. This also keeps the `DELETE … IN (…)` under 100 parameters. */
 export const MAX_OUTBOX_BATCH_MESSAGES = 100;
 export const DEFAULT_OUTBOX_DELAY_MS = 250;
-/** Strikes (failures separated by a successful send on the stream) before a row is dead-lettered. */
+/** Strikes (failures followed by a success in the same drain) before a row is dead-lettered. */
 export const MAX_OUTBOX_STRIKES = 10;
+/** Least time between two strikes on the same row. */
+export const DEFAULT_MIN_STRIKE_GAP_MS = 10 * 60_000;
+/** Rows that have failed before, added to a drain with fresh rows even if not yet due. */
+export const RIDE_ALONG_ROWS = 4;
 /** Sends per drain, including bisection. */
 export const DEFAULT_MAX_SENDS_PER_DRAIN = 32;
 /** Wall-clock limit per drain; under the 5-minute outbox timer timeout. */
@@ -105,6 +120,8 @@ export interface OutboxOptions {
   maxDrainMs?: Tunable;
   /** Random extra fraction added to each backoff; defaults to `DEFAULT_JITTER` (tests use 0). */
   jitter?: Tunable;
+  /** Least time between strikes on one row; defaults to `DEFAULT_MIN_STRIKE_GAP_MS`. */
+  minStrikeGapMs?: Tunable;
 }
 
 /** Sends JSON bodies to a queue with `sendBatch`. */
@@ -124,7 +141,7 @@ type Row = {
   bytes: number;
   attempts: number;
   strikes: number;
-  strike_seq: number | null;
+  last_strike_at: number | null;
 };
 
 export interface OutboxStats {
@@ -180,6 +197,7 @@ export class Outbox {
   private readonly maxSendsPerDrain: Tunable;
   private readonly maxDrainMs: Tunable;
   private readonly jitter: Tunable;
+  private readonly minStrikeGapMs: Tunable;
   private draining = false;
   /** The last drain's report, for tests and diagnostics. */
   lastDrain: DrainReport | null = null;
@@ -197,6 +215,7 @@ export class Outbox {
     this.maxSendsPerDrain = options.maxSendsPerDrain ?? DEFAULT_MAX_SENDS_PER_DRAIN;
     this.maxDrainMs = options.maxDrainMs ?? DEFAULT_MAX_DRAIN_MS;
     this.jitter = options.jitter ?? DEFAULT_JITTER;
+    this.minStrikeGapMs = options.minStrikeGapMs ?? DEFAULT_MIN_STRIKE_GAP_MS;
   }
 
   /** Adds a message. Synchronous: call it inside the transaction that makes the state change. */
@@ -295,13 +314,27 @@ export class Outbox {
     const startedAt = Date.now();
     const rows = this.sql
       .exec<Row>(
-        `SELECT id, body, bytes, attempts, strikes, strike_seq FROM core_outbox
+        `SELECT id, body, bytes, attempts, strikes, last_strike_at FROM core_outbox
          WHERE stream = ? AND next_attempt_at <= ? ORDER BY attempts, id LIMIT ?`,
         this.stream,
         startedAt,
         DRAIN_ROWS,
       )
       .toArray();
+    let rideAlong: Row[] = [];
+    if (rows.some((row) => row.attempts === 0)) {
+      // Ride-along: test a few rows that failed before against this fresh traffic.
+      rideAlong = this.sql
+        .exec<Row>(
+          `SELECT id, body, bytes, attempts, strikes, last_strike_at FROM core_outbox
+             WHERE stream = ? AND next_attempt_at > ? AND (strikes > 0 OR attempts > 0)
+             ORDER BY strikes DESC, attempts DESC, id LIMIT ?`,
+          this.stream,
+          startedAt,
+          RIDE_ALONG_ROWS,
+        )
+        .toArray();
+    }
 
     const state: DrainState = {
       sends: 0,
@@ -309,17 +342,32 @@ export class Outbox {
       deadline: startedAt + read(this.maxDrainMs),
       stopped: false,
       sentRows: 0,
-      unsent: new Map(rows.map((row) => [row.id, row])),
+      unsent: new Map([...rideAlong, ...rows].map((row) => [row.id, row])),
       seq: Number(this.getMeta(this.successSeqKey) ?? "0"),
       failedAlone: new Map(),
       tried: new Set(),
     };
-    for (const chunk of chunkRows(rows)) {
+    // Phase 1: rows that failed before (ride-along, then due ones), so any success in phase 2 comes
+    // after their failures. Capped at half the budget when there are fresh rows, so those always get
+    // the other half. Phase 2: the fresh rows.
+    const fresh = rows.filter((row) => row.attempts === 0);
+    const suspects = [...rideAlong, ...rows.filter((row) => row.attempts > 0)];
+    const budget = state.maxSends;
+    state.maxSends = fresh.length > 0 ? Math.floor(budget / 2) : budget;
+    for (const chunk of chunkRows(suspects)) {
+      if (state.stopped) break;
+      await this.sendChunk(chunk, state);
+    }
+    state.maxSends = budget;
+    state.stopped = Date.now() >= state.deadline;
+    for (const chunk of chunkRows(fresh)) {
       if (state.stopped) break;
       await this.sendChunk(chunk, state);
     }
 
     const now = Date.now();
+    const endSeq = state.seq;
+    const minGap = read(this.minStrikeGapMs);
     let deadRows = 0;
     let failedRows = 0;
     if (state.sentRows > 0) this.sql.exec("DELETE FROM meta WHERE key = ?", this.failedDrainsKey);
@@ -340,15 +388,16 @@ export class Outbox {
         );
         continue;
       }
-      const seqAtFailure = state.failedAlone.get(id) ?? state.seq;
+      const seqAtFailure = state.failedAlone.get(id) ?? endSeq;
       let strikes = row.strikes;
-      let strikeSeq = row.strike_seq;
-      if (strikeSeq === null) {
-        strikes = 1;
-        strikeSeq = seqAtFailure;
-      } else if (seqAtFailure > strikeSeq) {
+      let lastStrikeAt = row.last_strike_at;
+      // A strike needs a later success in this drain (proof the queue was healthy after the
+      // failure), and a gap since the row's previous strike.
+      const provenHealthy = endSeq > seqAtFailure;
+      const gapPassed = lastStrikeAt === null || now - lastStrikeAt >= minGap;
+      if (provenHealthy && gapPassed) {
         strikes += 1;
-        strikeSeq = seqAtFailure;
+        lastStrikeAt = now;
       }
       if (strikes >= MAX_OUTBOX_STRIKES) {
         this.sql.exec(
@@ -369,11 +418,11 @@ export class Outbox {
         continue;
       }
       this.sql.exec(
-        `UPDATE core_outbox SET attempts = ?, strikes = ?, strike_seq = ?, next_attempt_at = MAX(next_attempt_at, ?)
+        `UPDATE core_outbox SET attempts = ?, strikes = ?, last_strike_at = ?, next_attempt_at = MAX(next_attempt_at, ?)
          WHERE id = ?`,
         attempts,
         strikes,
-        strikeSeq,
+        lastStrikeAt,
         now + this.jittered(backoffMs(attempts)),
         row.id,
       );
@@ -436,8 +485,9 @@ export class Outbox {
       return;
     }
     const middle = Math.ceil(rows.length / 2);
-    await this.sendChunk(rows.slice(0, middle), state);
+    // Right half first, so rows that failed before (at the end) are tested before fresh ones.
     await this.sendChunk(rows.slice(middle), state);
+    await this.sendChunk(rows.slice(0, middle), state);
   }
 
   /** Adds random jitter (up to the configured fraction) to a backoff. */

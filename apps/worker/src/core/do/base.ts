@@ -163,6 +163,9 @@ const CORE_MIGRATIONS: readonly DoMigration[] = [
     description: "outbox strikes",
     up(sql) {
       // Expand only, and safe to re-run: columns older code ignores, added only if missing.
+      // Before merging, versions of this migration on the M0b branch added other columns
+      // (`first_failed_at`, then `strike_seq`). Nothing from that branch was deployed (deploys run
+      // only from main); a local development object already at core version 3 should be reset.
       const columns = new Set(
         sql
           .exec<{ name: string }>("SELECT name FROM pragma_table_info('core_outbox')")
@@ -170,7 +173,7 @@ const CORE_MIGRATIONS: readonly DoMigration[] = [
           .map((c) => c.name),
       );
       if (!columns.has("strikes")) sql.exec("ALTER TABLE core_outbox ADD COLUMN strikes INTEGER NOT NULL DEFAULT 0");
-      if (!columns.has("strike_seq")) sql.exec("ALTER TABLE core_outbox ADD COLUMN strike_seq INTEGER");
+      if (!columns.has("last_strike_at")) sql.exec("ALTER TABLE core_outbox ADD COLUMN last_strike_at INTEGER");
     },
   },
 ];
