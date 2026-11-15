@@ -2,10 +2,11 @@ name: Deploy
 
 # Deploys main to Cloudflare after CI passes on it, or on demand (Actions → Deploy → Run workflow).
 #
-# Setup (once): Settings → Environments → New environment "production", then add two environment
-# secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. The token's permissions are listed in
-# README.md ("Deploy from GitHub Actions"). Until both exist this workflow skips with a notice.
-# Add required reviewers to the environment if every deploy should wait for approval.
+# Setup (once): Settings → Environments → New environment "production" (deployment branches: main
+# only), then add two environment secrets: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID. See
+# README.md ("Deploy from GitHub Actions") for the token's permissions. Until both exist this
+# workflow skips with a notice, so it is inert in Deploy-button copies that deploy with Workers
+# Builds. Use one deploy path, not both (TDD §6.5).
 
 on:
   workflow_run:
@@ -28,7 +29,7 @@ env:
 jobs:
   deploy:
     name: Deploy to Cloudflare
-    # Only a CI run that passed on a push to main (not a pull request), or a manual run on main.
+    # Only a CI run that passed on a push to main (not a pull request or fork), or a manual run on main.
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_run' &&
@@ -39,42 +40,64 @@ jobs:
     timeout-minutes: 15
     environment:
       name: production
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    # The secrets are exposed only to the two steps that need them, never to `npm ci` or the build.
     steps:
       - name: Check for Cloudflare credentials
         id: credentials
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::notice title=Deploy skipped::Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to the production environment to enable deploys."
+          if [ "$HAS_TOKEN" != "true" ] || [ "$HAS_ACCOUNT" != "true" ]; then
+            msg="Deploy skipped: add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to the production environment to enable deploys."
+            echo "::notice title=Deploy skipped::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
             echo "ready=false" >> "$GITHUB_OUTPUT"
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Deploy exactly the commit CI tested, not whatever main points at now.
+      # Deploy exactly the commit CI tested. Full history so the next step can compare it with main.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.credentials.outputs.ready == 'true'
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      # A re-run of an old CI run must not redeploy an older commit over a newer one: deploy only
+      # if the tested commit is still the tip of main. A newer commit gets its own CI run and deploy.
+      - name: Check the commit is still the tip of main
+        id: current
         if: steps.credentials.outputs.ready == 'true'
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            msg="Deploy skipped: $(git rev-parse --short HEAD) is no longer the tip of main; the newer commit deploys on its own."
+            echo "::notice title=Deploy skipped::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: steps.current.outputs.deploy == 'true'
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
-        if: steps.credentials.outputs.ready == 'true'
+        if: steps.current.outputs.deploy == 'true'
         run: npm ci --legacy-peer-deps
 
       - name: Build
-        if: steps.credentials.outputs.ready == 'true'
+        if: steps.current.outputs.deploy == 'true'
         run: npm run build
 
       # preflight → ensure D1 exists → migrations → wrangler deploy (scripts/deploy-ci.mjs).
       - name: Deploy
-        if: steps.credentials.outputs.ready == 'true'
+        if: steps.current.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run deploy:ci

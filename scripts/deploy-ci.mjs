@@ -6,12 +6,12 @@
 // the first run work too, without writing resource IDs into wrangler.jsonc:
 //
 //   1. preflight (scripts/preflight.mjs)
-//   2. ensure the D1 database exists, looked up by database_name; create it if it doesn't
+//   2. ensure the D1 database exists (exact name match in `wrangler d1 list`); create it if it doesn't
 //   3. wrangler d1 migrations apply DB --remote   (wrangler resolves the database by name)
 //   4. wrangler deploy                            (wrangler provisions R2 and the queues by name)
 //
 // Migrations run before the new Worker version goes live (expand/contract, TDD §6.5). Any failure
-// stops the run and the previous Worker version stays live.
+// stops the run and the previous Worker version stays live (migrations may be partly applied).
 //
 // Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the environment. Never prints either.
 import { spawnSync } from "node:child_process";
@@ -20,6 +20,7 @@ import { join, resolve } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
 
 const ROOT = resolve(import.meta.dirname, "..");
+process.env.WRANGLER_SEND_METRICS ??= "false";
 
 function fail(message) {
   console.error(`deploy: FAIL: ${message}`);
@@ -37,7 +38,7 @@ function run(command, args, { capture = false } = {}) {
     cwd: ROOT,
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     encoding: "utf8",
-    env: { ...process.env, CI: "true", WRANGLER_SEND_METRICS: "false" },
+    env: { ...process.env, CI: "true" },
   });
   if (result.error) fail(`${command} could not start (${result.error.message})`);
   return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -56,17 +57,27 @@ if (!db?.database_name) fail("wrangler.jsonc: D1 binding DB has no database_name
 if (db.database_id) {
   console.log(`deploy: D1 database_id is set in wrangler.jsonc; using it`);
 } else {
-  const info = wrangler(["d1", "info", db.database_name, "--json"], { capture: true });
-  if (info.status === 0) {
+  // Exact name match against the account's database list: no error-text matching, so a lookup
+  // failure (wrong account, missing permission, outage) stops the deploy instead of creating a database.
+  const list = wrangler(["d1", "list", "--json"], { capture: true });
+  if (list.status !== 0) {
+    process.stderr.write(list.stderr);
+    fail("could not list D1 databases (check CLOUDFLARE_ACCOUNT_ID and the API token's D1 permission)");
+  }
+  let databases;
+  try {
+    databases = JSON.parse(list.stdout);
+  } catch {
+    fail("could not parse `wrangler d1 list --json` output");
+  }
+  if (!Array.isArray(databases)) fail("unexpected `wrangler d1 list --json` output");
+  if (databases.some((d) => d?.name === db.database_name)) {
     console.log(`deploy: D1 database ${db.database_name} exists`);
-  } else if (/couldn't find|not found|7404/i.test(info.stdout + info.stderr)) {
+  } else {
     console.log(`deploy: D1 database ${db.database_name} not found; creating it`);
     if (wrangler(["d1", "create", db.database_name, "--update-config=false"]).status !== 0) {
       fail(`could not create D1 database ${db.database_name}`);
     }
-  } else {
-    process.stderr.write(info.stderr);
-    fail(`could not look up D1 database ${db.database_name} (check the API token's D1 permission)`);
   }
 }
 
