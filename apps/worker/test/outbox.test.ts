@@ -370,6 +370,7 @@ describe("outbox failures", () => {
   });
 
   it("lets nothing ride along while the stream is in backoff, so rows that aren't due keep it", async () => {
+    const NOT_DUE_MARGIN_MS = 1_000;
     const s = await manual();
     await s.meta("outbox_fail", "1");
     await s.addRows(["r1", "r2", "r3", "r4", "r5", "r6"]);
@@ -382,10 +383,11 @@ describe("outbox failures", () => {
       const before = new Map((await s.outboxRows()).map((r) => [r.id, r]));
       await runDurableObjectAlarm(s);
       sends.push((await s.lastDrain())?.sends ?? 0);
-      // Rows that weren't due gained no attempts.
+      // Rows that weren't due gained no attempts. Only rows clearly in the future count: the drain
+      // reads its own clock after `start`, so a row due within a few milliseconds is legitimately due.
       for (const row of await s.outboxRows()) {
         const was = before.get(row.id);
-        if (was && was.next_attempt_at > start) expect(row.attempts, row.id).toBe(was.attempts);
+        if (was && was.next_attempt_at > start + NOT_DUE_MARGIN_MS) expect(row.attempts, row.id).toBe(was.attempts);
       }
     }
     expect(Math.max(...sends)).toBeLessThanOrEqual(2);
