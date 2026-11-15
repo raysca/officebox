@@ -23,6 +23,7 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 - [Calls](specs/calls.md)
 - [Calendar](specs/calendar.md)
 - [Documents, Whiteboards & Files](specs/documents.md)
+- [Assistant](specs/assistant.md)
 
 **Cross-cutting specs** (every feature follows these):
 - [Permissions](specs/permissions.md)
@@ -106,6 +107,10 @@ The structure is set out in `PLAN.md` §2: `apps/worker`, `apps/web`, `packages/
 ### 4.1 General
 
 - **TypeScript strict** everywhere. No `any` without a comment explaining why.
+- **Nothing deployment-specific in the repository.** Anyone can deploy Officebox to their own Cloudflare account, so code, `wrangler.jsonc`, migrations, tests and defaults never contain a real domain, hostname, email address, account ID or zone.
+  - **Derive** what you can from the request: origin, host, WebAuthn relying-party ID.
+  - Take everything else from **admin settings, Worker secrets or environment variables** set per deployment, such as the email sender address.
+  - Docs and tests use placeholders like `example.com` or `<your-domain>`.
 - **Validation:** every API body and every WebSocket message is validated with a **Zod schema from `packages/shared`**. Clients and the Worker share the same types.
 - **IDs** are ULIDs. **Timestamps** are UTC epoch milliseconds. **Calendar dates** are ISO `YYYY-MM-DD` together with an IANA time zone.
 - **Errors:** expected outcomes (not found, forbidden, conflict, validation) are **typed results** (`Result<T, E>`), not exceptions. Only real failures throw. **Never throw expected denials across Durable Object RPC**: the runtime logs them as uncaught exceptions (spike finding).
@@ -193,3 +198,4 @@ npm run test:media               # real-media run, inside spikes/realtime/ (need
 - **Recommend.** When asking, propose the option you'd choose and say why.
 - **Report honestly.** Say what you verified and how, and what you didn't. A failing test or a skipped step is stated plainly.
 - **Feature names are generic for now** ("Chat", "Calls", "Calendar", "Documents"). Marketing names come later; don't invent them in code or UI copy.
+  - **Exception (product owner, Nov 2026):** the assistant's default display name is **"Butler"**. It's an admin setting (`assistant_display_name`), so UI copy uses the configured name, while code, routes and tables still say `assistant` ([specs/assistant.md](specs/assistant.md)).

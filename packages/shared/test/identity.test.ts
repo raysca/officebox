@@ -55,7 +55,7 @@ describe("handles (Identity §4.8)", () => {
   });
 
   it("refuses reserved words", () => {
-    for (const word of ["admin", "Everyone", "officebox", "here"])
+    for (const word of ["admin", "Everyone", "officebox", "here", "assistant", "system"])
       expect(handleSchema.safeParse(word).success).toBe(false);
   });
 });

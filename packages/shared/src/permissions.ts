@@ -35,7 +35,8 @@ export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 export const ASSIGNABLE_WORKSPACE_ROLES = ["owner", "admin", "member"] as const satisfies readonly WorkspaceRole[];
 
 /** `users.status`. */
-export const USER_STATUSES = ["active", "disabled", "deleted"] as const;
+/** `system` is a reserved non-user sender (system, assistant): never an actor, never signs in (Identity §4.8). */
+export const USER_STATUSES = ["active", "disabled", "deleted", "system"] as const;
 export const userStatusSchema = z.enum(USER_STATUSES);
 export type UserStatus = z.infer<typeof userStatusSchema>;
 

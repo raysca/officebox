@@ -18,7 +18,11 @@ export const MAX_DISPLAY_NAME_LENGTH = 64;
 export const MAX_WORKSPACE_NAME_LENGTH = 64;
 export const MAX_EMAIL_LENGTH = 254;
 
-/** Identity §4.8: reserved words that can't be anyone's handle. */
+/**
+ * Identity §4.8: reserved words that can't be anyone's handle. The handle derived from the assistant's
+ * display name (`assistant_display_name`, default "Butler") is reserved too; it depends on a setting, so
+ * M1d's handle service checks it alongside this list.
+ */
 export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   "channel",
   "here",
@@ -29,6 +33,7 @@ export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   "owner",
   "system",
   "officebox",
+  "assistant",
 ]);
 
 /** Identity §4.8: 2–32 characters of `a-z 0-9 . _ -`, starting with a letter or digit. */

@@ -215,8 +215,8 @@ describe("admin-power limits (permissions §6)", () => {
     ).toBe("role_not_assignable");
   });
 
-  it("disabled and deleted actors are refused everything, own devices included", () => {
-    for (const status of ["disabled", "deleted"] as const) {
+  it("disabled, deleted and system (reserved sender) actors are refused everything, own devices included", () => {
+    for (const status of ["disabled", "deleted", "system"] as const) {
       for (const role of ACTOR_ROLES) {
         const a = actor(role, status);
         expect(outcome(a, { action: "directory.view" })).toBe("inactive");

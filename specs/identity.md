@@ -1,7 +1,7 @@
 # Spec: Identity & Access
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Revised after independent review (14 Nov 2026)
+**Revision:** Revised after independent review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: reserved `assistant` handles, reserved non-user senders)
 **Feature name:** Identity & Access (marketing name to be decided later)
 **Milestone:** M1 ([PLAN](../PLAN.md)) · **Related:** PRD §6, §10.1; TDD §3.1, §6.8, §8.1; [Permissions](permissions.md), [Platform](platform.md), [Notifications](notifications.md)
 
@@ -196,7 +196,9 @@ An invite opened by someone already signed in as another member shows "You're si
 
 - 2–32 characters: lowercase letters, digits, `.`, `_` and `-`. Must start with a letter or digit. Unique ignoring case.
 - **One namespace for people and groups.** `@design` can't be both a person and a group.
-- Reserved words: `channel`, `here`, `everyone`, `all`, `admin`, `admins`, `owner`, `system`, `officebox`.
+- Reserved words: `channel`, `here`, `everyone`, `all`, `admin`, `admins`, `owner`, `system`, `officebox`, `assistant`.
+- **The assistant's handles** ([Assistant §2, §6](assistant.md)): besides `assistant`, the handle derived from the current assistant display name (`assistant_display_name`, default "Butler", so `butler`) is reserved, as `owner_type = 'reserved'`. The assistant is mentioned by ID, so `@assistant` always works and old mentions follow a rename. **On rename** **(default)**: the new derived handle is reserved if it's free; if a member already holds it, only `@assistant` and the display name in autocomplete are used, and the member keeps their handle. The old derived handle is released after the usual 30-day hold (§4.8).
+- **Reserved non-user senders:** `system` and `assistant` appear as message senders (Chat §4.6) but aren't people: they can't sign in, aren't in the directory, aren't assignable roles and don't count as seats.
 - Members can change their handle at any time **(default)**. Mentions are stored by user ID, so old messages show the new handle. A released handle can't be claimed by someone else for 30 days **(default)**.
 
 ### 4.9 Groups
@@ -252,6 +254,7 @@ These columns and tables are part of the **baseline migrations for M1**, not lat
 - `users.role` value list: `owner`, `admin`, `member`, `guest` (guest reserved, not assignable until Phase 2; permissions §9 Data model)
 - `invitations.email` is **NOT NULL** in the baseline table (TDD §2.1 marks it optional)
 - `invitations.role` allows `admin` only when the inviter is an owner (enforced by the API).
+- **Reserved sender rows:** `messages.sender_id` references `users(id)`, so `system` and `assistant` exist as reserved `users` rows with `status = 'system'` (a new value in the `users.status` list), excluded from the directory, seats and sign-in **(default)** (TDD §2.1; [Assistant §17](assistant.md)).
 
 **Handles:** the `handles` table is **authoritative**. `users.handle` and `groups.handle` are denormalised copies, updated in the **same transaction** as the `handles` row on create, rename and release.
 
@@ -421,7 +424,8 @@ Paths are relative to the Worker's `/api` prefix (for example `POST /api/setup`)
   - it revokes their pending magic-link, reset and recovery tokens, which then fail.
 - **Recovery link flow:** the link lets the member set a password or add a passkey, signs out their other sessions, and can't be used twice.
 - **Directory:** search by name, handle, email, title, team and group returns the right members; the Deactivated filter lists disabled members only; region and working hours are shown.
-- **Handles:** handles are unique across people and groups; reserved words are refused; a released handle can't be claimed by someone else for 30 days.
+- **Handles:** handles are unique across people and groups; reserved words (including `assistant` and the handle derived from the assistant display name) are refused; a released handle can't be claimed by someone else for 30 days.
+- **Reserved senders:** the `system` and `assistant` rows never appear in the directory or member counts and can't sign in.
 - **Groups:**
   - group managers can manage only their own groups
   - an admin adding themselves to a group gets 403; an owner adding an admin, or the admin with an owner's approval, succeeds and is audited
