@@ -20,15 +20,20 @@ let owner: Page;
  * §8); the earlier projects use most of a minute's allowance. When a ceremony is refused as too many,
  * wait out the window and try again.
  */
-async function passkeyStep(page: Page, button: string, done: ReturnType<Page["getByRole"]>) {
+async function limitedStep(page: Page, act: () => Promise<unknown>, done: ReturnType<Page["getByRole"]>) {
   const limited = page.getByText(/Too many (sign-in )?attempts|happening too often/);
   for (let attempt = 0; attempt < 3; attempt++) {
-    await page.getByRole("button", { name: button }).click();
+    await act();
     await expect(done.or(limited).first()).toBeVisible({ timeout: 15_000 });
     if (await done.isVisible()) return;
     await page.waitForTimeout(61_000);
   }
   await expect(done).toBeVisible();
+}
+
+/** Invitation lookup and acceptance share a 5-a-minute per-IP limit (Platform §8), as above. */
+function passkeyStep(page: Page, button: string, done: ReturnType<Page["getByRole"]>) {
+  return limitedStep(page, () => page.getByRole("button", { name: button }).click(), done);
 }
 
 async function signInOwner(browser: Browser) {
@@ -63,15 +68,14 @@ async function acceptAsNewPerson(browser: Browser, link: string, email: string, 
   const page = await context.newPage();
   await page.emulateMedia({ reducedMotion: "reduce" });
   const authenticator = await addAuthenticator(context, page);
-  await page.goto(link);
+  await limitedStep(page, () => page.goto(link), page.getByText(email, { exact: true }));
   await expect(page.getByRole("heading", { level: 1, name: "Join the workspace" })).toBeVisible();
   // The invited email is shown prominently, and the token is gone from the address bar.
   await expect(page.getByText(email, { exact: true })).toBeVisible();
   expect(page.url()).not.toContain("#");
   await expectNoAxeViolations(page);
   await page.getByLabel("Your name").fill(name);
-  await page.getByRole("button", { name: "Accept and continue" }).click();
-  await expect(page.getByRole("heading", { level: 1, name: "Create your passkey" })).toBeVisible();
+  await passkeyStep(page, "Accept and continue", page.getByRole("heading", { level: 1, name: "Create your passkey" }));
   await expectNoAxeViolations(page);
   // The enrolment ticket is HttpOnly and never visible to scripts.
   expect(await page.evaluate(() => document.cookie)).toBe("");
@@ -125,8 +129,7 @@ test("invite by copy link with no email configured: accepting registers a passke
   await expect(owner.getByRole("row", { name: /ana@example\.com/ })).toHaveCount(0);
   const again = await browser.newContext();
   const againPage = await again.newPage();
-  await againPage.goto(link);
-  await expect(againPage.getByText(/isn't valid any more/)).toBeVisible();
+  await limitedStep(againPage, () => againPage.goto(link), againPage.getByText(/isn't valid any more/));
   await again.close();
 });
 
@@ -135,8 +138,11 @@ test("an expired invitation is refused", async ({ browser }) => {
   d1("UPDATE invitations SET expires_at = 0 WHERE email = 'bob@example.com'");
   const context = await browser.newContext();
   const page = await context.newPage();
-  await page.goto(link);
-  await expect(page.getByText("This invitation has expired. Ask whoever invited you for a new one.")).toBeVisible();
+  await limitedStep(
+    page,
+    () => page.goto(link),
+    page.getByText("This invitation has expired. Ask whoever invited you for a new one."),
+  );
   await expect(page.getByLabel("Your name")).toHaveCount(0);
   await expectNoAxeViolations(page);
   await context.close();
