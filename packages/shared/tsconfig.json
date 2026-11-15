@@ -1,0 +1,5 @@
+{
+  // Environment-neutral: no DOM and no Workers types, so the same code runs in the Worker and the browser.
+  "extends": "../../tsconfig.base.json",
+  "include": ["src", "test", "vitest.config.ts"]
+}

@@ -1,0 +1,22 @@
+{
+  // Shared compiler options. Each workspace extends this and adds its own environment:
+  // the Worker uses @cloudflare/workers-types and no DOM; the web app uses the DOM libs.
+  // They must stay separate configs: the Workers and DOM type definitions conflict (spike finding).
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": [],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  }
+}

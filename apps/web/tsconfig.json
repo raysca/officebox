@@ -1,0 +1,11 @@
+{
+  // Browser only: DOM libs and Vite client types, no Workers types (they conflict; spike finding).
+  // vite.config.ts runs in Node and is checked by tsconfig.node.json.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "types": ["vite/client"],
+    "jsx": "react-jsx"
+  },
+  "include": ["src"]
+}
