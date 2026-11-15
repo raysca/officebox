@@ -4,6 +4,7 @@
 **Revision:**
 - First draft written after four rounds of product-owner questions (15 Nov 2026).
 - Product-owner decisions (15 Nov 2026): admin exports include everything, including time-off notes and personal reminders; "What Butler remembers" meets the right of access to assistant memory; alert email stays owner-only.
+- Revised after the second independent review (15 Nov 2026): maintenance by a lazily checked epoch, not fan-out; password hashes in workspace exports stated and disclosed; a public status endpoint; single-window rules; refused, exempt and deferred writes; hourly scheduled-export slot; flap-safe alert email; telemetry specified; step-up details; per-member export limits; packing size limits.
 - Revised after the independent review (15 Nov 2026):
   - private-only data in exports made explicit
   - the per-member export gate treated as a process control
@@ -59,7 +60,7 @@ Every export is audited and disclosed in the privacy statement.
 |---|---|
 | Owner and admin split | **Split by risk.** Owners alone: upgrades and channel, usage and cost, the post-deploy checklist, telemetry and diagnostics, maintenance mode. Owners and admins: members, groups, invitations, workspace settings (per key, Platform §7), the audit log, health, storage, assistant oversight (Assistant §10–§11), and **exports**. |
 | Who exports data | **Owners and admins only.** This is an organisation's workspace. Owners hold every admin power, so "admins" below includes owners. |
-| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, restricted documents, **time-off type and note, and personal reminders**. Exceptions: credentials (Platform §6), and assistant memory, which no admin can read. Confirmed by the product owner: admins export everything (this changes Permissions §11 and Assistant §7.1 and §13). |
+| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, restricted documents, **time-off type and note, and personal reminders**. Exceptions: sessions, tokens, passkeys and MFA secrets (Platform §6), and assistant memory, which no admin can read. **Password hashes are included in workspace exports** **(default)**, because a restore needs them. They are peppered, so they're useless without the `PEPPER_*` Worker secrets, which are never exported (Platform §16). They're never in per-member exports, and the privacy statement says this. Confirmed by the product owner: admins export everything (this changes Permissions §11 and Assistant §7.1 and §13). |
 | Disclosure | **Privacy statement and audit log** **(default)**. The privacy statement says admins can export everything, including private content. Every export is audited. Members see no history of **workspace** exports. |
 | Member self-export | **None.** Members can't download their own data. This **removes** "Download my assistant data" from the approved Assistant spec (§19). |
 | Data-protection requests | **Admin per-member export.** An admin runs an export scoped to one member and hands it over. The member gets a confirmation notice (§12). |
@@ -105,7 +106,8 @@ Each page shows only what the viewer may do. Controls they can't use are shown w
 - Statuses are shown as text, never colour alone.
 - Progress for exports and bulk actions is announced in a polite live region.
 - Tables have row and column headers.
-- Banners never move focus.
+- Banners never move focus. They use `role="status"`, and serious alerts are announced once with `role="alert"`.
+- Animated progress respects reduced motion.
 
 ## 4. Alerts
 
@@ -113,19 +115,20 @@ Alerts tell owners and admins about problems without them having to watch the he
 
 | Alert kind | Subject | Raised when | Severity | Who | Clears when |
 |---|---|---|---|---|---|
-| `storage` | `d1`, `r2`, or a DO ID | D1 at 70 % or 85 %; a DO over 5 GB; R2 over the soft budget (TDD §7.7) | Warning | Owners, admins | **5 points below** the threshold that raised it (hysteresis) |
+| `storage` | `d1`, `r2`, or a DO ID | D1 at 70 % or 85 %; a DO over 5 GB; R2 over the soft budget (TDD §7.7) | Warning | Owners, admins | **5 points below** the threshold that raised it (hysteresis **(default)**) |
 | `protective_mode` | `d1` | D1 at 95 % | **Serious** | Owners, admins | Under 90 % |
 | `d1_copy_paused` | `d1` | D1 at 98 % | **Serious** | Owners, admins | Under 95 % |
 | `export_failed` | `workspace` or `member` | That kind of export fails | **Serious** | Owners, admins | An export of the **same kind** succeeds |
 | `no_recent_export` | `workspace` | No complete workspace export in **30 days (default)**, whether or not scheduled exports are on | Warning | Owners, admins | A workspace export completes |
-| `check_failing` | `do`, `r2`, `vectorize` | A required check fails on **two consecutive** runs | **Serious** | Owners, admins | Passes on two consecutive runs |
+| `check_failing` | `do`, `r2`, `vectorize` | A required check fails on **two consecutive** runs **(default)** | **Serious** | Owners, admins | Passes on two consecutive runs |
 | `service_down` | `email`, `sfu`, `ai`, `link_previews` | An optional service fails on two consecutive runs | Warning | Owners, admins | Passes on two consecutive runs |
 | `security_release` | the version | A security release isn't installed after 48 hours (TDD §6.7) | **Serious** | Owners | Installed |
-| `release_sync_stuck` | — | The installation is behind the latest release on its channel for 7 days (TDD §6.4: the workflow may be disabled) | Warning | Owners | Installed |
-| `schema_ahead` | — | Applied migrations are ahead of the running code (TDD §6.5): a deploy or rollback may have failed | **Serious** | Owners | Code catches up |
+| `release_sync_stuck` | `_` | The installation is behind the latest release on its channel for 7 days (TDD §6.4: the workflow may be disabled) | Warning | Owners | Installed |
+| `schema_ahead` | `_` | Applied migrations are ahead of the running code (TDD §6.5): a deploy or rollback may have failed | **Serious** | Owners | Code catches up |
 | `projection_backlog` | queue name | Outbox lag or a dead-letter queue over its threshold (TDD §7.1) | Warning | Owners, admins | Back under |
+| `purge_failed` | job name | A purge or retention job fails twice in a row | Warning | Owners, admins | The job succeeds |
 | `maintenance_overran` | window ID | Maintenance passed its planned end by **1 hour (default)** | Warning | Owners | Maintenance ends |
-| `assistant_budget` | — | The assistant budget passes 80 % or 100 % (Assistant §10.2) | Warning | Owners, admins | The next month starts |
+| `assistant_budget` | `_` | The assistant budget passes 80 % or 100 % (Assistant §10.2) | Warning | Owners, admins | The next month starts |
 
 A D1 or Worker outage can't be recorded or raised by Officebox, because alerts live in D1 and run in the Worker. Those outages are caught by **Cloudflare's own notifications**, which the setup checklist requires (§15).
 
@@ -134,10 +137,12 @@ A D1 or Worker outage can't be recorded or raised by Officebox, because alerts l
 - **Inbox:** each alert record is one inbox item of type `admin_alert`, keyed `admin_alert:<kind>:<subject>`, so repeats update the same item (Notifications §3).
 - **Email:** serious alerts are emailed to **owners**.
   - One email when raised and one when cleared.
-  - **Raise** emails are limited to one per alert record per 24 hours **(default)**; clear emails aren't limited.
+  - **Raise** emails are limited to one per alert record per 24 hours **(default)**.
+  - A **clear** email is sent only if a raise email went out for that episode, so a flapping check can't flood owners.
   - Content names the alert and links to the admin area (with the origin from the request, Platform §10). It contains no member names or content.
 - **Do not disturb:** follows Notifications §5. The inbox still records the item, while banners and email are held. `check_failing` and `protective_mode` emails break through DND **(default)**.
-- **Dismissal:** info and warning alerts can be dismissed. A dismissed alert stays quiet while its condition holds, and is raised again if it clears and recurs. Serious alerts can't be dismissed.
+- **Dismissal:** info and warning alerts can be dismissed. A dismissed alert stays quiet while its condition holds. It's raised again if it clears and recurs, or **escalates** (for example D1 from 70 % to 85 %). Serious alerts can't be dismissed.
+- **Subjects:** kinds without a subject use `_`, so keys and paths are never empty.
 
 **How checks run:**
 - The cron dispatcher (TDD §7.8) runs the checks every **5 minutes (default)**, using cheap probes: no real email, model calls or SFU sessions.
@@ -162,6 +167,7 @@ Member management follows Identity §4.11 and Permissions §6: admins act on mem
 2. **Preview.** Nothing is sent before the preview. Each row shows one of:
    - ready
    - already a member
+   - a disabled member (re-enable instead)
    - already invited
    - duplicate in this file
    - invalid email
@@ -172,7 +178,10 @@ Member management follows Identity §4.11 and Permissions §6: admins act on mem
 4. **Limits:**
    - Up to **500 rows per upload (default)**.
    - Invitation sending is limited to **200 per workspace per day (default)**, a new Platform §8 row.
+   - Files are limited to **1 MB (default)**, in UTF-8 (a BOM is accepted).
+   - The "day" is the UTC day **(default)**.
    - Rows beyond the limit, or beyond the email provider's daily quota (TDD §7.6), stay **pending**. They are sent the next day, or can be shared with copy links from the Invitations page one by one.
+   - **Pending rows are re-checked at send time,** against the admin's role and the domain policy then. Rows that no longer pass are cancelled, with a result.
 5. **Results.** Each row has its own result. Re-sending the same file skips rows already invited, so it's idempotent.
 6. **Audit.** Each invitation is audited individually, plus one `members.invite_bulk` entry with the counts.
 
@@ -198,7 +207,7 @@ Select members (up to **500 per action (default)**), then **Disable**.
 - It also lists anyone who can't be, and why. That includes an admin or owner when the actor isn't an owner, the **actor themselves**, and the last owner.
 
 **Confirming:**
-- The actor confirms by typing the number of people **(default)**, in a labelled field.
+- The actor confirms by typing the number of people **(default)**, in a labelled field. The confirmation is bound to the preview's ID, which is valid for 10 minutes, so it can't apply to a different selection.
 
 **Processing:**
 - Members are disabled one at a time in a background job. The page shows progress.
@@ -211,7 +220,7 @@ There is no bulk delete **(default)**, because deletion is irreversible.
 
 Downloads the current filtered list: name, handle, email, role, status, groups, last active, joined.
 - It holds personal data, so it needs step-up re-authentication (§11.3) and is audited (`members.exported`).
-- Cells that start with `=`, `+`, `-` or `@` are prefixed with `'`, so spreadsheets don't run them as formulas. The same rule applies to every CSV in this spec.
+- Cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return are prefixed with `'`, so spreadsheets don't run them as formulas. Files are UTF-8 with a BOM. The same rules apply to every CSV in this spec.
 
 ## 6. Settings
 
@@ -240,14 +249,14 @@ Downloads the current filtered list: name, handle, email, role, status, groups, 
   - Personal values are redacted when a member is deleted (Platform §3.1).
   - DM and group-DM targets record only the object type, where Permissions §4.1 requires it.
 - **Download:** the filtered entries as CSV, with step-up re-authentication (§11.3) and formula escaping (§5.4). The download is audited (`audit.exported`).
-- **Retention:** `audit_retention_days`, **365** by default (PRD §10.2). Owners can set it from **90 to 3,650 days** **(default)**. A daily job purges older entries. `export.*` and `member_export.*` entries are kept for at least 365 days, whatever the setting.
+- **Retention:** `audit_retention_days`, **365** by default (PRD §10.2). Owners can set it from **90 to 3,650 days (default)**. A daily job purges older entries. `export.*` and `member_export.*` entries are kept for at least 365 days, whatever the setting **(default)**.
 - **No editing:** nobody can edit or delete entries through Officebox. Entries change only through retention purges and the erasure redaction above.
 
 **Audit event names used in this spec:**
 - **Members:** `members.invite_bulk`, `members.group_bulk`, `members.disable_bulk`, `members.exported`
 - **Audit and alerts:** `audit.exported`, `alert.dismissed`
 - **Workspace exports:** `export.started`, `export.completed`, `export.failed`, `export.cancelled`, `export.downloaded`, `export.deleted`, `export.expired`
-- **Per-member exports:** `member_export.started`, `member_export.downloaded`, `member_export.expired`
+- **Per-member exports:** `member_export.started`, `member_export.completed`, `member_export.failed`, `member_export.downloaded`, `member_export.expired`
 - **Maintenance:** `maintenance.scheduled`, `maintenance.rescheduled`, `maintenance.started`, `maintenance.ended`, `maintenance.cancelled`
 - **Setup and diagnostics:** `checklist.marked`, `diagnostics.downloaded`, `auth.reauth`
 - **Settings:** the events for the new settings keys (§16).
@@ -286,13 +295,21 @@ When an optional service is failing, members see a quiet notice **where the feat
 | Link previews | Nothing; previews are skipped |
 | Search | "Search is catching up — recent messages may be missing" when the projection lags |
 
-The app learns availability from `GET /status`. It returns per-feature flags and the maintenance state only, with no details, to any signed-in member. A socket message, `status.changed`, pushes changes.
+The app learns availability from two endpoints:
+- **`GET /status`** returns per-feature flags and the maintenance state only, with no details, to any signed-in member. A socket message, `status.changed`, pushes changes.
+- **`GET /status/public`** needs no sign-in, so the sign-in page can show notices. It returns only whether magic links are available, and the maintenance state and message. It's cacheable for 30 seconds and rate-limited (Platform §8).
 
 ### 8.3 Diagnostics bundle
 
 - **Who:** owners download the support bundle described in TDD §7.2, after a **preview** of its full contents.
 - **Contents:** it never contains message, document or file content, email addresses or secrets.
 - **Audit:** downloading it is audited (`diagnostics.downloaded`). This replaces TDD §7.2's "the admin can download" (§19).
+
+### 8.4 Telemetry
+
+- **Off by default** (Platform §7 `telemetry`, owner only).
+- **Before turning it on,** the owner sees the **exact payload** that would be sent: a random installation ID, version and channel, a member-count range, enabled features, and error counts by category (TDD §7.9). It never includes content, names, emails or IPs.
+- **Turning it on or off** writes `settings.telemetry`. The page shows when the last report was sent.
 
 ## 9. Storage
 
@@ -322,12 +339,14 @@ A persistent prompt asks owners to set Cloudflare billing notifications until th
 ### 11.1 Exporting
 
 - **Who:** owners and admins. The permission engine checks a new action, `workspace.export`, both when an export starts and when it's downloaded (§19).
-- **Contents:** the Officebox export format v1 (TDD §7.5), including all private content (§2). Exceptions follow Platform §6: credentials, assistant memory, and operational tables. Operational tables are `exports`, `maintenance_windows`, `admin_alerts` and `health_checks`, so a restore never starts read-only or with stale alerts.
+- **Contents:** the Officebox export format v1 (TDD §7.5), including all private content (§2) and peppered password hashes (§2). Exceptions follow Platform §6: sessions, tokens, passkeys, MFA secrets, assistant memory, and operational tables. Operational tables are `exports`, `maintenance_windows`, `admin_alerts` and `health_checks`, so a restore never starts read-only or with stale alerts.
 - **Packing:**
   - The export Workflow writes the parts to `exports/<id>/`, then packs them into a single `export.tar` in R2 with a multipart upload. This keeps downloads within Worker limits.
   - The download streams that one object, and supports `Range` requests, so an interrupted download can resume.
   - The parts are deleted once packing succeeds.
-- **One at a time:** only one workspace export runs at a time. Starting another returns `conflict`. A running export can be **cancelled**, and its partial objects are deleted.
+- **Size:** archives over **20 GB (default)** aren't packed. They stay as parts, and are downloaded with the command-line tool (`officebox export pull`, which resumes). Packing needs about twice the archive's size in R2 temporarily, so the budget check at start counts double.
+- **Consistency:** without maintenance mode, each object is consistent, but the export isn't one instant across the workspace (TDD §7.5). A restore of such an export is complete per object.
+- **One at a time:** only one workspace export runs at a time, enforced by a partial unique index on running workspace exports. Starting another returns `conflict`. A running export can be **cancelled**, and its partial objects are deleted.
 - **Failure:** a failed export deletes its partial objects and raises `export_failed`.
 - **Schema changes mid-run:** the export records the schema version at the start. If a deploy changes the schema during the run, the export fails with a clear message and can be retried.
 - **Storage budgets:**
@@ -340,24 +359,27 @@ A persistent prompt asks owners to set Cloudflare billing notifications until th
   3. Progress shows on the Data page.
 - **Scheduled** (`scheduled_export`):
   - Off by default.
-  - When on: weekly, on a chosen weekday, at a time in the **workspace time zone** (from setup), with files included, and the latest **4 complete** exports kept.
+  - When on: weekly, on a chosen weekday, at a time in the **workspace time zone** (`workspace_timezone`, a new setting, default the first owner's time zone), with files included, and the latest **4 complete** exports kept.
+  - An hourly dispatcher job claims the slot with compare-and-set. A slot missed by an outage or maintenance runs at the next hourly run within 24 hours; after that it's skipped, and `no_recent_export` covers the gap.
+  - Scheduled exports run as a system actor and record the member who configured the schedule.
   - Older scheduled exports are deleted only after a new one completes.
-- **Retention:** on-demand exports are deleted **30 days** after completion **(default)** (`export_retention_days`), which an owner can change. They can also be deleted earlier.
-  - Deleting an export that is being downloaded ends the download with an error, never a silently truncated file.
+- **Retention:** on-demand exports are deleted **45 days** after completion **(default)** (`export_retention_days`), which an owner can change. That's longer than the 30-day `no_recent_export` alert, so the last export still exists when the alert is raised. Exports can also be deleted earlier.
+  - Downloads check `expires_at` themselves.
+  - **Deleting** marks the export deleted at once (no new downloads). The object is removed once outstanding download tokens expire (at most 1 hour).
 - **Audit:** the `export.*` events, each with actor, export ID and whether files were included.
 
 ### 11.2 Exports and erasure
 
 Exports are snapshots and **aren't rewritten** when a member is later deleted. A deleted member's data can therefore remain in an archive until it expires (30 days on demand; 4 weeks for scheduled exports).
 
-- **Restoring an older export.** Restoring an export taken **before** a deletion brings that member's data back. The restore flow warns about this and lists the members who were deleted after the export's date, from the current installation's audit log where available, so an owner can delete them again.
+- **Restoring an older export.** Restoring an export taken **before** a deletion brings that member's data back. A fresh installation has no record of later deletions, so the restore report shows the **export's date** and a warning to re-apply any deletions made since. The admin guide includes a checklist for this. Automatic re-application is Later (§20).
 - **Disclosure.** The privacy statement and Platform §3.1 say so.
 
 ### 11.3 Step-up re-authentication
 
 Sensitive downloads need **recent authentication**: the export archive, the member CSV, the audit CSV, and per-member export archives.
 
-- **Session field.** `sessions.authenticated_at` records when the member last proved who they are: a password, passkey or magic-link sign-in, or a step-up. A token refresh doesn't update it.
+- **Session field.** `sessions.authenticated_at` records when the member last proved who they are: a password, passkey or magic-link sign-in, accepting an invitation, using a recovery link, or a step-up. A token refresh doesn't update it.
 - **Recent window.** If `authenticated_at` is older than **10 minutes (default)**, the download returns `reauth_required`.
 - **Re-authenticating.** The app then asks the member to authenticate again with `POST /auth/reauth`, using any method they have:
   - password
@@ -366,7 +388,11 @@ Sensitive downloads need **recent authentication**: the export archive, the memb
   - MFA, when it exists.
 
   Passwordless admins use their passkey or email.
-- **Dialog.** Re-authentication is a labelled modal dialog, with focus trapped and Escape to cancel. Each success is audited (`auth.reauth`).
+- **Binding and limits:**
+  - Passkey challenges and email links for step-up are bound to the current session and user.
+  - `POST /auth/reauth` is limited to **5 attempts per 10 minutes per session (default)** (Platform §8).
+- **Downloads:** the check runs when a download **starts**. A successful start issues a short-lived download token, valid for **1 hour (default)** and bound to the session, for `Range` resumes. Each token is audited once.
+- **Dialog.** Re-authentication is a labelled modal dialog, with focus trapped and Escape to cancel. Cancelling returns focus to the control that opened it. Each success is audited (`auth.reauth`).
 
 ### 11.4 Restore
 
@@ -379,7 +405,8 @@ The Restore Workflow writes a **restore report**, which the Overview shows until
 - members who must re-enrol MFA
 - that assistant memory was not restored and the assistant index is being rebuilt
 - ICS subscriptions that need their URLs re-entered
-- the erasure warning in §11.2.
+- the erasure warning in §11.2
+- that **all sessions are invalid**, and that passwords work only if the new installation has the **same `PEPPER_*` secrets** (Platform §16). Without them, owners sign in with the `RECOVERY_TOKEN` flow (TDD §6.8) and reset passwords.
 
 ## 12. Per-member data exports
 
@@ -398,12 +425,14 @@ For data-protection access requests. Members can't run these themselves.
   - **Account:** group memberships, and their sessions list (devices and times, no tokens).
   - **Audit:** audit entries where they are the actor or target.
 - **Not included:**
-  - other people's messages and content
+  - password hashes
+  - other people's messages and content; quoted or forwarded content written by others appears only as a reference **(default)**
   - assistant conversations and memory (not readable by admins; the member can see these in "What Butler remembers")
   - credentials.
 - **Running:** a Workflow, packed like §11.1. The archive expires **7 days (default)** after completion. Downloads check `expires_at` themselves, and the daily job deletes expired archives.
-- **Download:** step-up re-authentication (§11.3); audited (`member_export.*`).
-- **Notice to the subject:** a `security_notice` ("An admin exported your data on *date*") **(default)**, delivered as Notifications §3 defines (in-app and email, not held by DND). This is a confirmation of a request, unlike workspace exports, which members aren't told about (§2).
+- **Download:** step-up re-authentication (§11.3), with the subject's role re-checked at download; audited (`member_export.started`, `.completed`, `.failed`, `.downloaded`, `.expired`).
+- **Limits:** one running per-member export per subject, and **10 per actor per day (default)** (Platform §8). Per-member exports don't block workspace exports.
+- **Notice to the subject:** a `security_notice` ("An admin exported your data on *date*") **(default)**, sent **when the export completes**. It's delivered as Notifications §3 defines (in-app and email, not held by DND), without the sign-in banner. This is a confirmation of a request, unlike workspace exports, which members aren't told about (§2).
   - A **disabled** subject gets the notice when re-enabled.
   - A **deleted** subject gets none.
 
@@ -415,6 +444,7 @@ For data-protection access requests. Members can't run these themselves.
 
 - **Starting:** start now, or schedule a start time with an optional planned end and an optional message up to **280 characters (default)**.
 - **Validation:** only one window can be scheduled or active at a time. A start in the past means "now". A planned end must be after the start.
+- **Start now with a window already scheduled:** the scheduled window is **brought forward** to start now, keeping its message and planned end **(default)**. Creating a second window returns `conflict`.
 - **Changes:** a scheduled window can be **rescheduled** or **cancelled**.
 - **Notice:**
   - A banner shows to everyone from **24 hours before (default)**.
@@ -428,26 +458,26 @@ For data-protection access requests. Members can't run these themselves.
 
 The `maintenance_windows` row in D1 is the **source of truth**. Whether maintenance is active is computed from the row and the current time on every read, so a missed timer can never leave the workspace stuck read-only or never starting.
 
+- **Stored state is a cache.** The stored `state` is only a cache for history. Owner actions and the dispatcher close an expired window in the same statement that inserts or changes another, using compare-and-set on `version`.
+- **Maintenance epoch.** Each change increments a **`maintenance_epoch`** in `installation`.
+
 - **Worker:** reads the state through the settings cache (30 seconds at most) and on every start and end action.
-- **Durable Objects:** receive it through a config RPC, `setMaintenance(active)`, like `general_read_only`. The cron dispatcher's 5-minute run re-pushes the state as a reconciler.
+- **Durable Objects check it lazily.** Before any refused write (§13.3), a DO checks the current epoch and state. It reads them from a value cached for **10 seconds (default)**, and from the epoch carried in each socket's attachment. DOs are **not** woken to be told, so hibernation is preserved, and a DO created later sees the state on its first write.
+- **Fast switching for open rooms.** When maintenance starts or ends, the Worker calls `setMaintenance(epoch, active)` only on rooms that are open, from the UserHub room registry (Platform §12).
 - **Sockets:** move to read-only and back through `updateAccess` / `access.changed` (Permissions §8), so they don't reconnect. Clients also get `status.changed` (§8.2).
-- **Triggers:** ReminderScheduler triggers aren't relied on. The dispatcher applies starts, ends, notices and the 24-hour cap from the row.
+- **Dispatcher, not triggers:** the dispatcher applies notices and the 24-hour cap from the row on its 5-minute run. Starts and ends need no timer, because state is derived from the clock.
 
 ### 13.3 What works during maintenance
 
-- **Reading** works everywhere.
-- **Writes are refused** with a typed `maintenance` result, and the app shows "The workspace is read-only for maintenance". DOs refuse writes once they have the flag.
-- **Exemptions:**
-  - sign-in, sign-out and token refresh (`POST /auth/*`)
-  - step-up re-authentication
-  - ending, rescheduling or cancelling maintenance
-  - internal system writes: audit, alerts, health, export status, outbox progress
-  - the running export itself.
+Reading works everywhere. Writes fall into three classes **(default)**:
 
-  Members can still sign in **(default)**.
-- **Calls:** active calls continue, but no new calls start **(default)**.
-- **Settings:** can't be changed.
-- **Background jobs:** purges, retention sweeps and scheduled exports wait until maintenance ends **(default)**.
+| Class | What | Behaviour |
+|---|---|---|
+| **Refused** | Creating, editing or deleting user content (messages, documents, files, events, polls, channels); settings changes; invitations; uploads; assistant requests; starting a call | Typed `maintenance` result; the app shows "The workspace is read-only for maintenance" |
+| **Exempt** | Sign-in, sign-out and token refresh (`POST /auth/*`); step-up re-authentication; **disabling a member, signing out all sessions and recovery** by owners and admins (so a compromised account can be handled); ending, rescheduling or cancelling maintenance; personal state that isn't shared content (read markers, presence, drafts, push subscriptions); everything inside **active calls** (in-call chat, call notes and transcript segments); system writes (audit, alerts, health, export status, outbox progress, inbox and notification delivery, outgoing email); the running export | Proceeds normally |
+| **Deferred** | Content-creating timers and alarms (scheduled sends, poll auto-close); ICS refresh; purges and retention sweeps; scheduled exports | Wait until maintenance ends, then run. Reminders and other notification-only triggers fire on time, as system writes. |
+
+Members can still sign in **(default)**. Active calls continue, but no new calls start **(default)**.
 - **Reconnects:** when maintenance ends, sockets return to their normal roles through `access.changed`, with no mass reconnect.
 
 ### 13.4 Exporting in maintenance
@@ -457,8 +487,10 @@ An owner can tick **in maintenance mode** when starting a workspace export.
 1. If no window is active, one starts now with the message "Exporting the workspace". If one is already active, the export uses it.
 2. **Consistency barrier.** Before the snapshot, the export waits until:
    - the settings cache has expired (30 seconds)
-   - every DO has acknowledged `setMaintenance(true)`
+   - every **open** room has acknowledged `setMaintenance` (closed DOs see the epoch on their next write and refuse it)
    - the projection outbox has drained.
+
+   The barrier times out after **2 minutes (default)**. The export then fails with a clear message, and the window it started ends.
 3. When the export completes, fails or is cancelled, a window it started ends automatically. A window that was already active is left alone.
 
 ### 13.5 Audit
@@ -488,7 +520,7 @@ The post-deploy checklist (TDD §6.1) is an owner page.
 - email provider (not needed with Cloudflare Email Service)
 - allowing GitHub Actions to open pull requests (**R**)
 - making the repository private
-- Cloudflare notifications for Worker errors and health (**R**), the external alert path (§4)
+- Cloudflare's own notifications for Worker errors and health (**R**) (§4)
 - Cloudflare billing notifications (**R**)
 - the R2 lifecycle rule
 - scheduled exports, or a first export (**R**)
@@ -505,7 +537,7 @@ These tables are created in M7's baseline migrations (Platform §14), so enum ch
 -- NNNN_admin_alerts.sql
 CREATE TABLE IF NOT EXISTS admin_alerts (
   kind TEXT NOT NULL,                  -- §4, Zod-validated
-  subject TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '_',
   severity TEXT NOT NULL,              -- 'info' | 'warning' | 'serious'
   state TEXT NOT NULL,                 -- 'open' | 'cleared' | 'dismissed'
   details TEXT,                        -- JSON; never content or personal data
@@ -533,7 +565,9 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
   starts_at INTEGER NOT NULL,
   planned_end_at INTEGER,
   message TEXT,                        -- up to 280 characters
-  state TEXT NOT NULL,                 -- 'scheduled' | 'active' | 'ended' | 'cancelled' (derived on read from times; stored for history)
+  state TEXT NOT NULL,                 -- 'scheduled' | 'active' | 'ended' | 'cancelled' (cache only; activity is derived from times)
+  open INTEGER,                        -- 1 while scheduled or active, NULL otherwise (single-open-window guard)
+  version INTEGER NOT NULL DEFAULT 0,  -- compare-and-set
   started_by_export TEXT,              -- export ID, when started by §13.4
   notice_sent_at INTEGER,
   created_by TEXT NOT NULL REFERENCES users(id),
@@ -541,7 +575,7 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
   cancelled_by TEXT,
   ended_at INTEGER
 );
-CREATE UNIQUE INDEX IF NOT EXISTS one_open_window ON maintenance_windows((1)) WHERE state IN ('scheduled', 'active');
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_window ON maintenance_windows(open);  -- NULLs don't collide
 ```
 
 **`exports` (TDD §7.5).** Created in M7's baseline with these columns:
@@ -555,17 +589,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_open_window ON maintenance_windows((1)) WH
 - `requested_by`, `created_at`, `completed_at`, `expires_at`.
 
 **Other changes:**
-- `sessions` gains `authenticated_at INTEGER NOT NULL` (§11.3), in M1's baseline if M1 hasn't shipped, otherwise as an expand migration.
-- `installation` gains `checklist` (JSON: manual items marked done).
+- `sessions` gains `authenticated_at INTEGER NOT NULL DEFAULT 0` (§11.3), in M1's baseline if M1 hasn't shipped, otherwise as an expand migration. `0` means "not recently authenticated".
+- `installation` gains `checklist` (JSON: manual items marked done) and `maintenance_epoch INTEGER NOT NULL DEFAULT 0`.
 - New settings keys (Platform §7):
   - `audit_retention_days` (owner, `settings.audit_retention`)
   - `export_retention_days` (owner, `settings.export_retention`)
-  - `scheduled_export` `{ enabled, weekday, time, include_files, keep }` (admin, `settings.scheduled_export`).
+  - `scheduled_export` `{ enabled, weekday, time, include_files, keep, set_by }` (admin, `settings.scheduled_export`)
+  - `workspace_timezone` (IANA name; admin, `settings.workspace_timezone`) **(default)**.
 - `inbox_items.event_type` gains `admin_alert` and `maintenance_scheduled`.
 - Shared error codes gain `reauth_required` and `maintenance`.
 
 **Timers:** all on the existing cron dispatcher (TDD §7.8).
-- **Every 5 minutes:** health checks, alert raise and clear, and the maintenance reconciler (start, end, notice, 24-hour cap, re-push to DOs).
+- **Every 5 minutes:** health checks, alert raise and clear, and maintenance notices and the 24-hour cap.
+- **Hourly:** the scheduled-export slot.
 - **Daily:** audit retention purge, and export and member-export expiry.
 
 No ReminderScheduler kinds are added.
@@ -585,7 +621,9 @@ All bodies are validated with Zod schemas from `packages/shared`. Expected failu
 | `GET /admin/audit.csv?…` | Owner, admin (step-up) | Audit CSV (audited); the viewer uses `GET /admin/audit` |
 | `GET /admin/health` | Owner, admin | Detailed checks (stored state) |
 | `GET /status` | Any signed-in member | Per-feature flags and maintenance state only |
+| `GET /status/public` | Anyone | Magic-link availability, maintenance state and message only |
 | `GET /admin/diagnostics/preview` · `GET /admin/diagnostics` | Owner | Support bundle (audited) |
+| `GET /admin/telemetry/preview` | Owner | The exact telemetry payload; turning it on or off uses `PATCH /admin/settings` |
 | `GET /admin/storage` | Owner, admin | Store levels |
 | `GET /admin/usage` | Owner | Usage panel |
 | `GET /admin/exports` · `POST /admin/exports` · `POST /admin/exports/:id/cancel` · `DELETE /admin/exports/:id` | Owner, admin (the maintenance option: owner) | List, start, cancel and delete workspace exports |
@@ -595,6 +633,8 @@ All bodies are validated with Zod schemas from `packages/shared`. Expected failu
 | `GET` / `POST /admin/maintenance` · `PATCH` / `DELETE /admin/maintenance/:id` · `POST /admin/maintenance/:id/end` | Owner (read: admin) | Schedule, start, reschedule, cancel and end |
 | `GET /admin/updates` | Owner (read: admin) | Version, channel, release notes, PR link, the auto-merge value as deployed |
 | `GET /admin/checklist` · `POST /admin/checklist/:item` | Owner | Checklist status and manual marks |
+
+Settings, groups, invitations, the audit viewer and assistant oversight use their existing endpoints (Platform §15, Identity §6, Assistant §15). They are in the role matrix test.
 
 ## 18. Acceptance criteria
 
@@ -608,7 +648,7 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 - [ ] **Raise and clear:** each alert kind in §4 is raised and cleared by its condition, per subject. Hysteresis stops flapping at a threshold.
 - [ ] **Consecutive runs:** a single failing run raises nothing.
 - [ ] **Concurrency:** concurrent dispatcher runs send no duplicate emails.
-- [ ] **Email:** raise emails go to owners at most once per alert record per 24 hours, and clear emails are always sent. Admins receive no email. Emails contain no member names or content.
+- [ ] **Email:** raise emails go to owners at most once per alert record per 24 hours, and a clear email follows only a sent raise email. A check flapping every 20 minutes for a day sends at most one raise and one clear. Admins receive no email. Emails contain no member names or content.
 - [ ] **DND:** `check_failing` and `protective_mode` emails break through DND. Other alert emails are held, while the inbox item is still recorded.
 - [ ] **Dismissal:** serious alerts can't be dismissed. A dismissed warning is raised again after it clears and recurs.
 
@@ -629,15 +669,17 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 
 **Health and notices**
 - [ ] **Health page:** it reflects stored check states, and loading it raises nothing.
-- [ ] **Member notices:** `/status` returns flags and the maintenance state only. A failing SFU disables call buttons with the notice, and members see no workspace-wide banner.
+- [ ] **Member notices:** `/status` returns flags and the maintenance state only. `/status/public` works signed out, and shows the magic-link notice on the sign-in page. A failing SFU disables call buttons with the notice, and members see no workspace-wide banner.
 
 **Exports**
-- [ ] **Contents:** a workspace export run by an admin includes DMs, private channels, time-off notes and personal reminders. It excludes credentials, assistant memory and the operational tables.
+- [ ] **Contents:** a workspace export run by an admin includes DMs, private channels, time-off notes, personal reminders and peppered password hashes. It excludes credentials, assistant memory and the operational tables.
 - [ ] **Step-up re-authentication:**
   - A download with `authenticated_at` older than 10 minutes returns `reauth_required`. At 10 minutes exactly, it's allowed.
   - A refresh doesn't reset `authenticated_at`.
   - A passwordless admin can step up with a passkey or email.
-- [ ] **Packing:** the archive is one R2 object, and a `Range` request resumes it. Deleting an export mid-download ends the stream with an error.
+  - `POST /auth/reauth` is rate-limited.
+  - A resume with an expired or foreign download token is refused.
+- [ ] **Packing:** the archive is one R2 object, and a `Range` request with a valid download token resumes it. A deleted export refuses new downloads at once. An expired export returns `not_found`, even before the daily job.
 - [ ] **One at a time:** a second concurrent export returns `conflict`. Cancelling deletes the partial objects.
 - [ ] **No member access:** members have no export endpoint, and `GET /assistant/export` no longer exists.
 - [ ] **Scheduling and expiry:**
@@ -647,8 +689,10 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 - [ ] **Per-member export:**
   - It contains the subject's data per §12 and nothing written by others. A download after `expires_at` returns `not_found`.
   - The subject gets a `security_notice`, or gets it on re-enable if disabled.
-  - An admin can't start or download an export whose subject is (or has become) an admin or owner.
-- [ ] **Restore:** restoring an export taken during maintenance starts the new installation writable, with no stale alerts. The restore report lists the §11.4 items, including members deleted after the export date.
+  - An admin can't start an export whose subject is an admin or owner. An admin can't download one whose subject was promoted after it started.
+  - Per-member exports never contain password hashes.
+  - The per-actor daily limit holds.
+- [ ] **Restore:** restoring an export taken during maintenance starts the new installation writable, with no stale alerts. The restore report lists the §11.4 items: the export date with the erasure warning, the invalid sessions, and the pepper requirement.
 
 **Maintenance**
 - [ ] **Read-only:**
@@ -660,7 +704,14 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
   - It ends after 24 hours at most.
   - A window scheduled 2 hours ahead sends its notice immediately.
   - A second open window is refused.
-- [ ] **Consistent export:** an export in maintenance waits for the barrier, and ends the window it started on success, failure or cancel.
+- [ ] **Consistent export:** an export in maintenance waits for the barrier, and ends the window it started on success, failure, cancel or barrier timeout.
+- [ ] **Maintenance epoch:** a hibernated DO isn't woken by maintenance changes, and refuses a write after waking during maintenance.
+- [ ] **Write classes:** the classes in §13.3 behave as listed:
+  - an admin can disable a member during maintenance
+  - in-call chat works in an active call
+  - a scheduled send is deferred until the end
+  - a reminder fires on time.
+- [ ] **Start now:** with a scheduled window present, starting now brings that window forward.
 
 **Updates**
 - [ ] **Updates page:** it shows version, channel, release notes, the PR link and the `auto_merge` value as deployed, plus the security alert after 48 hours.
@@ -680,13 +731,13 @@ These edits are made in the PR that approves this spec.
 | Document | Change |
 |---|---|
 | Assistant §2, §4.3, §4.4, §7.1, §11, §13, §15, §16, §17, §19 | **Remove "Download my assistant data"** and `GET /assistant/export` everywhere, including the export-filter text, the audit list, the acceptance criteria and open question 5. Personal reminders are now in admin-run exports (workspace and per-member). Assistant memory can't be exported by anyone; members view it in "What Butler remembers". Update the Decisions table with the reason. |
-| Permissions §2, §4.1, §6, §8, §11, §12 | "Admins and private content" Decisions row and §11 criterion: admins can read private content, including DMs, time-off type and note, and personal reminders, **through exports**. The privacy statement says so plainly, along with export expiry and erasure (§11.2). New engine actions `workspace.export` and `member.export`, added to the matrix test. Per-member exports of admins or owners need an owner. Remove the break-glass item from §12 Later; exports cover it. |
+| Permissions §2, §4.1, §6, §8, §11, §12 | §2 "Admins and private content" row and the §11 criterion: replace "admins can't read" with "admins can't read private content in the app, but can export it, including DMs, time-off type and note, personal reminders and peppered password hashes". The privacy statement says so plainly, along with export expiry and erasure (§11.2). New engine actions `workspace.export` and `member.export`, added to the matrix test. Per-member exports of admins or owners need an owner. Remove the break-glass item from §12 Later; exports cover it. |
 | Identity §3, §4.4, §4.5, §4.11, §5, §6, §7 | Export is an owner and admin power, not owner-only. `sessions.authenticated_at`, `POST /auth/reauth`, and `reauth_required` in the shared codes. Bulk tools and member CSV. The admin screens follow §3. |
-| Notifications §3, §5 | `admin_alert` (`admin_alert:<kind>:<subject>`; DND breakthrough for two kinds), `maintenance_scheduled` (`maintenance:<id>`), and `security_notice` for per-member exports (queued for disabled subjects until re-enabled). |
-| Platform §3.1, §5, §6, §7, §8, §11, §14, §15 | §3.1: exports aren't rewritten on deletion (§11.2). §5: retention rows for on-demand, scheduled and per-member exports. §6: operational-table exclusions; time off and reminders included in admin-run exports (replacing "owner-only" and "personal export only"); per-member export scope. §7: the new keys (§16). §8: CSV invite (500 rows), bulk actions (500), invitation sending (200 a day). §11: the dispatcher jobs in §16. §14: the new tables and columns. §15: the new endpoints, with detailed health open to admins. |
+| Notifications §3, §5 | Add `admin_alert` (`admin_alert:<kind>:<subject>`). §5.1 gains an exception: `check_failing` and `protective_mode` alert emails break through DND. Add `maintenance_scheduled` (`maintenance:<id>`). `security_notice` is used for per-member exports. It's an exception to "disabled members get no new inbox items": the item is held and delivered on re-enable. |
+| Platform §3.1, §5, §6, §7, §8, §11, §14, §15 | §3.1: exports aren't rewritten on deletion (§11.2). §5: retention rows for on-demand, scheduled and per-member exports. §6: operational-table exclusions; time off and reminders included in admin-run exports (replacing "owner-only" and "personal export only"); per-member export scope. §7: the new keys (§16). §8: CSV invite (500 rows, 1 MB), bulk actions (500), invitation sending (200 a UTC day), `POST /auth/reauth` (5 per 10 minutes per session), per-member exports (10 per actor per day), `/status/public`. §2 and §17: Decisions rows and criteria for exports. §18: remove "per-member data export (self-service)" from Later. §16: restore needs the same `PEPPER_*` secrets. §11: the dispatcher jobs in §16. §14: the new tables and columns. §15: the new endpoints, with detailed health open to admins. |
 | PRD §10.1, §10.2, §13, Appendix A | Admins (not only owners) export; exports include private content, disclosed; per-member exports; no member self-export; export retention; alerts; maintenance scheduling. |
-| TDD §2.1, §6.1, §6.3, §6.4, §6.7, §7.1, §7.2, §7.3, §7.5, §7.7, §7.8 | `exports` columns and states, packing into one object, `sessions.authenticated_at`. The checklist items. `config.json` values embedded at build. Alert rules replace §7.3's external alerting as the in-app path, with Cloudflare notifications kept for outages. Diagnostics are owner-only. Maintenance as in §13. Priority writes in protective mode. New dispatcher jobs. |
-| PLAN M7 | Points to this spec (done in this change). |
+| TDD §2.1, §6.1, §6.3, §6.4, §6.7, §6.8, §7.1, §7.2, §7.3, §7.5, §7.7, §7.8 | `exports` columns and states, packing into one object, `sessions.authenticated_at`. The checklist items. `config.json` values embedded at build. Alert rules replace §7.3's external alerting as the in-app path, with Cloudflare notifications kept for outages. Diagnostics are owner-only. §7.5: owners **and admins** run and download exports; maintenance uses the epoch and `updateAccess`, not closing every socket; the size limit and CLI fallback. §6.8: restore needs the same peppers; `RECOVERY_TOKEN` otherwise. Priority writes in protective mode. New dispatcher jobs, including the hourly export slot. |
+| PLAN M1, M7 | M1: `sessions.authenticated_at` and `POST /auth/reauth`. M7: points to this spec (done in this change); export and restore before the first customer. |
 
 ## 20. Later
 
