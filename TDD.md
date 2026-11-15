@@ -1,9 +1,26 @@
 # Officebox — Technical Design Document (TDD)
 
 **Status:** Draft for engineering review  
-**Version:** 1.6  
+**Version:** 1.8  
 **Date:** 15 November 2026  
 **Companion to:** [Officebox PRD v1.5](PRD.md) and the feature and cross-cutting specs in [`specs/`](specs/)  
+**Changes in 1.8:** passwordless sign-in on **better-auth** (product-owner decision, 15 Nov 2026; [Identity](specs/identity.md) §2):
+- passkeys and magic links only; passwords, password reset, peppers and PBKDF2 removed (§3.1, §8.1)
+- better-auth (MIT) for sessions, magic links and passkeys on D1, its configuration, and the advisory policy (§8.1)
+- database sessions with the cookie cache off; no refresh tokens or `session_epoch`; revocation closes sockets by session (§2.1, §3.1, §3.5)
+- setup registers the owner's passkey (§6.8); `BETTER_AUTH_SECRET` replaces `SESSION_SIGNING_KEY` and `PEPPER_*` (§6.1)
+- CSRF alongside better-auth's origin check (§8.2); export exclusions (§7.5); tests (§9.1); decisions, with the PBKDF2 spike result kept for the record (§10)
+- after the product owner's answers and the review (same day): the canonical origin in `installation` (§2.1, §3.1, §8.1); user verification required; magic links for members only; tokens in URL fragments (§8.2); no session token reachable by JavaScript; sign-in limits in our middleware; our compare-and-set token consumption; the setup WebAuthn preflight, resume guard and expiry (§6.8); passkeys in exports (§7.5); session recheck for sockets (§3.5); and the M1a-0 better-auth spike scope (§10)
+- after the second review and the product owner's answers (same day): step-up for sensitive actions, the two-step domain move and the security-notice banner (§8.1); one-batch claim expiry, nonce-checked completion and the identity repair job (§6.8, §7.8, §8.1); promotion rules; passkey public keys exported (§7.5, §9.1); M1a-0 go/no-go criteria (§10).
+
+**Changes in 1.7:** brought in line with the [Admin & Operations spec](specs/admin.md) (§19 there):
+- `exports` columns and states, the step-up session field (now `sessions.fresh_auth_at`, 1.8), new `installation` columns, and the admin tables (§2.1, §7.5)
+- maintenance through `maintenance_epoch` and the room-level `setMaintenance` RPC, not `updateAccess` (§3.5, §7.5)
+- checklist items, the `config.json` values embedded at build, alerts for updates, and restore (peppers dropped in 1.8) (§6.1, §6.3, §6.4, §6.7, §6.8)
+- dispatcher-run health checks, owner-only diagnostics, and Admin §4 alerts as the in-app path (§7.1–§7.3)
+- exports run by owners and admins, packing into one R2 object, download tokens, retention, per-member exports and the consistency barrier (§7.5)
+- priority writes in protective mode, `storage_thresholds`, and the new dispatcher jobs (§7.7, §7.8).
+
 **Changes in 1.6:** brought in line with the [Assistant spec](specs/assistant.md) (§17 there):
 - assistant tables, reserved `system` and `assistant` user rows, purge jobs and the `assistant-purge` fan-out (§2.1, §2.3)
 - ReminderScheduler kinds, the room-registry kind `assistant` and the `/ws/assistant` socket (§2.2, §3.1, §3.5)
@@ -133,7 +150,7 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 | R2 | Files, attachments, exports | R2 |
 | Vectorize | Embeddings for permission-aware retrieval | Vectorize |
 | HuddleRoom DO | Huddle roster, track registry, single-presenter control, host actions; call notes and captions (M9c) | Durable Object |
-| ProjectRoom DO | Authoritative issues, board ordering, checklists, comments, activity, and board presence per project (and per member for personal tasks), with outbox to D1 ([Projects](specs/projects.md) §11.1) | Durable Object + SQLite |
+| ProjectRoom DO | Authoritative issues, board ordering, checklists, comments, activity, and board presence per project (`idFromName(projectId)`) plus one workspace-wide instance `idFromName("personal")` for personal tasks, with outbox to D1 ([Projects](specs/projects.md) §11.1) | Durable Object + SQLite |
 | Assistant DO | Per-member assistant: conversations, private memory, pending actions, live voice sessions (§5.5) | Durable Object + SQLite |
 | Realtime SFU | Audio, video and screen-share media; TURN | Cloudflare Realtime |
 | AI Gateway | BYOK provider proxy, fallback, rate limiting; logging and caching turned off for assistant calls (§5.10) | AI Gateway |
@@ -182,7 +199,7 @@ Conventions:
 - The schema implements the role model and retention rules in PRD §10.1 and §10.2.
 - **Authority:**
   - This section is authoritative for the **core** tables: installation, users, sessions, invitations, groups, channels, channel members, the message copy, resource grants, audit, jobs.
-  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15, Assistant §14.2, and Projects §11.
+  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15, Assistant §14.2, Admin §16, and Projects §11.
   - [Platform §14](specs/platform.md) reconciles every change.
 - **Enums that may grow are validated with Zod** in `packages/shared`, not with SQL `CHECK` constraints (Platform §14). The value lists are given as comments below. Fixed sets (for example `group_members.role`) may keep a `CHECK`.
 - **Baseline rule:** spec changes to a table are folded into the baseline migration of the milestone that first creates it, so no table is rebuilt. After a release, changes follow expand/contract (§6.5).
@@ -195,22 +212,33 @@ CREATE TABLE installation (
   name TEXT NOT NULL,
   setup_token_hash TEXT,            -- generated-token mode only; cleared on setup (§6.8)
   setup_token_expires_at INTEGER,
-  setup_claim TEXT,                 -- nonce of the request that completed setup
-  setup_completed_at INTEGER,
+  setup_claim TEXT,                 -- nonce of the request that claimed setup
+  setup_claimed_at INTEGER,         -- an incomplete claim expires after 24 hours (§6.8)
+  setup_completed_at INTEGER,       -- set when the owner's first passkey is registered
+  canonical_origin TEXT,            -- recorded at the claim; also the link origin for dispatcher email (Admin §4, which called it public_origin); rpID, link origin and Origin checks (§8.1)
+  allowed_hosts TEXT,               -- JSON: hosts that redirect to the canonical origin
+  pending_origin TEXT,              -- two-step domain move: started, not yet committed (§8.1)
+  pending_origin_started_by TEXT,
+  pending_origin_expires_at INTEGER,  -- 24 hours after the start (default)
   latest_release TEXT,              -- JSON from the daily release check (§6.7)
-  settings TEXT NOT NULL DEFAULT '{}'  -- JSON: storage thresholds, retention overrides
+  settings TEXT NOT NULL DEFAULT '{}',  -- JSON: storage thresholds, retention overrides
+  checklist TEXT,                   -- JSON: manual post-deploy checklist items marked done (§6.1, Admin §15)
+  maintenance_epoch INTEGER NOT NULL DEFAULT 0,  -- incremented on every maintenance change (§7.5, Admin §13.2)
+  scheduled_export_last_slot INTEGER  -- claimed scheduled-export slot, compare-and-set (§7.8, Admin §11.1)
 );
 
 -- Identity
 CREATE TABLE users (
   id TEXT PRIMARY KEY,
-  email TEXT UNIQUE COLLATE NOCASE,  -- NULL only once deleted
+  email TEXT UNIQUE COLLATE NOCASE,  -- NULL only once deleted; as entered, for display
+  email_normalised TEXT UNIQUE,      -- trim, lowercase, NFKC: lookup, uniqueness, limiter keys
   display_name TEXT NOT NULL,
-  password_hash TEXT,                -- NULL once deleted (and for future SSO-only accounts)
+  email_verified INTEGER NOT NULL DEFAULT 0,  -- better-auth's emailVerified
+  first_signed_in_at INTEGER,        -- first session; gates setup resume and invitation reopening
+  created_attempt_id TEXT,           -- invitation accept attempt that created the user (repair job, §8.1)
   role TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member | guest (guest reserved for Phase 2; Zod)
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted', 'system')),
-  session_epoch INTEGER NOT NULL DEFAULT 0,  -- increment to invalidate every session
-  pending_security_notice TEXT,      -- shown on the sign-in page (Identity §4.6)
+  pending_security_notice TEXT,      -- JSON list of notices; banner until acknowledged on a fresh passkey sign-in (Identity §4.6a)
   admin_reset_at INTEGER,            -- no-email recovery flag shown to owners (Identity §4.6)
   admin_reset_by TEXT,
   admin_reset_acknowledged_by TEXT,
@@ -219,42 +247,52 @@ CREATE TABLE users (
   deleted_at INTEGER,
   CHECK (status IN ('deleted', 'system') OR email IS NOT NULL)
 );
--- Reserved rows: id 'system' and id 'assistant', status 'system', no email or password (default).
+-- No password_hash and no session_epoch: sign-in is passwordless, and revocation deletes sessions (§3.5, §8.1).
+-- better-auth's `user` model maps onto this table (Identity §5): name -> display_name,
+-- emailVerified -> email_verified, image -> avatar_key; role, status, handle and profile columns are
+-- additionalFields with input: false. IDs are ULIDs (advanced.database.generateId).
+-- Reserved rows: id 'system' and id 'assistant', status 'system', no email (default).
 -- They exist so messages.sender_id can reference them (Chat §4.6, Assistant §14.2). They are not
 -- members: excluded from the directory, seat counts, sign-in and the permission engine (§2.1
 -- "Permission resolution", step 1). The baseline migration inserts both with INSERT OR IGNORE.
 -- Profile columns, `handle` (copy of the authoritative `handles` table) and the
--- `handles`, `passkeys` and `auth_tokens` tables are defined in Identity §5.
--- `auth_tokens.kind`: magic_link | password_reset | recovery | email_change (Zod), with a `payload` column.
+-- `handles`, `passkeys`, `auth_accounts`, `auth_verifications` and `auth_tokens` tables are defined in Identity §5.
+-- `auth_tokens.kind`: recovery | email_change | passkey_enrol (Zod), with a `payload` column.
+-- Magic-link tokens live in better-auth's `auth_verifications`.
 
 CREATE TABLE invitations (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL COLLATE NOCASE, -- always required; copy-link invites are bound to it (Identity §4.2)
+  email_normalised TEXT NOT NULL,    -- trim, lowercase, NFKC
   role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
   token_hash TEXT NOT NULL UNIQUE,   -- single-use; raw token only ever in the link
   invited_by TEXT NOT NULL REFERENCES users(id),
   expires_at INTEGER NOT NULL,
   accepted_at INTEGER,
   accepted_by TEXT REFERENCES users(id),
+  accepted_attempt_id TEXT,          -- set by the accept compare-and-set (repair job, §8.1)
   revoked_at INTEGER,
   created_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX invitations_pending_email ON invitations(email_normalised)
+  WHERE accepted_at IS NULL AND accepted_attempt_id IS NULL AND revoked_at IS NULL;
 
-CREATE TABLE sessions (
+CREATE TABLE sessions (             -- better-auth `session` model, mapped (Identity §5)
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  refresh_token_hash TEXT NOT NULL UNIQUE,
-  session_epoch INTEGER NOT NULL,    -- must equal users.session_epoch to stay valid
-  previous_refresh_hash TEXT,        -- 30-second grace window after rotation (§8.1)
-  rotated_at INTEGER,
+  token TEXT NOT NULL UNIQUE,        -- better-auth session token; the cookie carries it signed with BETTER_AUTH_SECRET
+  ip_address TEXT,
   user_agent TEXT,
-  device_label TEXT,
+  device_label TEXT,                 -- additionalFields, set in databaseHooks.session.create.before
   approx_location TEXT,
   created_at INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  revoked_at INTEGER
+  updated_at INTEGER NOT NULL,       -- last refresh of the sliding expiry ("last seen", at most a day old)
+  fresh_auth_at INTEGER,             -- last passkey assertion on this session: step-up for sensitive actions and downloads (§8.1, Admin §11.3, which called it authenticated_at)
+  fresh_auth_method TEXT,            -- passkey | magic_link
+  expires_at INTEGER NOT NULL
 );
+-- No refresh token, epoch or revoked_at: revoking a session deletes its row (§3.5, §8.1).
+-- Exact columns follow the generated SQL of the pinned better-auth version.
 CREATE INDEX sessions_user ON sessions(user_id);
 
 CREATE TABLE ws_tickets (            -- one-time WebSocket connect tickets (§3.1)
@@ -422,11 +460,11 @@ CREATE TABLE object_links (
 CREATE INDEX object_links_target ON object_links(target_type, target_id);
 
 -- Projects and issues (M10; authoritative DDL in Projects §11.1–11.2, added in M10a migration)
--- projects: id, key, name, description, icon, color, status ('active' | 'on_hold' | 'completed' | 'archived'),
+-- projects: id, key, name, summary, description_json, icon, colour, status ('active' | 'on_hold' | 'completed' | 'archived'),
 --   general_access ('restricted' | 'workspace_view' | 'workspace_comment' | 'workspace_edit'),
---   channel_id, drive_id, calendar_id, columns_json, pulse_schedule, next_issue_number, created_by, created_at, updated_at, archived_at, deleted_at, purge_after
+--   channel_id, drive_id, calendar_id, columns_json, pulse_schedule, target_date, projected_seq, created_by, created_at, updated_at, archived_at, deleted_at, purge_after
 -- issues (D1 query/search projection of ProjectRoom DO state): id, project_id (NULL = personal task in ProjectRoom("personal")),
---   number, key, title, description_format, description_text, status_column_id, status_category, priority,
+--   number, key, title, description_text, status_id, status_category, priority,
 --   assignee_id, creator_id, parent_id, milestone_id, start_date, due_date (ISO YYYY-MM-DD), effort_days,
 --   labels_json, checklist_total, checklist_done, comment_count, blocked_by_count, needs_reassignment,
 --   board_order, version, completed_at, created_at, updated_at, deleted_at, purge_after
@@ -530,7 +568,7 @@ CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 
 | Area | Change | Defined in |
 |---|---|---|
-| Identity | `users` profile columns, `handle` (copy of the authoritative `handles` table), `pending_security_notice` and the `admin_reset_*` flag; new `handles`, `passkeys`, `auth_tokens` (kinds `magic_link`, `password_reset`, `recovery`, `email_change`, plus `payload`); `invitations.group_ids`; `groups.handle`; `group_members.role` (manager, member); `sessions.device_label` / `approx_location` / `previous_refresh_hash` / `rotated_at` | Identity §5 |
+| Identity | `users` profile columns, `handle` (copy of the authoritative `handles` table), `pending_security_notice`, the `admin_reset_*` flag and `email_verified`; no `password_hash` or `session_epoch`; new `handles`, `passkeys` (better-auth's model plus `verified_sign_count`), better-auth's `auth_accounts` and `auth_verifications`, our `magic_link_issues` and `user_devices`, `users.email_normalised` (unique), `first_signed_in_at` and `created_attempt_id`, `handles.created_attempt_id`, `invitations.email_normalised` (unique while pending) and `accepted_attempt_id`, `sessions.fresh_auth_at`, `recovery_token_uses`, `passkeys.created_via`, and `auth_tokens` (kinds `recovery`, `email_change`, `passkey_enrol`, plus `payload` and `revoked_at`); `installation.canonical_origin` / `allowed_hosts` / `setup_claimed_at` / `pending_origin*` (above); `invitations.group_ids`; `groups.handle`; `group_members.role` (manager, member); `sessions.device_label` / `approx_location` | Identity §5 |
 | Chat | `channels.topic` / `description` / `posting_policy` / `config_version`; `channel_members.can_post` / `hidden` (no per-conversation email delay); message copy columns `kind` (`user`, `call_chat` or a Chat §4.6 system kind), `format`, `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` (`body` stays the plain-text copy); new `thread_follows`, `saved_items` (`in_progress` / `done`), `sidebar_prefs`, `link_previews`, `message_previews` | Chat §15 |
 | Permissions | `resource_grants` value lists; `general_access` values including `workspace_freebusy` (calendars only); `access_requests` with `expires_at` and a unique pending request per requester and object | Permissions §9 |
 | Documents | `drives`, `file_versions`, `stars`, `recent_items`, `comment_threads`, `comments`, `item_activity`; `folders.drive_id` / `channel_id`; `documents.folder_id` / `drive_id` / `created_by`; `files.drive_id` / `current_version` / `copied_from_file_id` | Documents §9 |
@@ -541,7 +579,8 @@ CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 | Platform | `rate_counters` (D1 counters), `ics_opt_outs`, the durable UserHub room registry | Platform §8, §12, §15 |
 | Files | Four kinds: message-owned (`parent_type = 'message'`), document-owned (`parent_type = 'document'`), issue-owned (`parent_type = 'issue'`), drive files (`folder_id` set, versioned) | Platform §14, Documents §6 |
 | Assistant | New `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments`; `messages.kind` adds `assistant` and `call_notes` (sender `'assistant'`); `scheduled_triggers.kind` adds `assistant_brief`, `assistant_prep`, `personal_reminder`; `inbox_items.event_type` adds `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`; `rate_counters` scopes `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes`; reserved handles `assistant` and the display-name handle; reserved `users` rows `'system'` and `'assistant'` (`status = 'system'`, above) | Assistant §14.2 |
-| Projects, Tasks & Issues (M10) | `projects` (with `columns_json`, `pulse_schedule`, `next_issue_number`, `general_access`) and `issues` D1 projection (with `status_column_id`, `status_category`, `priority`, `effort_days`, `labels_json`, `needs_reassignment`, `parent_id`, `board_order`, `blocked_by_count`, `creator_id`); new D1 tables `project_milestones`, `project_labels`, `issue_key_aliases`, `issue_reviewers`, `issue_relations`, `issue_follows`, `project_memories`, `project_memory_sources`, `project_pulses`; `ProjectRoom` DO tables (`issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments`, `issue_activity`); `channels.project_id`, `drives.project_id`, `calendars.project_id`, `events.type` (`release`, `demo`), `messages.kind` (`project_event`), `huddles.context_type` (`project`, `issue`), `scheduled_triggers.kind` (`issue_due`, `project_pulse`), `inbox_items` (`assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment`) | Projects §11 |
+| Admin | New `admin_alerts` (one row per `kind, subject`), `health_checks`, `maintenance_windows` (single-open-window unique index), `admin_jobs` (CSV invites and bulk actions) and `download_tokens` (token hashes only); `exports` columns and states (§7.5), including the partial unique index allowing one running workspace export; the `installation` columns above (the step-up field is `sessions.fresh_auth_at`, Identity §5); `inbox_items.event_type` adds `admin_alert` and `maintenance_scheduled`; shared error codes `reauth_required` and `maintenance` | Admin §16 |
+| Projects, Tasks & Issues (M10) | `projects` (with `columns_json`, `pulse_schedule`, `target_date`, `projected_seq`, `general_access`) and `issues` D1 projection (with `status_id`, `status_category`, `priority`, `effort_days`, `labels_json`, `needs_reassignment`, `parent_id`, `board_order`, `blocked_by_count`, `creator_id`); new D1 tables `project_milestones`, `project_labels`, `issue_key_aliases`, `issue_reviewers`, `issue_relations`, `issue_follows`, `project_memories`, `project_memory_sources`, `project_pulses`; `ProjectRoom` DO tables (`issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments`, `issue_activity`, plus `meta.next_issue_number` and `meta.outbox_seq`); `channels.project_id`, `drives.project_id`, `calendars.project_id`, `events.type` (`release`, `demo`), `messages.kind` (`project_event`), `huddles.context_type` (`project`, `issue`), `scheduled_triggers.kind` (`issue_due`, `project_pulse`), `inbox_items` (`assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment`) | Projects §11 |
 
 **Permission resolution** ([Permissions](specs/permissions.md) §5). The Worker resolves access as follows:
 
@@ -719,7 +758,7 @@ CREATE TABLE meta (
 Compaction, chunking and revision history are described in §4.3. A single SQLite row, string or BLOB can be up to 8 MB. Snapshots are split into 4 MB chunks so even large whiteboards fit with headroom. Binary assets such as images live in R2 and are referenced from the Yjs document, never embedded in it.
 
 **UserHub DO** — one per user (`idFromName(user_id)`). It holds the user's hub WebSockets and delivers inbox events, unread changes, presence changes, rings and revocations (§3.5). State that must survive hibernation is stored in its SQLite (Platform §12):
-- the **room registry** `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board`, `huddle` and `assistant` (the member's `/ws/assistant` sockets, §5.5)
+- the **room registry** `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board`, `project`, `huddle` and `assistant` (the member's `/ws/assistant` sockets, §5.5)
 - live **ring state** and **`currentCall`** (Calls §4, §5)
 - **held-notification state** during DND, focus and time off (Notifications §5)
 - **derived availability**, recomputed by `refreshAvailability()` from `user_availability`, `user_preferences` and tab activity (Notifications §5.7).
@@ -738,7 +777,7 @@ CREATE TABLE online (
 ```
 
 **ReminderScheduler DO** — a single instance, which can be sharded by `hash(userId)` later. It holds `scheduled_triggers` (Platform §11.1):
-- **Trigger kinds:** `reminder`, `event_start` (raises `call_starting`), `focus_start` / `focus_end`, `time_off_start` / `time_off_end`, `status_expire`, `dnd_start` / `dnd_end`, `dnd_until_end`, `email_release`, and from M9 `assistant_brief`, `assistant_prep` (both enqueue to `assistant-proactive`, §5.8) and `personal_reminder` (raises the `personal_reminder` inbox item, Assistant §7.1). Availability kinds call UserHub `refreshAvailability()`. `assistant_brief` and `assistant_prep` are suspended while the member is disabled or lacks assistant access, `personal_reminder` while disabled, and all three are deleted with the member (Assistant §10.1, §13).
+- **Trigger kinds:** `reminder`, `event_start` (raises `call_starting`), `focus_start` / `focus_end`, `time_off_start` / `time_off_end`, `status_expire`, `dnd_start` / `dnd_end`, `dnd_until_end`, `email_release`, from M9 `assistant_brief`, `assistant_prep` (both enqueue to `assistant-proactive`, §5.8) and `personal_reminder` (raises the `personal_reminder` inbox item, Assistant §7.1), and from M10 `issue_due` (raises `issue_due_soon` at the assignee's start of working hours) and `project_pulse` (enqueues scheduled Project Pulse generation to `assistant-proactive`, Projects §8.1). Availability kinds call UserHub `refreshAvailability()`. `assistant_brief` and `assistant_prep` are suspended while the member is disabled or lacks assistant access, `personal_reminder` and `issue_due` while disabled, and member-scoped triggers are deleted with the member (Assistant §10.1, §13; Platform §11.1).
 - **Filling:** a rolling 48-hour expansion of recurring events and per-attendee time zones. The calendar service updates triggers on every change, and an hourly refill job extends the window.
 - **Firing (outbox pattern):** one alarm, set to the earliest of the next unfired trigger and the next outbox retry. In one DO transaction the trigger is marked fired and a `trigger_outbox` row is written; the alarm drains the outbox to the queue, deleting rows only after a successful send. The consumer is idempotent on the trigger ID, so each trigger has at most one effect, retried until delivered (Platform §11.1).
 - **Catch-up:** triggers less than 1 hour overdue fire; older ones are dropped and logged.
@@ -761,6 +800,8 @@ This implements PRD §10.2.
 | Document / whiteboard | DocRoom / BoardRoom DO `deleteAll()`, then R2 snapshot copies (prefix delete), then attached files, then grants, links and inbox items, then the document's `call_notes` and transcripts (M9), then vectors, then the `documents` row. |
 | Folder | Contained files and subfolders (each through its own job), then the row. |
 | File | R2 object(s), then `file_derived_text` and its vectors (M9), then the `files` row. |
+| Project (M10) | Moves non-trashed Project Drive items to creators' My files and deletes the empty drive; moves Project Calendar meeting events with attendees to organisers' personal calendars and deletes milestones and the calendar; purges the Project Channel (as above); runs `ProjectRoom` DO `deleteAll()`, deletes issue-owned R2 files, `file_derived_text`, issue-call `huddle_messages`, `call_notes` and `call_transcript_segments`, D1 `issues`, `issue_reviewers`, `issue_relations`, `issue_follows`, `issue_key_aliases`, `project_milestones`, `project_labels`, `project_memories`, `project_memory_sources` and `project_pulses`, vectors and `assistant-purge` fan-out, then the `projects` row (Projects §10.1). |
+| Issue / personal task (M10) | Deletes the row and sub-issues from `ProjectRoom` DO (or `ProjectRoom("personal")`), issue-owned R2 files and `file_derived_text`, issue-call `huddle_messages`, `call_notes` and `call_transcript_segments`, D1 `issues`, `issue_reviewers`, `issue_relations`, `issue_follows`, `issue_key_aliases`, citing `project_memories`, vectors and `assistant-purge` fan-out (Projects §10.2). |
 
 **Message deletion is immediate, not trashed.**
 
@@ -779,13 +820,13 @@ This implements PRD §10.2.
 - **Event deletion** applies to a series or an occurrence.
 - **File purge** deletes every version.
 - **Comment threads** are deleted with their document.
-- **Call notes and transcripts** (M9) are deleted, with their vectors, when their channel, event or document is deleted (Platform §4). `call_notes` is keyed to the context and doesn't cascade from `huddles`.
+- **Call notes and transcripts** (M9) are deleted, with their vectors, when their channel, event, document or issue is deleted (Platform §4). `call_notes` is keyed to the context and doesn't cascade from `huddles`.
 
-**Assistant copies follow deletion** (Assistant §4.4). Every pipeline that deletes content also feeds the `assistant-purge` queue: message deletion, channel purge, document or whiteboard purge, a file version dropped or purged, event deletion, and call notes or transcripts purged by retention or a context cascade. The pipeline looks up D1 `assistant_source_refs` for the deleted objects and enqueues one job per affected member; the consumer and the DO side are described in §5.7. These jobs run while the assistant is off and for disabled members, because they are housekeeping, not requests.
+**Assistant copies follow deletion** (Assistant §4.4). Every pipeline that deletes content also feeds the `assistant-purge` queue: message deletion, channel purge, document or whiteboard purge, a file version dropped or purged, event deletion, issue or project purge, and call notes or transcripts purged by retention or a context cascade. The pipeline looks up D1 `assistant_source_refs` for the deleted objects (and deletes citing `project_memories` via `project_memory_sources`, Projects §8.2) and enqueues one job per affected member; the consumer and the DO side are described in §5.7. These jobs run while the assistant is off and for disabled members, because they are housekeeping, not requests.
 
-**Member lifecycle and personal-data erase.** [Platform](specs/platform.md) §3 defines, per feature, what happens on **disable** (everything kept; sign-in blocked; sockets closed, including calls) and **delete** (personal data erased). §3.1 there is the authoritative erase list. It covers profile fields, passkeys, auth tokens, sessions, preferences, follows, saved items, stars, recent items, time off, event notes and reminders, ICS feeds and subscriptions, inbox items, access requests, and the avatar object in R2. It also re-renders `@handle` text as "Former member" in message copies and the search index. Ownership transfers on delete: My files, organised events and owned calendars go to an admin. Messages keep `sender_id`. From M9 the erase list adds the member's **Assistant DO storage** (`deleteAll()`), their `assistant_interactions`, `assistant_optins`, `assistant_source_refs` and `personal_reminders` rows and their assistant triggers; `call_notes.started_by` and `call_transcript_segments.speaker_id` show "Former member", like messages (Assistant §13). Every Worker path checks the member's status in D1 before addressing an Assistant DO, so a queued job never recreates a deleted member's DO.
+**Member lifecycle and personal-data erase.** [Platform](specs/platform.md) §3 defines, per feature, what happens on **disable** (everything kept; sign-in blocked; sockets closed, including calls) and **delete** (personal data erased). §3.1 there is the authoritative erase list. It covers profile fields, passkeys, auth tokens, sessions, preferences, follows, saved items, stars, recent items, time off, event notes and reminders, ICS feeds and subscriptions, inbox items, access requests, and the avatar object in R2. It also re-renders `@handle` text as "Former member" in message copies and the search index. Ownership transfers on delete: My files, organised events, owned calendars and open personal tasks go to an admin. Messages keep `sender_id`. From M9 the erase list adds the member's **Assistant DO storage** (`deleteAll()`), their `assistant_interactions`, `assistant_optins`, `assistant_source_refs` and `personal_reminders` rows and their assistant triggers; `call_notes.started_by` and `call_transcript_segments.speaker_id` show "Former member", like messages (Assistant §13). Every Worker path checks the member's status in D1 before addressing an Assistant DO, so a queued job never recreates a deleted member's DO.
 
-**Retention and Trash** for every object are in [Platform](specs/platform.md) §5, including who may restore from each container. The daily cron runs those rules: audit log, resolved inbox items, event-log horizons, expired invitations, sessions, tickets and auth tokens, huddle metadata (365 days), call rings, outside-attendee emails, access requests and link previews. **In-call chat** for document and event calls is kept for the life of its context, not with huddle metadata.
+**Retention and Trash** for every object are in [Platform](specs/platform.md) §5, including who may restore from each container. The daily cron runs those rules: audit log, resolved inbox items, event-log horizons, expired invitations, sessions, tickets and auth tokens, huddle metadata (365 days), call rings, outside-attendee emails, access requests and link previews. **In-call chat** for document, event and issue calls is kept for the life of its context, not with huddle metadata.
 
 **Assistant purge jobs** (M9, Assistant §14.3) run in the same daily cron: expired `assistant_interactions` (`assistant_interaction_retention_days`), `call_transcript_segments` past `call_transcript_retention_days` together with their vectors (notes stay for the life of the context), `file_derived_text` for purged versions, and `personal_reminders` 30 days after done or dismissed. Conversations and memory are swept inside each Assistant DO by its own `retention_sweep` timer (§5.5). All of these keep running while the assistant is turned off.
 
@@ -808,9 +849,9 @@ CREATE TABLE document_text (
 CREATE VIRTUAL TABLE search_index USING fts5(
   title,
   body,
-  object_type UNINDEXED,   -- message, document, whiteboard, file, call_notes (M9)
+  object_type UNINDEXED,   -- message, document, whiteboard, file, call_notes (M9), issue (M10a), project_memory (M10c)
   object_id UNINDEXED,
-  scope_id UNINDEXED,      -- channel ID for messages; document or folder ID otherwise; Assistant §9 for M9 types
+  scope_id UNINDEXED,      -- channel ID for messages; document or folder ID otherwise; project:<id> or issue:<id> for M10; Assistant §9 for M9 types
   tokenize = 'unicode61 remove_diacritics 2'
 );
 ```
@@ -821,11 +862,12 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 - Documents and whiteboards: once updates have been quiet for 5 seconds (and at most once every 60 seconds), the DO extracts the title and plain text and queues it through its outbox to the `search-projection` Queue. The consumer upserts `document_text` and `search_index` together.
 - File names are indexed when uploaded. File contents are not indexed in Phase 1.
 - **From M9** (Assistant §9), two more kinds of text are indexed, by the `indexing` consumer (§5.2):
-  - **derived file text** from `file_derived_text`, per file version (`scope_id`: the file's folder or drive, or its message's channel; checked as the file)
-  - **call notes and transcripts** as object type `call_notes` (`scope_id`: the channel for channel and DM calls, the document for document calls; checked as that context). Notes and transcripts of **event** calls are not indexed; they are reached through the event with event access checked.
+  - **derived file text** from `file_derived_text`, per file version (`scope_id`: the file's folder or drive, its message's channel, or its issue's scope; checked as the file)
+  - **call notes and transcripts** as object type `call_notes` (`scope_id`: the channel for channel and DM calls, the document for document calls, or the issue's scope for issue calls; checked as that context). Notes and transcripts of **event** calls are not indexed; they are reached through the event with event access checked.
   - Because they come from the assistant pipeline, their **upserts** follow its gate (only while `assistant_enabled` is on, §5.2). Their **deletions** always run: Trash removes derived text from search, restore re-indexes it, purge and retention delete it, and **Delete assistant index** removes every derived-text row.
+- **From M10** (Projects §11.1–11.2), the `project-projection` consumer indexes **issues and personal tasks** (`object_type = 'issue'`, `scope_id = 'project:' || project_id` or `'issue:' || id` for personal tasks) and **confirmed project memories** (`object_type = 'project_memory'`, `scope_id = 'project:' || project_id`).
 - **Events are never indexed** (Assistant §9): their access depends on calendar role, attendee status and visibility, which no single scope can express.
-- When a member is deleted, `@handle` text in the plain-text message copy and in `search_index` is re-rendered as "Former member" (Platform §3).
+- When a member is deleted, `@handle` text in the plain-text message copy, issue descriptions/comments and `search_index` is re-rendered as "Former member" (Platform §3).
 
 **Querying.**
 
@@ -834,7 +876,8 @@ CREATE VIRTUAL TABLE search_index USING fts5(
    - channels from `channel_members`
    - documents, whiteboards, drive files and folders reachable under the **union rule** (§2.1): grants on the item, its ancestor folders and its drive, built-in drive roles, the channel-folder rule (members of the channel, or everyone for public channels), and general access along the chain
    - message-owned files, searchable by file name (and, from M9, derived text) only within conversations the user can read
-   - from M9, call notes in channels the user can read and documents the user can open (Assistant §9).
+   - from M9, call notes in channels the user can read, documents the user can open, and (from M10b) issues the user can view (Assistant §9)
+   - from M10, projects reachable under the project union rule (`'project:' || id`) and personal tasks (`'issue:' || id`) where the user is creator, assignee, reviewer or granted access (§2.1).
 2. The FTS `MATCH` results are joined to those scopes and ranked by `bm25()`, with `snippet()` for highlights.
 3. Results for deleted or trashed objects never appear, because deletion removes their rows from `search_index`.
 
@@ -849,34 +892,33 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 
 ### 3.1 Connection lifecycle and authentication
 
-1. The client signs in with `POST /auth/password`, a magic link or a passkey (below). The Worker sets two cookies, both `HttpOnly`, `Secure` and `SameSite=Lax`:
-   - `ob_session`: a short-lived (15-minute) signed access token carrying user ID, session ID and `session_epoch`.
-   - `ob_refresh`: a 30-day rotating refresh token, scoped to `/auth/refresh` and stored hashed in `sessions`.
+1. The client signs in with a passkey or a magic link (below), through **better-auth** (§8.1), on the **canonical origin** only. better-auth sets one **session cookie** (`HttpOnly`, `Secure`, `SameSite=Lax`, host-only with path `/`, `__Host-` prefixed where better-auth allows; §10) holding its session token, signed with `BETTER_AUTH_SECRET`. The session row lives in `sessions` (§2.1): 30 days, sliding (`expiresIn` 30 days, `updateAge` 1 day). There are **no access or refresh tokens**.
 
-   JavaScript can't read either token, and neither ever appears in a URL.
+   JavaScript can't read the token, it never appears in a URL, and no response body carries it: get-session isn't exposed (the web app uses `GET /me`) and a response filter strips session tokens from better-auth's JSON (§8.1).
 2. The client opens WebSockets to `/ws/hub`, `/ws/channels/:id`, `/ws/docs/:id`, `/ws/calls/:id` (after `POST /calls/:id/join`, §3.6) or, from M9, `/ws/assistant` (always the member's own Assistant DO, §5.5). Browsers send same-origin cookies with the upgrade request.
-3. The Worker validates the cookie and checks the `Origin` header against the installation's origin, which blocks cross-site WebSocket hijacking. It then resolves the user's role for the target and forwards the request to the Durable Object.
+3. The Worker validates the cookie with better-auth (`auth.api.getSession`, which reads the session row from the D1 primary because the cookie cache is off) and checks that the user is `active`. It checks the `Origin` header against the installation's **canonical origin** (`installation.canonical_origin`, the same value better-auth's `trustedOrigins` and the passkey relying-party ID use), which blocks cross-site WebSocket hijacking. It then resolves the user's role for the target and forwards the request to the Durable Object.
 4. The DO accepts the socket with `ctx.acceptWebSocket(server)` and stores the user ID, session ID, role and connection ID with `serializeAttachment`.
-5. Sockets deliberately outlive the 15-minute token. Revocation closes them (§3.5), not token expiry. The client refreshes the access cookie in the background so reconnects succeed.
+5. Sockets live until they close or are revoked (§3.5). Revoking a session deletes its row and closes every socket whose attachment carries that session ID. A session that **expires** on its own is caught by the UserHub's periodic session recheck (§3.5).
 6. **Clients that can't send cookies** (a stock Yjs client, future native apps) use a one-time connect ticket:
    - The client calls `POST /auth/ws-ticket` while authenticated.
    - The ticket is single-use, valid for 30 seconds and bound to one target. It is passed as `?ticket=` and stored hashed in `ws_tickets`.
    - A logged URL therefore never leaks a reusable credential.
 7. When the DO wakes from hibernation, the constructor runs and state is restored from the attachments.
 
-**Sign-in methods** (Identity §4.4):
-- **Password:** `POST /auth/password`.
-- **Magic link:** single-use and valid for 15 minutes, on any device.
-- **Passkeys:** WebAuthn with **discoverable credentials**.
-  - User verification is **"preferred"**.
-  - `sign_count` is checked, and a backwards count is rejected as a possible clone.
-  - Credentials are bound to the **relying-party ID (the domain)**: a domain change or a restore to a new domain leaves passkeys unusable. Registering on `*.workers.dev` warns about this.
-- **Owners must keep a password**; members may be passkey-only.
-- The WebAuthn library choice needs a spike before M1 (§10).
+**Sign-in methods** (Identity §4.4). **Passwordless:** there are no passwords, password resets or peppers (product-owner decision, 15 Nov 2026).
+- **Passkeys** (better-auth `@better-auth/passkey`, SimpleWebAuthn underneath): WebAuthn with **discoverable credentials**.
+  - **User verification is required** on every sign-in and registration, for everyone, enforced on the server (product owner, 15 Nov 2026).
+  - The counter rule (at or below the stored value, not both 0, is `clone_detected`) is enforced by the library or by our after hook, as the M1a-0 spike decides (§8.1, §10).
+  - Credentials are bound to the **relying-party ID**, the canonical origin's host (§8.1): a domain change or a restore onto another origin leaves passkeys unusable. Registering on `*.workers.dev` warns about this. Each passkey records how it was created, and every addition raises a `security_notice`.
+  - The first passkey after setup, invitation acceptance or recovery is registered with an **enrolment ticket** cookie instead of a session (`registration.requireSession: false`, `resolveUser`), bound to the challenge and consumed at verify.
+- **Magic link** (better-auth `magicLink` plugin), **members only**: single-use and valid for 15 minutes, on any device; never creates an account (`disableSignUp`); never sent to owners or admins. Scanner-safe through our confirmation page (below). A sign-in from a new device raises a `security_notice`.
+- Every account is passkey-only, plus magic links for members when email is configured. Owners need a second passkey or a set, unconsumed `RECOVERY_TOKEN` before inviting (§8.1).
 
-**Other identity endpoints** (Identity §6): `POST /setup` takes a `handle` with the owner's details; `GET /me` returns the signed-in member; `POST /auth/ws-ticket` issues connect tickets (above). Email change uses an `email_change` token (pending address in `auth_tokens.payload`) with a GET confirmation page and a POST that applies it; the old address is notified and other pending tokens are revoked.
+**better-auth routes** are mounted at `/api/auth/*` and handed to `auth.handler(c.req.raw)`. Only an allowlist is reachable from outside, **default-deny on the exact normalised method and path**: sign-out, the magic-link request, and passkey sign-in and registration. Get-session and everything else answer 404, and our routes call the rest on the server through `auth.api` (Identity §6). Our own routes under that prefix (`/api/auth/ws-ticket`, `/api/auth/recover`) are registered first.
 
-**Email links are scanner-safe** (Platform §10). Magic-link, password-reset, recovery, invitation, email-confirmation and RSVP links open a **confirmation page**. Only a **POST** from that page uses the token, so mail scanners and link prefetchers can't use it up. Tokens live in `auth_tokens`, hashed. RSVP tokens are per attendee and reusable until the event ends.
+**Other identity endpoints** (Identity §6): `POST /setup` takes a `handle` with the owner's details, records the canonical origin, and sets an enrolment ticket cookie for the owner's passkey; `GET /me` returns the signed-in member; `POST /auth/ws-ticket` issues connect tickets (above); "My devices" wraps better-auth's list and revoke and never returns session tokens. Email change uses an `email_change` token (pending address in `auth_tokens.payload`) with a confirmation page (token in the fragment) and a POST that applies it; the old address is notified and other pending tokens and magic links are revoked. better-auth's own change-email route isn't exposed.
+
+**Email links are scanner-safe** (Platform §10). Magic-link, recovery, invitation, email-confirmation and RSVP links open a **confirmation page**. Only a **POST** from that page uses the token, so mail scanners and link prefetchers can't use it up. Identity links carry the token in the **URL fragment** and are built from the canonical origin (§8.2). Our tokens live in `auth_tokens`, hashed, consumed by compare-and-set. RSVP tokens are per attendee and reusable until the event ends. **Magic links:** better-auth verifies with a GET, so its link is never sent. `sendMagicLink({ email, token, url })` records the token's hash in `magic_link_issues` and emails a link to our confirmation page (`/sign-in/link#t=…`); the page's POST (`POST /api/sign-in/link`) consumes that row by compare-and-set, then calls `auth.api` magic-link verification on the server and returns better-auth's session cookie. better-auth's GET verify route isn't reachable from outside.
 
 ### 3.2 Hibernation
 
@@ -988,6 +1030,7 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 **Role downgrades and inherited-access changes** (Permissions §8, Platform §12):
 - When someone's effective role on an open object changes (for example editor → viewer, a folder, drive or project grant changes, an item moves, a channel is made private, or a poster loses `can_post`), the Worker calls the RPC **`updateAccess(userId, role | null)`** on the affected DOs through the room registry.
 - The DO updates the socket attachment and sends **`{ type: "access.changed", role }`**. A DocRoom or ProjectRoom then enforces the new role immediately. When `role` is null (all access lost) the DO closes the socket with **`4403`**. This is the only name for the mechanism (Permissions §8, Platform §12).
+- **Maintenance mode doesn't use `updateAccess`.** Open rooms get a room-level `setMaintenance(epoch, active)` RPC that sets a read-only flag separate from each socket's role (§7.5, Admin §13.2).
 - **Offline edits** that reach the server after access was lost are rejected. The client keeps them locally and offers to export them.
 
 **Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel, document, project or call context, the Worker calls `closeConnections(userId, reason, scope)`. The room registry kinds are `channel`, `doc`, `board`, **`huddle`**, **`assistant`** and **`project`**, so revocation also closes HuddleRoom sockets and the user's SFU tracks, `/ws/assistant` sockets, and `/ws/projects/:id` sockets:
@@ -997,7 +1040,11 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 
 Losing assistant access (removal from `assistant_access`) closes `/ws/assistant` sockets with `4403`; disabling closes them with `4401` (Assistant §10.1, §13).
 
-To find every affected DO, each ChatChannel, DocRoom, BoardRoom, ProjectRoom, HuddleRoom and Assistant DO registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, project access, call contexts, and the member's own Assistant DO, which is always included for a user-wide revocation or loss of assistant access) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
+To find every affected DO, each ChatChannel, DocRoom, BoardRoom, ProjectRoom, HuddleRoom and Assistant DO registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, project access, call contexts, and the member's own Assistant DO, which is always included for a user-wide revocation or loss of assistant access) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and its session row is deleted, a disabled user loses all realtime access within seconds.
+
+**Sessions that expire on their own.** While a user has sockets open, the UserHub's alarm **rechecks each connected session's row** (every 5 minutes with the presence heartbeat **(default)**) and calls `closeConnections` for sessions whose row is gone **or whose `expires_at` is before now**. This catches natural expiry, and is the fallback wherever better-auth has no session-delete hook.
+
+**Session revocation and better-auth** (Identity §4.5). `closeConnections(userId, reason, scope)` takes a scope of one **session ID** (sockets carry it in their attachment) or the whole user, so no `session_epoch` is needed. better-auth deletes session rows; we trigger the socket close from one helper, called by better-auth **after hooks** on its sign-out route (and a session-delete database hook where the pinned version has one) and directly by our routes that revoke through `auth.api`: My devices, sign out everywhere, admin sign-out, disable, recovery and owner recovery.
 
 
 ### 3.6 Calls (huddles): audio, video and screen sharing
@@ -1083,7 +1130,7 @@ Example: a 30-minute share to 8 viewers at 2 Mbps is about 3.6 GB. The usage pan
 
 **Additions** ([Calls](specs/calls.md); its data model, §10, is authoritative):
 - **Contexts:**
-  - channel and DM calls (M4); event calls (M5b; each recurring occurrence has its own `context_key`); document calls (M6); issue calls (M10a, `context_key = 'issue:' + issueId`)
+  - channel and DM calls (M4); event calls (M5b; each recurring occurrence has its own `context_key`); document calls (M6); issue calls (M10b, `context_key = 'issue:' + issueId`)
   - announcement channels allow calls for anyone who can read them; **archived channels and archived projects don't**
   - event calls can be started or joined by the organiser, attendees and anyone with details-level access to the calendar; document calls by anyone who can open the document; issue calls by anyone who can view the issue.
 - **API:** the complete REST and WebSocket list is in Calls §11 (`/calls/...`, `/ws/calls/:id`).
@@ -1211,7 +1258,7 @@ Logging and caching controls for assistant traffic are in §5.10.
 5. Changing the embedding model requires a new index, because index dimensions are fixed at creation, followed by a full re-index. This is delivered as a release migration that builds the new index before switching to it.
 
 **Object types** (Assistant §9 has the scope table):
-- messages, documents, whiteboards, issues/tasks (`object_type = 'issue'`, `scope_id = 'project:<projectId>'` or `'task:<issueId>'`, M10a) and confirmed project memories (`object_type = 'project_memory'`, `scope_id = 'project:<projectId>'`, M10c), from their search-text projection (§2.4)
+- messages, documents, whiteboards, issues/tasks (`object_type = 'issue'`, `scope_id = 'project:<projectId>'` or `'issue:<issueId>'`, M10a) and confirmed project memories (`object_type = 'project_memory'`, `scope_id = 'project:<projectId>'`, M10c), from their search-text projection (§2.4)
 - **derived file text** (`file_derived_text`, per file version; version `1` for files without versions). PDF, Office, text, Markdown and CSV files are converted with Workers AI `toMarkdown` on upload; images (vision model) and audio (speech-to-text, in chunks) are processed on demand and cached per version. All of it runs as `indexing` jobs. The same text feeds `search_index` (§2.4). Unsupported or oversize files, including video, are indexed by name and metadata only.
 - **call notes and transcripts** of channel, DM, document and issue calls, when notes are finalised (`scope_id` the channel, document or issue scope). Event-call notes are not vector-indexed.
 - **Events are never indexed**; the assistant reads them only through the calendar permission rules (`find_events`, `my_day`).
@@ -1236,7 +1283,7 @@ Design rule: permission filtering happens before model invocation, not after. No
 
 The audit split (Assistant §11):
 - **Every assistant invocation** writes one row to D1 **`assistant_interactions`**: member, time, surface, model role, provider and model, tools run, IDs of objects read and changed, outcome, and token and audio-second counts. Never prompts, replies, tool arguments or memory. Retention is `assistant_interaction_retention_days` (default 30 days, PRD §10.2). Owners and admins see it through `GET /admin/assistant/interactions` with object IDs and types only; titles are resolved only for objects the viewing admin can open. Members see their own rows.
-- **`audit_log`** receives only confirmed write actions (actor = the member, the tool and its target, `metadata.via = "assistant"`; for DMs and group DMs the object type only, Permissions §4.1), assistant settings changes, call-notes start and stop, "Forget everything", personal exports, index deletion and transcript purges.
+- **`audit_log`** receives only confirmed write actions (actor = the member, the tool and its target, `metadata.via = "assistant"`; for DMs and group DMs the object type only, Permissions §4.1), assistant settings changes, call-notes start and stop, "Forget everything", index deletion and transcript purges.
 
 ### 5.5 Assistant Durable Object
 
@@ -1306,14 +1353,14 @@ Upgrades are delivered as **release-sync pull requests** in the customer's own r
 The repository's `wrangler.jsonc` grows to include the bindings below. It is added to milestone by milestone, so a fresh deploy never provisions unused resources: M0 ships the bindings M0 and M1 need, and each later milestone adds its own bindings and Durable Object migration tags (Vectorize and AI in M9a (Phase 3), Workflows in M7, feature DOs and queues with their milestone). The full set:
 
 - Durable Object namespaces (ChatChannel, DocRoom, BoardRoom, UserHub, WorkspacePresence) as SQLite-backed classes.
-- Workflows (export and restore).
+- Workflows (workspace export, per-member export and restore).
 - D1 database.
 - R2 bucket.
 - Vectorize index.
 - Workers AI binding.
 - Queues and their dead-letter queues: `message-projection`, `search-projection`, `purge`, `email`, `indexing`.
 - Rate Limiting binding (setup, login and invitation endpoints).
-- Cron Triggers (daily maintenance: purge, retention, reconciliation, release check).
+- Cron Triggers (every 5 minutes, hourly and daily: health checks, purge, retention, reconciliation, release check; §7.8).
 - Observability (Workers Logs) enabled. This is needed for generated setup tokens (§6.8).
 - Build-time variable `OFFICEBOX_VERSION`.
 - **v1.4 additions:**
@@ -1336,23 +1383,29 @@ The Deploy to Cloudflare button copies the repository into the customer's GitHub
 node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangler deploy
 ```
 
-**Secrets** (complete inventory with purpose, required/optional and rotation in [Platform](specs/platform.md) §16): `SESSION_SIGNING_KEY` (access tokens), `TOKEN_HASH_KEY` (HMAC for stored token hashes), `DATA_ENCRYPTION_KEY` (ICS-in URLs; MFA secrets later), `POLL_SECRET_KEY` (or per-poll secrets in the DO), `SETUP_TOKEN`, `RECOVERY_TOKEN`, email provider keys, `REALTIME_APP_ID` / `REALTIME_APP_SECRET`, `TURN_KEY_ID` / `TURN_KEY_API_TOKEN`, and the optional analytics token.
+**Secrets** (complete inventory with purpose, required/optional and rotation in [Platform](specs/platform.md) §16): `BETTER_AUTH_SECRET` (better-auth: session cookie signing and its other values; rotated through `BETTER_AUTH_SECRETS`), `TOKEN_HASH_KEY` (HMAC for our stored token hashes), `DATA_ENCRYPTION_KEY` (ICS-in URLs; MFA secrets later), `POLL_SECRET_KEY` (or per-poll secrets in the DO), `SETUP_TOKEN`, `RECOVERY_TOKEN`, email provider keys, `REALTIME_APP_ID` / `REALTIME_APP_SECRET`, `TURN_KEY_ID` / `TURN_KEY_API_TOKEN`, and the optional analytics token.
 
-`SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist:
+**Missing secrets on deploy (kept from M1a).** The deploy step lists the Worker's secrets and creates any of **`BETTER_AUTH_SECRET`** and **`TOKEN_HASH_KEY`** that are missing, each from 32 random bytes piped to `wrangler secret put`. It never overwrites an existing secret, never prints a value, and stops the deploy if it fails. It no longer creates `SESSION_SIGNING_KEY` or `PEPPER_1` (15 Nov 2026). Until the required secrets exist, setup and sign-in show the **`/not-configured`** page and the Worker logs which secret is missing, never its value. Because there are no password hashes, losing a generated secret signs everyone out (and invalidates outstanding links) but locks nobody out for good: members sign in again with a passkey or magic link.
+
+`SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist, an owner page whose items, required marks and behaviour are set by [Admin](specs/admin.md) §15. Items marked **(R)** are required and can't be dismissed. Manual marks are stored in `installation.checklist`, not in settings.
 
 | Item | How | Needed for |
 |---|---|---|
 | Durable Objects, D1, R2, Vectorize, Queues, Workers AI | Automatic (Deploy button) | Everything |
 | Setup token | Prompted at deploy, or generated (§6.8) | First-run setup |
-| Allow GitHub Actions to create pull requests | Manual repository setting | Upgrades |
+| Allow GitHub Actions to create pull requests **(R)** | Manual repository setting | Upgrades |
 | Make the repository private | Recommended | Keeps scheduled release-sync running |
-| Custom domain | Manual; recommended before inviting the team | Stable sign-in, PWA and push |
-| Email: Cloudflare Email Service sender domain (default), or an email provider API key or SMTP credentials | Manual: onboard the domain in the dashboard, or add the Worker secrets | Email invitations, resets and notifications |
+| Custom domain **(R)** before inviting the team | Manual; recommended **before the owner registers passkeys** (passkeys are bound to the domain) | Stable sign-in, PWA and push |
+| Owner's second passkey, or `RECOVERY_TOKEN` | Prompted in setup and the checklist; **required before the owner can invite anyone** | Owner recovery; inviting |
+| Email on a `*.workers.dev` address | The checklist says **"`workers.dev` usually means no email"**: the default driver needs a custom domain on Cloudflare DNS (§7.6). Without email there are no magic links, so recovery relies on second passkeys, recovery links and `RECOVERY_TOKEN`. | Magic links, emailed invitations |
+| Cloudflare notifications for Worker errors and health **(R)** | Manual (dashboard) | Alerting when Officebox itself is down (§7.3) |
+| Scheduled exports, or a first export **(R)** | Admin Data page (§7.5) | Recovery |
+| Email: Cloudflare Email Service sender domain (default), or an email provider API key or SMTP credentials | Manual: onboard the domain in the dashboard, or add the Worker secrets | Email invitations, **magic links** and notifications |
 | Realtime SFU app and TURN key | Manual (Worker secrets) | Calls and screen sharing (M4) |
 | AI Gateway | Manual; **recommended** for assistant logging control: set `assistant_gateway_id` so every assistant call runs with logging and caching off (§5.10). The checklist tells owners that logging stays off for assistant traffic. | Assistant (M9a); Workers AI works without it |
 | BYOK provider keys | Optional (AI Gateway Provider Keys); switching a role needs the owner to acknowledge that content goes to that provider | Assistant roles on another provider |
 | Read-only analytics API token | Optional (Worker secret) | Usage panel with Cloudflare's own figures |
-| Cloudflare billing notifications | Recommended (dashboard) | Cost alerts |
+| Cloudflare billing notifications **(R)** | Manual (dashboard) | Cost alerts |
 | R2 lifecycle rule for noncurrent versions | Recommended | Retention guarantee (§2.3) |
 
 The admin UI checks each item it can detect and shows its status. R2 is reached only through the binding, so no R2 S3 credentials are needed (§8.3).
@@ -1380,7 +1433,7 @@ The admin UI checks each item it can detect and shows its status. R2 is reached 
 
 | Path | Purpose |
 |---|---|
-| `.officebox/config.json` | `{ "channel": "stable", "upstream": "<upstream repo URL>", "auto_merge": "none" }`. `auto_merge` is one of `none`, `security` or `patch`. The `channel` value is the authoritative channel setting; the admin UI only displays it. |
+| `.officebox/config.json` | `{ "channel": "stable", "upstream": "<upstream repo URL>", "auto_merge": "none" }`. `auto_merge` is one of `none`, `security` or `patch`, default `none`; owners opt in by editing the file (Admin §14). The `channel` value is the authoritative channel setting. The running app holds no GitHub credentials, so the build embeds `channel` and `auto_merge`, and the Updates page shows them as deployed. |
 | `.officebox/version` | Upstream version the repository currently matches; used as the diff base. |
 | `.officebox/release-signing-key.pub` | Pinned release-signing public key. |
 | `.github/workflows/officebox-release-sync.yml` | The release-sync workflow. It updates itself through releases. |
@@ -1406,12 +1459,12 @@ Steps:
 5. Merge `wrangler.jsonc` with `scripts/merge-wrangler.mjs`. It takes the upstream structure but keeps local resource IDs, names and customer-added bindings.
 6. Open a PR titled "Upgrade Officebox to vX.Y.Z (channel)". The body carries release notes, the migration list, `rollback_safe_to` and any security flag.
    - **Conflicts:** the PR opens as a draft labelled `officebox-conflict`. It lists the conflicted files and links to resolution guidance. Conflict markers make the build fail, so a conflicted release can't deploy.
-7. **Auto-merge:** if `auto_merge` allows it (a patch or security release on stable), the release has no conflicts and checks pass, the workflow merges the PR.
+7. **Auto-merge:** if `auto_merge` (`security` or `patch`) allows it for a patch or security release on stable, the release has no conflicts and checks pass, the workflow merges the PR. With `none` (the default), or for a minor or major release, the PR always waits for a manual merge.
 
 Notes:
 
 - PRs created with `GITHUB_TOKEN` don't trigger other GitHub workflows. Workers Builds is triggered by the Cloudflare GitHub App on push to the production branch, so merging still deploys.
-- GitHub disables scheduled workflows in public repositories after 60 days without activity. The post-deploy checklist therefore recommends a **private** customer repository. The admin UI also warns when the installed version has been behind the latest release for more than 7 days, because that may mean the workflow is disabled.
+- GitHub disables scheduled workflows in public repositories after 60 days without activity. The post-deploy checklist therefore recommends a **private** customer repository. Owners also get the `release_sync_stuck` alert (Admin §4) when the installed version has been behind the latest release for 7 days, because that may mean the workflow is disabled.
 
 ### 6.5 Build, migrations and compatibility
 
@@ -1441,7 +1494,7 @@ Migrations run **before** the new code goes live, and can be partly applied if a
 
 **Durable Object class migrations** (`new_sqlite_classes` and so on) only ever *add* classes within a rollback window. Renames and deletions follow the contract rule.
 
-The admin UI shows the applied migrations (from D1's migrations table) next to the running version, and flags a schema that is ahead of the code.
+The admin UI shows the applied migrations (from D1's migrations table) next to the running version. A schema ahead of the code raises the `schema_ahead` alert for owners (Admin §4).
 
 ### 6.6 Rollback
 
@@ -1455,35 +1508,62 @@ The daily Cron Trigger fetches the release manifest (§6.2) and stores the resul
 
 - the installed `OFFICEBOX_VERSION` and channel
 - the latest release on that channel and its notes
-- a link to the repository's open sync PR.
+- a link to the repository's open sync PR
+- the `channel` and `auto_merge` values as deployed (§6.3).
 
-A security release that hasn't been installed after 48 hours raises a persistent banner for owners.
+Admins can view the page; only owners act on it ([Admin](specs/admin.md) §14). A security release that hasn't been installed after 48 hours raises the serious `security_release` alert for owners, with its banner, inbox item and email (Admin §4). Being behind for 7 days raises `release_sync_stuck` (§6.4).
 
 ### 6.8 First-run setup
 
-Until `installation.setup_completed_at` is set, every route except `/setup`, `/health` and static assets redirects to `/setup`.
+Until `installation.setup_completed_at` is set, every route except `/setup`, `/setup/resume`, better-auth's passkey registration routes (which still need an enrolment ticket), `/not-configured`, `/health` and static assets redirects to `/setup`.
 
 **Token source:**
 
 1. **`SETUP_TOKEN` secret set:** it is used as the token. It must be at least 32 characters.
 2. **No secret:** on the first request, the Worker generates a 32-byte random token. It stores the SHA-256 hash and a 24-hour expiry with `INSERT … ON CONFLICT DO NOTHING`, so concurrent first requests produce a single token. It logs the token once to Workers Logs with a clear marker. Only members of the Cloudflare account can see these logs. An expired token is replaced and logged again on the next visit.
 
-**Setup submission:** `POST /setup` with `{ token, workspaceName, ownerEmail, ownerName, ownerHandle, password }`. Setup creates **identity objects only** (installation, the owner user, their handle, settings). `#general`, calendars and drives are created by the milestones that own them, with backfill jobs (Platform §13).
+**WebAuthn preflight:** before anything is submitted, the setup page checks for WebAuthn (`PublicKeyCredential` feature detection) and stops with "This browser can't create a passkey. Use another device or a security key." Roaming authenticators are allowed, and the setup token works on another device (resume, below).
+
+**Setup submission:** `POST /setup` with `{ token, workspaceName, ownerEmail, ownerName, ownerHandle }`. There is no password: the response sets an **enrolment ticket** cookie, and the owner **registers a passkey** straight away through better-auth's passkey registration (`resolveUser` accepts the ticket). Setup creates **identity objects only** (installation, the owner user, their handle, settings). `#general`, calendars and drives are created by the milestones that own them, with backfill jobs (Platform §13).
 
 - Rate-limited by IP (Rate Limiting binding).
 - Token hashes are compared in constant time.
-- Completion is one atomic D1 batch, so only one request can ever win:
+- The **claim** is one atomic D1 batch, so only one request can ever win:
   ```sql
   UPDATE installation
-     SET setup_claim = :nonce, setup_completed_at = :now, setup_token_hash = NULL
-   WHERE id = 1 AND setup_completed_at IS NULL;
+     SET setup_claim = :nonce, setup_claimed_at = :now,
+         canonical_origin = :origin, allowed_hosts = :hosts
+   WHERE id = 1 AND setup_claim IS NULL AND setup_completed_at IS NULL;
 
-  INSERT INTO users (id, email, display_name, password_hash, role, status, created_at, updated_at)
-  SELECT :id, :email, :name, :hash, 'owner', 'active', :now, :now
+  INSERT INTO users (id, email, display_name, email_verified, role, status, created_at, updated_at)
+  SELECT :id, :email, :name, 0, 'owner', 'active', :now, :now
     FROM installation
    WHERE id = 1 AND setup_claim = :nonce;
   ```
-- An audit entry is written.
+  The owner row is written through better-auth's adapter in the real code, with the server-set setup marker that `databaseHooks.user.create.before` requires (Identity §4.4); the batch shows the intent. `:origin` is the origin the setup request arrived on, and becomes the **canonical origin** (§8.1); `:hosts` starts as that host alone.
+- **Completion:** when the owner's first passkey is registered, a better-auth after hook sets `setup_completed_at` and clears `setup_token_hash` **only if the claim nonce is still current** (`… WHERE setup_claim = :nonce AND setup_completed_at IS NULL`), and the owner is signed in. The hourly identity repair job (§7.8) completes setup when the owner has a passkey but `setup_completed_at` is still NULL.
+- **Resume (default):** until completion, `POST /setup/resume` with the same token issues a new enrolment ticket **for the claimed owner only**, and only while that owner has **zero passkeys and `first_signed_in_at` is NULL**; otherwise it answers **410**. It works from any device, so an owner whose browser lacks WebAuthn can move to another one.
+- **One clock:** the claim window runs from `setup_claimed_at`. In generated-token mode, the token that made the claim stays valid for resume until the claim expires, even after its own 24-hour expiry.
+- **Expiry (default):** a claim not completed within **24 hours** of `setup_claimed_at` is released, by the next setup request or the hourly job, in **one conditional batch**:
+  ```sql
+  DELETE FROM users
+   WHERE id = :owner AND role = 'owner'
+     AND NOT EXISTS (SELECT 1 FROM passkeys WHERE user_id = :owner)
+     AND first_signed_in_at IS NULL
+     AND (SELECT setup_completed_at FROM installation WHERE id = 1) IS NULL
+     AND (SELECT setup_claimed_at FROM installation WHERE id = 1) < :now - 86400000;
+
+  UPDATE installation
+     SET setup_claim = NULL, setup_claimed_at = NULL, canonical_origin = NULL, allowed_hosts = NULL
+   WHERE id = 1 AND setup_completed_at IS NULL AND changes() > 0;   -- only if the delete matched
+  ```
+  (The handle row goes with it in the same batch, guarded the same way; the exact "only if matched" form is checked in M1a-0, since D1 batches aren't documented as transactions.) An owner who registered a passkey or signed in is never deleted, and the claim is never half-cleared. With a `SETUP_TOKEN` secret the same secret works again; in generated-token mode a new token is generated and logged.
+- The page then recommends a **second passkey** and shows the `*.workers.dev` warning when it applies (Identity §4.1).
+- An audit entry is written for the claim and for completion.
+
+**Required secrets:** if `BETTER_AUTH_SECRET` or `TOKEN_HASH_KEY` is missing, `/setup` and sign-in show `/not-configured` instead (§6.1).
+
+**Restore.** Restore from export (§7.5) uses the same setup token and the same claim, which records the restore's origin as the canonical origin (Admin §11.4). There are no password hashes or peppers to carry over. If the restore's origin equals the export's canonical origin, the exported passkey public keys keep working; otherwise the restoring owner registers a passkey as above and the restore report lists who needs a magic link or a recovery link (§7.5). The `RECOVERY_TOKEN` flow (§8.1) covers an owner who can't register.
 
 **After setup:** `/setup` returns 404 permanently and `SETUP_TOKEN` is ignored. The admin UI recommends deleting the secret.
 
@@ -1493,7 +1573,9 @@ Until `installation.setup_completed_at` is set, every route except `/setup`, `/h
 
 ### 7.1 Health checks
 
-A /health endpoint checks:
+The cron dispatcher (§7.8) runs the checks every 5 minutes with cheap probes: no real email, model calls or SFU sessions. Only the dispatcher writes the results, to `health_checks` (status, consecutive runs in that status, and when it last changed), and raises or clears `admin_alerts` with compare-and-set on the stored state, so concurrent runs can't send duplicate emails. A failure counts after two consecutive runs ([Admin](specs/admin.md) §4). The admin health page (`GET /admin/health`, owners and admins) reads the stored state, and loading it never raises alerts. The public `/health` endpoint stays minimal (Platform §15). Members learn feature availability from `GET /status` and `GET /status/public` (Admin §8.2).
+
+The checks:
 
 - Worker and D1 connectivity.
 - Durable Object namespace availability (lightweight ping to a system DO).
@@ -1507,7 +1589,7 @@ A /health endpoint checks:
 
 ### 7.2 Diagnostics bundle
 
-The admin can download a support bundle containing:
+**Owners** download a support bundle, after a preview of its full contents ([Admin](specs/admin.md) §8.3). Admins can't. The download is audited (`diagnostics.downloaded`). The bundle contains:
 
 - Worker version and deployment ID.
 - Binding configuration (without secrets).
@@ -1521,15 +1603,9 @@ The owner reviews the bundle before sharing it. It never contains message, docum
 
 ### 7.3 Alerts
 
-Officebox uses Cloudflare's observability and optional external alerting (email/webhook) for:
+**In-app alerts** follow [Admin](specs/admin.md) §4: one `admin_alerts` record per `<kind>:<subject>` (storage, protective mode, paused D1 copy, failed or missing exports, failing checks and services, releases, schema, projection backlog, purges, assistant budget), raised and cleared by the dispatcher (§7.1, §7.8) with hysteresis. Delivery is a persistent banner and an `admin_alert` inbox item for owners and admins, plus email to owners for serious alerts, with links built from `installation.canonical_origin` (§8.1).
 
-- Elevated Worker error rate.
-- D1 query failures.
-- Durable Object exceptions.
-- R2 write failures.
-- Queue backlog growth.
-- Storage approaching limits.
-- Billing: owners are prompted to set Cloudflare billing notifications (§7.9).
+**Outages of the alert path.** Alerts live in D1 and run in the Worker, so a D1 or Worker outage can't raise one. **Cloudflare's own notifications** for Worker errors and health cover these; setting them up is a required checklist item (§6.1). Billing: owners are prompted to set Cloudflare billing notifications (§7.9).
 
 ### 7.4 Backup and recovery guidance
 
@@ -1540,28 +1616,32 @@ Officebox uses Cloudflare's observability and optional external alerting (email/
 
 ### 7.5 Export and restore
 
-Implements PRD §13. Exports and restores run as **Cloudflare Workflows**: durable, retried, multi-step jobs that are not bound by request time limits.
+Implements PRD §13 and [Admin](specs/admin.md) §11–§13. Exports and restores run as **Cloudflare Workflows**: durable, retried, multi-step jobs that are not bound by request time limits.
+
+**Who.** Owners **and admins** run and download workspace exports and per-member exports. The permission engine checks `workspace.export` or `member.export` when an export starts and on every download request (Admin §11.1, §12). Members have no export endpoint. Only owners can choose an export in maintenance mode.
+
+**`exports` table.** Created in M7's baseline with the columns in Admin §16 (that list is authoritative):
+- `kind`: `export` | `member_export` | `restore` (Zod)
+- `state`: `running` | `packing` | `complete` | `failed` | `cancelled` | `expired` | `deleted` (Zod)
+- `include_files`, `in_maintenance`, `scheduled`; `subject_user_id` for member exports
+- `schema_version`, `size_bytes`, `object_count`, `archive_r2_key`, `manifest_r2_key`, `restore_report` (JSON, restores), `error` (short, non-sensitive)
+- `requested_by` (a system actor for scheduled exports), `schedule_set_by`, `created_at`, `completed_at`, `expires_at`.
+
+One workspace export runs at a time; starting another returns `conflict`:
 
 ```sql
-CREATE TABLE exports (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('export', 'restore')),
-  state TEXT NOT NULL CHECK (state IN ('running', 'complete', 'failed')),
-  include_files INTEGER NOT NULL DEFAULT 1,
-  manifest_r2_key TEXT,
-  error TEXT,
-  requested_by TEXT REFERENCES users(id),
-  created_at INTEGER NOT NULL,
-  completed_at INTEGER
-);
+CREATE UNIQUE INDEX IF NOT EXISTS one_running_export
+  ON exports(kind) WHERE kind = 'export' AND state IN ('running', 'packing');
 ```
+
+Per-member exports are limited to one running per subject and 10 per actor per day, and don't block workspace exports (Admin §12).
 
 **Export format v1.** Written under `exports/<id>/` in the installation's R2 bucket:
 
 | Path | Content |
 |---|---|
 | `manifest.json` | Format version, Officebox version, D1 schema version, creation time, row/object counts, SHA-256 for every part, each channel's exported `seq`, each project's (plus `personal`) exported `seq` and `next_issue_number`, each document's state vector |
-| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `mfa_factors`, setup fields, job tables, `passkeys`, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6). From M9 also `file_derived_text` (rebuilt like `search_index`), `personal_reminders` (personal export only) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
+| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `auth_accounts`, `auth_verifications`, `magic_link_issues`, `user_devices`, `mfa_factors`, setup fields, job tables, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6), and the operational tables `exports`, `maintenance_windows`, `admin_alerts`, `health_checks`, `admin_jobs` and `download_tokens`, so a restore never starts read-only or with stale alerts (Admin §11.1). **Passkey public keys are included** (Identity §2). From M9 also `file_derived_text` (rebuilt like `search_index`) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
 | `channels/<id>/messages.jsonl` | Current message state from the ChatChannel DO, including tombstones |
 | `projects/<id>/state.jsonl` | Authoritative `issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments` and `issue_activity` from each project's `ProjectRoom` DO plus `projects/personal/state.jsonl` from `ProjectRoom("personal")` (M10a; `project_milestones`, `project_labels`, `issue_relations`, `issue_follows`, `issue_key_aliases`, `project_memories`, `project_memory_sources` and `project_pulses` are in `d1/<table>.jsonl`) |
 | `docs/<id>/state.ystate` | Native Yjs state |
@@ -1571,10 +1651,25 @@ CREATE TABLE exports (
 
 **Rules:**
 
-- **Secrets are never exported:** SMTP credentials, AI keys and the setup token stay out. MFA secrets are encrypted with an installation-specific key, so they are left out and users re-enrol after a restore. Password hashes are included, so passwords keep working.
-- **Download:** owners download a single `.tar` streamed by the Worker. The command-line tool (`officebox export pull`) fetches parts with resume support.
-- **Consistency:** each object is internally consistent. **Maintenance mode** makes the workspace read-only for a fully consistent export. It closes every socket through the UserHubs, reconnects them read-only, and makes the Worker reject writes.
-- **Scheduled exports** (optional; weekly by default when enabled) keep the latest 4. Exports count towards R2 storage.
+- **Contents:** everything, including private content (DMs, private channels, private projects, personal tasks, restricted documents, time off with type and note, personal reminders), so a restore is complete (Admin §2).
+- **Secrets are never exported:** SMTP credentials, AI keys, `BETTER_AUTH_SECRET`, `TOKEN_HASH_KEY` and the setup token stay out. MFA secrets are encrypted with an installation-specific key, so they are left out and users re-enrol after a restore. There are no password hashes (sign-in is passwordless), so a restore needs no secret carried over.
+- **Passkey public keys** are included in **workspace** exports, so a restore onto the same canonical origin keeps passkeys working (Identity §2). They aren't secrets, but they're credentials metadata, so they're **never** in per-member exports.
+- **Packing:** the Workflow writes the parts to `exports/<id>/`, then packs them into a single `export.tar` in R2 with a multipart upload, re-chunking into equal parts across Workflow steps and persisting the upload state between steps. The parts are deleted once packing succeeds. Packing needs about twice the archive's size in R2 temporarily, so the budget check at start counts double (Admin §11.1).
+- **Download:** the Worker streams that one object and supports `Range` requests, so an interrupted download resumes. Archives over **20 GB** aren't packed; they stay as parts and are downloaded with the command-line tool (`officebox export pull`), which resumes. The tool **downloads through the Worker**: it signs in with device sign-in, needs step-up re-authentication, passes the same engine check and uses download tokens. The exports bucket never has public access or a custom domain.
+- **Step-up and download tokens:** a download start needs `sessions.fresh_auth_at` (a passkey assertion) within the last 10 minutes, otherwise it returns `reauth_required` and the client re-authenticates with `POST /me/reauth` (§8.1, Admin §11.3). A successful start issues a download token valid for 1 hour and bound to the session; only its HMAC hash is stored in `download_tokens`. A browser gets it as an HttpOnly cookie scoped to the download path and the command-line tool sends it in a header, so it never appears in a URL. **Every request** re-checks the session, the engine (including a per-member subject's current role) and that the export isn't deleted, expired or cancelled.
+- **Consistency:** each object is internally consistent, but without maintenance mode the export isn't one instant across the workspace. An owner can export **in maintenance mode** for a fully consistent snapshot (Admin §13.4):
+  - Maintenance state lives in `maintenance_windows` and is derived from the row and the clock on every read. Each change increments `installation.maintenance_epoch` (Admin §13.2).
+  - The Worker refuses writes through the settings cache (30 seconds at most). Durable Objects check the epoch lazily before a refused write, from a 10-second cached value and the epoch in each socket's attachment, so hibernated DOs aren't woken.
+  - On each transition the Worker calls a room-level **`setMaintenance(epoch, active)`** RPC on open rooms only, found through the UserHub room registry. The room sets a read-only flag separate from each socket's role and sends `status.changed`. **No socket is closed or reconnected**, and `updateAccess` isn't used (§3.5).
+  - **Consistency barrier:** before the snapshot, the export waits until the settings cache has expired, every open room has acknowledged `setMaintenance`, and the projection outbox has drained. It times out after 2 minutes; the export then fails and a window it started ends.
+  - Which writes are refused, exempt or deferred during maintenance is set by Admin §13.3.
+- **Schema changes mid-run:** the export records `schema_version` at the start and fails with a clear message if a deploy changes the schema during the run.
+- **Cancel and failure:** a running export can be cancelled; a cancelled or failed export deletes its partial objects. A failure raises `export_failed` (§7.3).
+- **Scheduled exports** (`scheduled_export`; off by default, weekly when enabled, files included) run at a weekday and time in `workspace_timezone`. An hourly dispatcher job claims the slot with compare-and-set on `installation.scheduled_export_last_slot`; a missed slot runs within 24 hours, then is skipped (Admin §11.1). They keep the latest 4 complete exports, deleting older ones only after a new one completes.
+- **Retention:** on-demand exports are deleted 45 days after completion (`export_retention_days`), per-member exports after 7 days. Downloads check `expires_at` themselves; the daily job removes expired archives. Deleting an export marks it deleted at once, so its tokens stop working on their next request, and the object is removed within the hour. Exports aren't rewritten when a member is later deleted (Admin §11.2).
+- **Storage:** exports count towards R2 usage. Above `r2_hard_budget_gb`, new exports are refused. Exports are allowed in protective mode (§7.7).
+- **Per-member exports** (`kind = 'member_export'`) cover one member's data for a data-protection request, with the scope and exclusions in Admin §12 (no credentials, no assistant conversations or memory, nothing written by others). They are packed and downloaded like workspace exports. The subject gets a `security_notice` when the export completes.
+- **Audit:** the `export.*` and `member_export.*` events (Admin §7).
 
 **Restore:**
 
@@ -1582,17 +1677,17 @@ CREATE TABLE exports (
 2. The archive is uploaded through the Worker with R2 multipart upload. Very large archives can instead be placed in the bucket with Wrangler, and `officebox-restore` then starts the Workflow.
 3. The Restore Workflow checks the manifest and checksums. It accepts exports from the same Officebox version or older, and maps older logical schemas forward.
 4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, each `ProjectRoom` DO (including `ProjectRoom("personal")`) with `importProjectState`, keeping `seq` and `next_issue_number`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`. Derived file text and vectors are rebuilt by the assistant back-fill (§5.2) once the assistant is enabled; assistant memory is not part of a restore (Assistant §13).
-5. It completes setup. All sessions are invalid and users with MFA must re-enrol.
+5. It completes setup and records the restore's origin as the canonical origin. **If it equals the export's canonical origin, exported passkeys keep working** and members sign in as before. Otherwise the passkeys are dropped: the restoring owner (chosen from the export's owners by email) registers a passkey, as in §6.8; members sign in with a magic link (email configured) or a recovery link; admins and owners get recovery links. The restore summary lists who needs one. All sessions are invalid, and users with MFA must re-enrol. The Workflow writes a restore report (`exports.restore_report`) listing what members and owners must redo (Admin §11.4).
 
 **Coverage** ([Platform](specs/platform.md) §6 is authoritative):
-- **Added:** calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, and `call_notes` and `call_transcript_segments` within retention (Assistant §13). From M10: `projects`, `ProjectRoom` DO state, D1 project/issue tables (including personal tasks, key aliases, `project_memories` and `project_pulses`), and issue-owned files (Projects §10).
+- **Added:** **passkey public keys** (with credential IDs, counters, names and how each was created; product owner, 15 Nov 2026), calendars, events, attendees, time off (with type and note), drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, `personal_reminders`, and `call_notes` and `call_transcript_segments` within retention (Assistant §13). From M10: `projects`, `ProjectRoom` DO state, D1 project/issue tables (including personal tasks, key aliases, `project_memories` and `project_pulses`), and issue-owned files (Projects §10).
 - **Excluded:**
-  - sessions, `auth_tokens`, `ws_tickets` and MFA secrets
-  - **passkeys** (bound to the domain; members re-register after a restore to a new domain)
+  - sessions, better-auth's `auth_accounts` and `auth_verifications`, `magic_link_issues`, `user_devices`, `auth_tokens`, `ws_tickets` and MFA secrets
   - ICS feed tokens, and ICS-in subscription URLs (subscriptions are exported without URLs and must be re-entered)
   - `poll_secret`
-  - **assistant conversations and memory** (they live only in Assistant DOs, which admins can't read) and **personal reminders**; members get both through their personal export, "Download my assistant data" (Assistant §4.3, §13)
-  - `file_derived_text`, rebuilt like `search_index`.
+  - **assistant conversations, including the assistant DM, and memory** (they live only in Assistant DOs, which admins can't read). Nobody can export them; members see their memory in "What Butler remembers" (Admin §2, Assistant §13). There is no member self-export.
+  - `file_derived_text`, rebuilt like `search_index`
+  - the operational tables listed above.
 
 **Testing:** CI exports a fixture installation, restores it into a fresh one and compares them, on every release.
 
@@ -1639,17 +1734,22 @@ CREATE TABLE object_sizes (          -- reported by DOs after compaction or dail
 
 | Store | How it's measured | Thresholds and actions |
 |---|---|---|
-| D1 (10 GB hard limit) | Database size from D1 query result metadata, sampled hourly *(confirm the metadata field at implementation)* | Warn at 70% and 85%. At 95%, **protective mode** (below). At 98%, D1 copying pauses and DO outboxes hold events safely until space is freed. |
+| D1 (10 GB hard limit) | Database size from D1 query result metadata, sampled hourly *(confirm the metadata field at implementation)* | Thresholds come from the `storage_thresholds` setting (Platform §7; 70, 85, 95 and 98 % by default). Warn at the first two. At the third, **protective mode** (below). At the fourth, D1 copying pauses and DO outboxes hold events safely until space is freed. |
 | Durable Objects (10 GB each) | `ctx.storage.sql.databaseSize`, reported into `object_sizes` | Warn when any object passes 5 GB |
-| R2 (no hard limit) | Calculated from D1: `files.size_bytes`, plus export and snapshot objects. No API token needed. | Optional owner budget: warn above it; block uploads above an optional hard budget |
+| R2 (no hard limit) | Calculated from D1: `files.size_bytes`, plus export and snapshot objects. No API token needed. | Optional owner budget (`r2_budget_gb`): warn above it; block uploads and new exports above an optional hard budget (`r2_hard_budget_gb`) |
 
-**Protective mode.** The Worker refuses to create channels, documents, folders, drives, files, calendars, events, polls, time off and invitations. Messages continue: they are stored in their channel DOs, and the D1 copy keeps up until the 98% point.
+Each threshold raises the matching Admin §4 alert (`storage`, `protective_mode`, `d1_copy_paused`), which clears with hysteresis.
+
+**Protective mode.** The Worker refuses to create channels, documents, folders, drives, files, calendars, events, polls, time off and invitations. Messages continue: they are stored in their channel DOs, and the D1 copy keeps up until the 98% point. Exports are allowed, because they write mostly to R2.
+
+**Priority writes.** Audit, alert and export-status writes are small and continue in protective mode. At the fourth threshold the D1 copy pauses, but these writes continue ([Admin](specs/admin.md) §9).
 
 **Recovery.** The admin UI guides the owner to free space:
 
 - **Shorten search copy retention** (`installation.settings.search_copy_months`). This trims D1 `messages` and `search_index` rows older than N months. Those messages stay in their channel DOs, in the channel view and in exports; they just leave search.
 - Empty Trash early.
 - Enable retention policies.
+- Delete old exports.
 - Export and delete archived channels.
 
 **Growth guide:** 100 members × 100 messages a day is about 2 GB a year, including the FTS index. Trimming the search copy keeps D1 bounded indefinitely.
@@ -1661,8 +1761,14 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | Job | Schedule | Section |
 |---|---|---|
 | Snooze wake-ups | 5 minutes | PRD §5.3 |
+| Health checks, alert raise and clear (compare-and-set on `health_checks` and `admin_alerts`) | 5 minutes | §7.1, §7.3, Admin §4 |
+| Maintenance: clock transitions, notices and the 24-hour cap | 5 minutes | §7.5, Admin §13 |
+| Scheduled-export slot (claimed with compare-and-set; a missed slot runs within 24 hours) | Hourly | §7.5, Admin §11.1 |
+| Export and member-export expiry; expired download tokens and job previews | Daily | §7.5, Admin §16 |
+| Sending pending CSV invitations (wait while maintenance or protective mode is on) | Daily | Admin §5.1 |
 | Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
-| Purge due objects, time-based retention (audit log, inbox items, sessions, invitations, tickets, huddle records) | Daily | §2.3 |
+| Purge due objects, time-based retention (audit log, inbox items, expired sessions and `auth_verifications`, `magic_link_issues` and `auth_tokens` 7 days after use or expiry, `user_devices` unused for 400 days, invitations, tickets, huddle records) | Daily | §2.3 |
+| Identity repair: complete setup if the owner has a passkey; roll forward or release partial invitation accepts (§8.1); expire setup claims and pending domain moves | Hourly | §6.8, §8.1 |
 | Assistant purge jobs: expired `assistant_interactions`, transcripts past retention and their vectors, `file_derived_text` for purged versions, finished `personal_reminders` (M9) | Daily | §2.3, Assistant §14.3 |
 | ChatChannel event-log trimming, D1 copy reconciliation, version thinning | Daily | §2.2, §3.3, §4.3 |
 | Release manifest check | Daily | §6.7 |
@@ -1672,7 +1778,8 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | RSVP-response batch per organiser | Hourly | Notifications §3 |
 | Hourly and daily email digests (members with an hourly or daily delay) | Hourly | Notifications §6, Platform §11 |
 | Room-registry sweep | Daily | Platform §12 |
-| Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
+
+During maintenance, purges, retention sweeps, ICS refresh, content-creating timers and scheduled exports are **deferred** until it ends; reminders and other notification-only triggers fire on time (Admin §13.3). The audit-log purge uses `audit_retention_days`, keeping `export.*` and `member_export.*` entries for at least 365 days (Admin §7).
 
 Timers that aren't cron jobs (Platform §11):
 - **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry), `email_release` (email holds longer than 24 hours), and from M9 `assistant_brief`, `assistant_prep` and `personal_reminder`.
@@ -1704,35 +1811,93 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 
 ### 8.1 Authentication and sessions
 
-- **Passwords:**
-  - Hashed with PBKDF2-HMAC-SHA256 via WebCrypto at **100,000 iterations with a 16-byte salt, after an HMAC-SHA256 pepper**: the PBKDF2 input is `HMAC-SHA256(PEPPER_<id>, password)`, with the pepper held in Worker secrets (platform §16), at least 32 random bytes.
-  - **Why 100k plus a pepper:** the M0 foundation spike (§10) found that workerd's default limit enforcer caps PBKDF2 at 100,000; local `wrangler dev` lifts the cap, which is why 600,000 works locally. A D1 dump or export without the pepper can't be attacked offline. The production probe **confirmed** the 100,000 cap (§10), so there is no 600,000 variant.
-  - Stored in a versioned format (`pbkdf2-sha256-hmac$<pepperId>$100000$<salt>$<hash>`), so parameters and peppers can change and hashes upgrade at next sign-in. Verification refuses stored iteration counts outside 100,000–1,000,000.
-  - Pepper rotation, restore and the dummy derivation for unknown accounts (no timing enumeration) follow Identity §4.4.
-  - Chosen over Argon2id because native WebCrypto avoids WASM memory limits and CPU spikes in Workers. Argon2id via `hash-wasm` needs its WASM imported as precompiled modules, since Workers forbid runtime WASM compilation (spike finding).
-  - Sign-in needs Workers Paid: PBKDF2 at 100,000 iterations takes about 12 ms of CPU, above the Free plan's 10 ms limit.
-  - Minimum length 10, checked against a bundled list of common passwords. No composition rules.
-- **Sessions:**
-  - Cookies as in §3.1.
-  - Refresh-token rotation with reuse detection: presenting an old refresh token revokes the session, **except within a 30-second grace window** after rotation, when the previous token returns the same successor (two tabs refreshing at once).
-  - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets.
-  - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
-- **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
+**Passwordless** (product-owner decision, 15 Nov 2026; Identity §2). Sign-in is **passkeys for everyone and magic links for members only**. There are no passwords, so there is no password hashing, PBKDF2, pepper, password reset, password change or password throttle. The M0 spike's PBKDF2 result is kept for the record in §10.
+
+**Library: better-auth** (MIT; [docs](https://www.better-auth.com/docs)) for sessions, magic links (`magicLink` plugin) and passkeys (`@better-auth/passkey`, built on SimpleWebAuthn). It replaces the hand-built sign-in and session code of the M1a design. The **M1a-0 spike** (§10) checks the assumptions below before M1a builds on them.
+
+- **Runtime:** D1 is built in (`database: env.DB`, through Kysely). It needs `nodejs_compat`, which the better-auth docs say is on by default from compatibility date 2026-08-04 (to verify in M1a-0, §10); `wrangler.jsonc` uses 2026-11-01. Hono passes the mounted routes to `auth.handler(c.req.raw)`; our routes call `auth.api` on the server.
+- **Canonical origin, one instance per installation.** The passkey relying-party ID and better-auth's `baseURL` and `trustedOrigins` must not be configured per deployment (AGENTS §4.1), and must not follow an arbitrary request `Host` either. So the setup claim **records the canonical origin and an allowed-hosts list in `installation`** (§2.1, §6.8): workspace state, not configuration.
+  - `rpID` is the canonical host, `rpName` the workspace name, `baseURL` and `trustedOrigins` the canonical origin. **One better-auth instance per installation origin**, built when the record is first read and rebuilt only when it changes (no per-host cache).
+  - Auth routes answer only on the canonical origin; requests on other allowed hosts redirect there, and unknown hosts are refused. The `Origin` checks in §3.1 and §8.2 compare against the same value.
+  - **Every emailed or copied link** (magic link, invitation, recovery link, email change) is built from the canonical origin, never the request's `Host`.
+  - **A domain change is an explicit owner action** (`POST /admin/domain`, Identity §4.4): it rewrites the canonical origin and allowed hosts, signs everyone out and starts the recovery flow. WebAuthn related-origin requests, which could carry passkeys across a move, are listed under Later (Identity §10).
+- **Configuration (summary):**
+
+  | Option | Value | Why |
+  |---|---|---|
+  | `emailAndPassword.enabled` | `false` (the default, set explicitly) | Passwordless |
+  | `baseURL`, `trustedOrigins` | the canonical origin from `installation` | No request-derived origins |
+  | `session.expiresIn` / `updateAge` | 30 days / 1 day | 30-day sliding sessions |
+  | `session.cookieCache` | **disabled** | Revocation is immediate only without it; advisory GHSA-fvxx-76fc-893x found revoked sessions surviving through the cache |
+  | cookies | `HttpOnly`, `Secure`, `SameSite=Lax`, host-only, path `/`, **`__Host-` prefix** where better-auth's cookie options allow (M1a-0 checks; otherwise an Officebox prefix) | No subdomain can set or read them |
+  | `advanced.ipAddress` | `ipAddressHeaders: ["cf-connecting-ip"]`, `ipv6Subnet` 64 | Correct client IP for limits and sessions; advisory GHSA-p6v2-xcpg-h6xw |
+  | `advanced.database.generateId` | ULID | AGENTS §4.1 |
+  | `modelName` and `fields` for user, session, account, verification and passkey | `users`, `sessions`, `auth_accounts`, `auth_verifications`, `passkeys`, snake_case | Our schema (Identity §5, Platform §14) |
+  | `user.additionalFields` | `role`, `status`, `handle`, `email_normalised`, `first_signed_in_at`, profile columns, all `input: false` | No better-auth route can set them |
+  | `magicLink` | `expiresIn: 900`, `disableSignUp: true`, `storeToken: "hashed"` if supported, `sendMagicLink` to our email adapter with **our** confirmation link, members only | 15-minute links; invite-only; scanner-safe (Platform §10) |
+  | passkey plugin | `rpID` from the canonical origin, `rpName` the workspace name; **user verification required** in registration and authentication options, and required when verifying; `registration.requireSession: false` with `resolveUser` accepting only an enrolment-ticket cookie bound to the challenge | Product-owner decision; first passkey without a session, never for an arbitrary user |
+  | `databaseHooks.user.create.before` | refuse unless a **server-set marker** is present (the setup claim or our accept context) | better-auth has no invite-only mode; a pending invitation alone isn't enough |
+  | `databaseHooks.session.create.before` | refuse unless the user's `status` is `active`; set `device_label` and `approx_location` (from `request.cf`) | No better-auth path signs in a disabled member; "My devices" |
+  | `databaseHooks.session.create.after` | set `users.first_signed_in_at` if NULL | Gates setup resume and invitation reopening |
+  | `hooks.after` | first passkey: complete setup or acceptance, label it, raise the `security_notice`; magic-link verify: new-device notice; sign-out: close sockets; passkey sign-in: counter check if we keep ours | Below and §3.5 |
+  | `rateLimit` | enabled as a **backstop only**, with custom storage on `rate_counters`; never memory storage | Our middleware enforces the real limits (below) |
+  | `secret` | `BETTER_AUTH_SECRET`; rotation through `BETTER_AUTH_SECRETS` (format checked in M1a-0) | Platform §16 |
+
+- **Route allowlist: default-deny on the exact normalised method and path.** Only sign-out, the magic-link request, and passkey sign-in and registration (options and verify) are reachable at `/api/auth/*`. The path is normalised before matching (repeated slashes, a trailing slash, case and percent-encoded segments such as `%2e`), and anything that doesn't match exactly, including `HEAD` and `OPTIONS` on allowed paths unless explicitly listed, answers 404. Get-session, the magic-link GET verify, session listing and revocation, passkey listing, renaming and deletion, user update, change email, delete user and every email-and-password route answer 404 from outside (Identity §6). An upgrade that adds routes adds nothing reachable until it's reviewed.
+- **No session token reachable by JavaScript.** Get-session isn't exposed (the web app uses `GET /me`). A Hono **response filter** on the better-auth mount strips any `token` field, and any value equal to the session token, from every JSON body, and the structured logger redacts cookie and token values. A **required test** asserts that no response body or log line contains the session token.
+- **Rate limits in our middleware, before `auth.handler`.** Every sign-in limit in Platform §8 runs in our middleware on atomic D1 `rate_counters` or the binding, keyed by `cf-connecting-ip` (IPv6 by /64) and the **normalised email** (trim, lowercase, NFKC). better-auth's limiter is only a backstop. The per-email magic-link limit **never extends its window**: requests over the limit send no mail and get the identical response, so nobody can keep a member from signing in by flooding their address.
+- **Account creation, in order.** D1 isn't transactional through the adapter, so creation runs as ordered steps with compensation: (1) **consume the invitation** (or the setup claim) with a compare-and-set; (2) **create the user** through better-auth's adapter in our accept or setup context, which sets the server-set marker the create hook requires; (3) **claim the handle**. An idempotent **repair job** (hourly **(default)**) completes or rolls back partial states. Tests cover each creation path: setup, acceptance, a magic-link verify for an unknown email, passkey registration without a session or ticket, and each user-creating `auth.api` call without the marker, even with a pending invitation for that email.
+- **Invitation repair (never resurrect).** The accept compare-and-set records `accepted_attempt_id`; the user and handle rows carry it as `created_attempt_id`; `accepted_by` records the user. The hourly repair job **releases** a consumed invitation only when all of these hold: consumed more than 10 minutes ago; not expired or revoked; **no `users` row (deleted users included) and no `handles` row carries the attempt ID**; and the release is a compare-and-set on `accepted_attempt_id`. Otherwise it **rolls forward** (finishes the user, handle and `accepted_by`).
+- **Enrolment tickets.** Setup, invitation acceptance, recovery links, owner recovery and the domain-move link set a single-use ticket (32 random bytes, stored hashed as `auth_tokens.kind = 'passkey_enrol'`, 15 minutes, bound to one user) **only in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie with the `__Host-` prefix and `Path=/`** (the prefix requires it), never in a JSON body; only the passkey registration routes read it. Generating registration options **binds the ticket to that challenge** (`payload.challengeId`); **registration verify consumes it** with a compare-and-set (`UPDATE auth_tokens SET used_at = :now WHERE token_hash = :h AND used_at IS NULL AND revoked_at IS NULL AND expires_at > :now`) and refuses a challenge that isn't the ticket's. Options alone consume nothing. Using a recovery link or owner recovery **revokes the user's other outstanding tickets**. `resolveUser` accepts nothing else when there's no session. Registering signs the person in.
+- **Magic links** (Platform §10), **members only.** The confirm POST re-checks role `member` and status `active` at consume time. `sendMagicLink({ email, token, url })` ignores `url`. The request route does the **same work for every email** (normalise, look up, write a `magic_link_issues` row or a dummy of equal cost) and sends mail through `waitUntil`, so neither the response nor its timing reveals anything. Mail goes only to active users with role `member`; owners and admins never receive one. The email links to `/sign-in/link#t=…` on the canonical origin. The confirm POST consumes the `magic_link_issues` row by compare-and-set, then calls `auth.api` magic-link verification and returns better-auth's session cookie; concurrent POSTs with one token sign in at most once. An email change or recovery link marks the person's rows revoked by normalised email. A sign-in from a browser without a known-device cookie (`__Host-` cookie with `Path=/`, set on every successful passkey or magic-link sign-in, hashed in `user_devices`, kept 400 days after last use) raises a `security_notice` **(default)**. Magic links need email: Cloudflare Email Service by default, or another driver (§7.6).
+- **Passkey user verification is required** (product owner, 15 Nov 2026): `userVerification: "required"` in the options, and verification refuses assertions and attestations without the UV flag, for every user.
+- **Passkey labels and notices.** Each passkey stores `created_via` (setup, invitation, recovery link, owner recovery, magic link, signed in, domain move), shown in the passkey list. Every addition raises a `security_notice` naming the passkey and how it was created, except the first passkey at setup or acceptance.
+- **Step-up** (product owner, 15 Nov 2026; Identity §4.5). `sessions.fresh_auth_at` records the last passkey assertion on the session (at sign-in, or through `POST /me/reauth`, which runs better-auth's passkey authentication for the signed-in user and updates the current session instead of keeping a new one; the mechanism is an M1a-0 item). Adding or removing a passkey, starting a domain move, changing a role or promoting, issuing a recovery link and changing an email need `fresh_auth_at` within **10 minutes**, otherwise the typed error **`reauth_required`**. The check runs after the permission engine. A magic-link sign-in records `fresh_auth_method = 'magic_link'`, which doesn't satisfy step-up, except for a member with no passkeys adding their first **(default)**. Registration through an enrolment ticket needs no step-up.
+- **Security-notice banner** (product owner; Identity §4.6a). Notices are appended to the `users.pending_security_notice` list and shown as a banner after sign-in; email goes out when configured. `POST /me/security-notices/ack` needs a fresh **passkey** assertion, so a stolen session can't hide a notice.
+- **Two-step domain move** (product owner; Identity §4.4). `POST /admin/domain` (owner, step-up) stores `pending_origin` with a 24-hour expiry **(default)** and returns a single-use move link for the new origin. While pending, the new host answers only the move-completion routes, with a better-auth instance built for the pending origin. The move link's POST sets an enrolment ticket there; the owner's **passkey registration with the new origin as relying party commits the move**: the canonical origin is switched (nonce-checked against the pending row), the old host is appended to `allowed_hosts`, every session is revoked, old-origin magic links, invitations and enrolment tickets are revoked, the other owners get a `security_notice`, and it's audited. No server-side fetch verifies the host, so there's no SSRF path. Afterwards the old host answers **302 (GET/HEAD) or 307** to the same path on the canonical origin, built from the installation record (never a request-supplied host), with `Cache-Control: no-store`, never 301. `allowed_hosts` entries come only from the setup claim and committed moves.
+- **Step-up for sensitive downloads** ([Admin](specs/admin.md) §11.3): export archives, member and audit CSVs and per-member exports use the same `fresh_auth_at` rule (a passkey assertion within 10 minutes) and `reauth_required`. `POST /me/reauth` is limited to 5 attempts per 10 minutes per session (Platform §8); failures also count toward the per-IP passkey sign-in limit (there is no per-account password throttle any more) and are audited (`auth.reauth_failed`).
+- **Promotion.** Promoting to admin requires at least one passkey; promoting to owner requires two passkeys or a `RECOVERY_TOKEN` that is set and not yet consumed (a value with no row in `recovery_token_uses`). Both need step-up.
+- **No CORS.** Auth routes, and every `/api` route, never send `Access-Control-Allow-*` headers.
+- **Passkey counter rule.** The M0 spike's rule stays: a counter **at or below** the stored value, unless both are 0, is `clone_detected`; no session is left behind, and the member and owners get a `security_notice` (Notifications §3). SimpleWebAuthn may already refuse such assertions, so **the M1a-0 spike decides** between:
+  - relying on the library and raising `clone_detected` (and the notice) from its error path, or
+  - keeping our own check: a before hook reads `passkeys.verified_sign_count`, the after hook compares it with the verified authenticator data and advances it by compare-and-set, revoking the session better-auth just created on a regression. The spike must prove the hook sees regressions.
+
+  Either way, **a lost compare-and-set race between two legitimate concurrent sign-ins is refused and retried, not reported**: only a real counter regression raises an owner alert.
+- **Session reads hit the primary.** With D1 read replication, session and status lookups read the primary (or carry a D1 Sessions API bookmark), so a revocation is never undone by a lagging replica.
+
+**Sessions:**
+- better-auth database sessions in `sessions`, cookie as above and in §3.1. **No refresh tokens**: no rotation, reuse detection or grace window. better-auth doesn't offer refresh-token rotation, and with the cookie cache off every request reads the session row, so a stolen cookie stops working as soon as its session is revoked.
+- **Every authenticated request** loads the session through better-auth and checks the user's `status`, so a revoked session or a disabled member is refused on the next request (no 60-second cache any more).
+- **`session_epoch` is removed**: §3.5 doesn't need it, because sockets carry their session ID. Revoking deletes session rows; naturally expired sessions are caught by the UserHub recheck (§3.5).
+- **My devices** uses better-auth's list and revoke (one, others, all) through our routes, which return session IDs and device fields but never tokens. **Sign out everywhere** is revoke-all. Admins sign a member out through our permission-checked route, which calls better-auth's revoke for that user. **The admin plugin isn't used** (product owner, 15 Nov 2026): no impersonation (Permissions §6).
+- Every revocation closes the matching sockets (§3.5).
+
+**Other controls:**
+- **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins. (Less needed with passkeys and required user verification; revisit before Phase 2.)
 - **Rate limiting** (mechanisms per platform §8):
   - The Workers Rate Limiting binding supports periods of exactly 10 or 60 seconds, counts per Cloudflare location, and is approximate. The wrapper treats it as advisory and returns `rate_limited` with retry-after equal to the period. Longer windows and exact quotas use D1 or Durable Object counters.
-  - Sign-in: 5 attempts per minute per IP (binding) and 10 per hour per account (D1 counter), with progressive delays. There is no hard lockout, which would let attackers lock users out.
-  - Setup, recovery, invitation acceptance and password reset are limited the same way.
-- **Tokens:** invitation, reset and recovery tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days and resets after 1 hour.
-- **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: reset one owner's password and MFA. The action is audited, and a banner shows until the secret is deleted.
+  - Sign-in limits run in our middleware (above). There is nothing to guess, so the password throttle (per-account progressive delays, and the slow mode drafted in M1a) is removed.
+- **Tokens:** invitation, recovery, email-change and enrolment tokens are 32 random bytes, stored hashed, single-use and consumed by compare-and-set. Invitations expire after 7 days, recovery links after 24 hours, enrolment tickets after 15 minutes. Magic-link tokens are better-auth's, in `auth_verifications`, mirrored by hash in `magic_link_issues`.
+- **Owners' gate before inviting.** An owner can't invite anyone until they have a second passkey or a `RECOVERY_TOKEN` that is set and not yet consumed, checked on **every** owner invite. Admins may still invite members **(default)** (Identity §2).
+- **Owner recovery:** setting a `RECOVERY_TOKEN` secret (**at least 32 characters**) enables `/recover`: **register a new passkey for one owner** (named by email) and sign out that owner's sessions. The secret is compared in constant time and the route is rate-limited per IP. After use, the secret's hash is inserted into `recovery_token_uses` (one row per value used), so the same value is refused afterwards; using it again needs a fresh value. The action is audited, the other owners get a `security_notice` (Notifications §3), and a banner shows until the secret is deleted.
+- **Advisory policy.** better-auth has published **49 security advisories since December 2024**, many High or Critical, including GHSA-4vcf-q4xf-f48m (any user could delete other users' passkeys; High), GHSA-gv75-j3v8-3crm (passkey origin and user verification not enforced; Low), GHSA-fvxx-76fc-893x (revoked sessions surviving through the cookie cache) and GHSA-p6v2-xcpg-h6xw (client IP detection). So:
+  - **pin exact versions** of `better-auth`, `@better-auth/passkey` and the SimpleWebAuthn packages they bring, at versions with every known advisory fixed
+  - enable **Dependabot security updates or GitHub advisory alerts** for the repository
+  - a **CI gate** fails the build when a High or Critical advisory is open against these packages at the pinned versions
+  - **review the better-auth advisories list on every upgrade**, and record the review in the PR
+  - a fixed better-auth advisory that affects our configuration ships as an Officebox **security release within 7 days** of the fix being published **(default)**; customer repositories receive it through the release-sync PR and the 48-hour security banner (§6.4, §6.7), and forks that don't run release-sync are told through the release notes and the security advisory on the upstream repository
+  - keep our own defences where an advisory showed the library's could fail: passkey deletion only through our routes, which check ownership; origin checks in our CSRF middleware; user verification enforced on our side; the cookie cache off; tests for each.
 - **SSO through Cloudflare Access (Phase 2):**
   - When enabled, the Worker validates the `Cf-Access-Jwt-Assertion` header against the team's Access signing keys and application audience. Follow Cloudflare's current Access JWT validation guidance at implementation.
-  - It maps the asserted email to an existing active user or a pending invitation, never creating accounts automatically, and skips the password step.
-  - Owners can disable local passwords for members.
+  - It maps the asserted email to an existing active user or a pending invitation, never creating accounts automatically, and creates a better-auth session for them.
 
 ### 8.2 Web application
 
 - **Authorisation:** the role model in PRD §10.1, resolved as described in §2.1. Owners and admins get management rights but no implicit read access to private content. Every check happens in the Worker before a DO is reached.
 - **CSRF:** `SameSite=Lax` cookies, plus a required custom header (`X-Officebox-Request: 1`) and an `Origin` check on every state-changing REST request. WebSocket upgrades check `Origin` too (§3.1).
+  - **With better-auth** (unchanged from M1a): our CSRF middleware runs **before** `auth.handler`, so better-auth's routes need the header and a same-origin `Origin` like every other route. better-auth's own origin check (against `trustedOrigins`, which is the request's own origin) runs as well; neither replaces the other. The web app's better-auth client sends the header on every request.
+  - The magic-link confirmation, recovery, invitation and email-change POSTs come from our own pages, so they carry the header; scanners' GETs reach only the pages.
+- **Tokens in links** (Identity §2, Platform §10). Identity links put their token in the **URL fragment** (`/sign-in/link#t=…`, `/auth/recover#t=…`, `/invitations/accept#t=…`, `/me/email/confirm#t=…`), so it never reaches the Worker, Cloudflare logs, proxies or `Referer`. The page's script reads it, POSTs it in a JSON body and removes it with `history.replaceState`. Those pages are served with `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. All such links are built from the canonical origin (§8.1).
 - **Headers:**
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'` plus the Realtime SFU endpoints.
   - HSTS, `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`.
@@ -1812,7 +1977,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Upgrade test: the release-sync workflow opens a correct PR from a fresh customer copy (with signature verification), including a `wrangler.jsonc` merge that keeps resource IDs. Merging deploys. A conflicted release opens as a draft and can't deploy. Stable → beta works.
 - Rollback test: rolling back one version after a release with migrations works without a database restore (expand/contract). The previous release's integration tests pass against the new schema.
 - Storage test: as D1 fills, warnings appear at 70% and 85%. At 95%, protective mode blocks new objects while messages continue. At 98%, D1 copying pauses without losing anything. Trimming the search copy frees space. An R2 hard budget blocks uploads when set.
-- Security test: CSRF and cross-origin WebSocket attempts are rejected. HTML and SVG files download instead of rendering. Reusing a refresh token revokes the session. Owner recovery works only with the secret and is audited. Sign-out clears local caches. One-time tickets can't be reused.
+- Security test: CSRF and cross-origin WebSocket attempts are rejected. HTML and SVG files download instead of rendering. A revoked better-auth session is refused on its next request (cookie cache off). better-auth routes outside the allowlist answer 404. Owner recovery works only with the secret and is audited. Sign-out clears local caches. One-time tickets can't be reused.
 - Export/restore test: export a fixture installation, restore into a fresh installation from first-run setup, and compare row counts, checksums, channel `seq` positions and document content. Missing export configuration warns but does not block startup.
 - Search test: results match permitted messages and documents only. Deleting or trashing removes results. **Rebuild search index** reproduces the index.
 - Revocation test: disabling a user, or removing them from a private channel or document, closes their open sockets within 5 seconds.
@@ -1822,11 +1987,15 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Durable registry test: after UserHub eviction, revoking a member still closes every open socket; the Worker-side fallback closes sockets missing from the registry.
 - Trigger delivery test: a crash between marking a trigger fired and sending its effect leads to exactly one effect after recovery (outbox, idempotent consumer).
 - `pending_emails` dedupe: repeated events in one conversation produce one email; holds longer than 24 hours are released by `email_release`.
-- Session tests: two tabs refreshing within 30 seconds both stay signed in; replaying a refresh token after the grace window revokes the session; a disabled member's REST calls fail within 60 seconds.
+- Session tests: a session unused for 30 days is rejected and one used on day 29 is extended; signing out one device, other devices or everywhere closes those sessions' sockets; a disabled member's next REST call fails.
+- Passwordless tests: every account-creation path is refused without the setup or accept marker (`databaseHooks.user.create.before`), even with a pending invitation; no session is created for a disabled member; a counter regression is `clone_detected` with no session left behind, and a lost compare-and-set race raises no alert; an assertion or registration without user verification is refused; an assertion for another origin or relying-party ID is refused; auth routes on a non-canonical host are refused and emailed links use the canonical origin; a member can't delete another member's passkey; magic links are never sent to owners or admins.
+- **Token tests (required):** no response body or log line contains a session token; concurrent confirm POSTs with one magic-link token, and concurrent verifies with one enrolment ticket, succeed at most once; an enrolment ticket is consumed at verify, not options, and only with its own challenge; reopening an invitation or resuming setup after a passkey or session answers 410; the route allowlist holds against `//`, a trailing slash, case, `%2e` and other encoded segments, and `HEAD`/`OPTIONS`; flooding magic-link requests for one email doesn't extend its window; `RECOVERY_TOKEN` can't be reused.
+- **Identity hardening tests:** step-up returns `reauth_required` for each sensitive action without a fresh passkey assertion; the security-notice banner can't be acknowledged without one; the domain move commits only on a passkey registration on the new origin, expires when pending, and leaves the old host redirecting (302/307, `no-store`, never a request-supplied host); promotion refuses too few passkeys; claim expiry never deletes an owner with a passkey or session and clears the claim only when its delete matched; stale-nonce completion is refused; the repair job completes setup and never releases an invitation whose attempt ID is on a user (deleted included) or handle; no auth route sends CORS headers.
+- **End-to-end:** Playwright drives passkeys with a Chromium virtual authenticator (user verification on) and magic links through a test email sink.
 - Cascade tests: channel, group, calendar, drive and event deletions follow Platform §4, including channel purge moving folder documents to their creators.
-- Export exclusions: no `auth_tokens`, passkeys, ICS tokens or URLs, or `poll_secret` in an export; anonymous votes appear only as voter keys.
+- Export exclusions: no sessions, `auth_tokens`, `auth_accounts`, `auth_verifications`, `magic_link_issues`, `user_devices`, ICS tokens or URLs, or `poll_secret` in an export; anonymous votes appear only as voter keys. **Passkey public keys are exported**, and a restore onto the same canonical origin keeps them working.
 - SSRF tests: previews and ICS fetches refuse private IPs, including after redirects and DNS rebinding.
-- Scanner-safe links: a GET of a magic, reset, recovery, invitation or RSVP link changes nothing; only the confirmation POST does.
+- Scanner-safe links: a GET of a magic, recovery, invitation or RSVP link changes nothing; only the confirmation POST does. better-auth's GET magic-link verify route answers 404 from outside.
 - Timer catch-up: after simulated downtime, ReminderScheduler triggers less than 1 hour overdue fire once, older ones are dropped, and no trigger fires twice.
 - Compaction test: a long editing session compacts on the size and count thresholds. A document with a snapshot over 4 MB loads correctly from chunks. Hourly versions appear and restore correctly.
 
@@ -1863,6 +2032,11 @@ Every question open at v1.1 now has a decision:
 | D1 migration transactions | Not documented, so migrations are treated as possibly partly applied: one change per file, safe to re-run, expand/contract | §6.5 |
 | Event log horizon and outbox batching | Defaults: 30-day horizon, 250 ms batching delay, 100 events per batch | §2.2, §3.3 |
 | Search text projection and FTS export | DocRoom extracts plain text through an outbox to `document_text` and FTS5; the export excludes FTS and restore rebuilds it | §2.4 |
+| Sign-in methods (15 Nov 2026) | **Passwordless:** passkeys for everyone, magic links for members only; no passwords, reset, peppers or PBKDF2 (product-owner decision) | §3.1, §8.1 |
+| Authentication library (15 Nov 2026) | **better-auth** (MIT): database sessions (cookie cache off, 30-day sliding), `magicLink` behind our confirmation page, `@better-auth/passkey` with user verification required and the counter rule (library or our hook, decided in M1a-0); one instance per installation origin; sign-in limits in our middleware; exact pins, a CI advisory gate and the advisory policy | §8.1 |
+| Sessions (15 Nov 2026) | No refresh rotation or `session_epoch`; revocation deletes session rows and closes sockets by session ID; a UserHub recheck catches natural expiry | §3.1, §3.5, §8.1 |
+| Canonical origin (15 Nov 2026) | Recorded in `installation` at the setup claim; relying-party ID, `trustedOrigins`, `Origin` checks and every emailed link come from it; one better-auth instance per installation origin; domain changes are an explicit owner action | §6.8, §8.1 |
+| Passkey policy (15 Nov 2026) | User verification required for everyone; magic links for members only; exports include passkey public keys | §7.5, §8.1 |
 
 Resolved in v1.1:
 - Message storage split: the DO is the source of truth, with an outbox to a D1 copy (§2.0, §3.3).
@@ -1871,23 +2045,41 @@ Resolved in v1.1:
 Decided in v1.3 (from the review):
 - WebSocket auth: cookies plus `Origin` check; one-time tickets for clients without cookies (§3.1).
 - Whiteboard: Excalidraw (MIT) with an Officebox-maintained Yjs binding (§4.2).
-- Password hashing: PBKDF2-SHA256, versioned format (§8.1). Revised after the M0 foundation spike to 100,000 iterations plus an HMAC pepper; the production probe confirmed the cap.
+- ~~Password hashing: PBKDF2-SHA256, versioned format. Revised after the M0 foundation spike to 100,000 iterations plus an HMAC pepper; the production probe confirmed the cap.~~ **Superseded 15 Nov 2026:** sign-in is passwordless (§8.1).
 - File handling: streamed through the binding; multipart above 50 MB; allow-listed inline types (§8.3).
 - Huddle signalling: HuddleRoom DO with Worker-mediated SFU calls and confined track subscriptions (§3.6).
 - Screen sharing: one presenter, simulcast, detail and motion modes (§3.6). Present mode via Yjs awareness (§4.5).
 - Storage: protective mode and trimming of the D1 search copy (§7.7).
 
-To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
+To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), better-auth's adapter and hook details (below, v1.7), and EU jurisdiction support per service (§8.5).
 
-**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md), and the decisions below are applied in §8.1, §8.3, Identity §4.4 and platform §8, §11 and §16:
-- **PBKDF2 production cap:** **100,000, confirmed in production** (the probe's 100,001 and 600,000 calls fail with "iteration counts above 100000 are not supported"). The standalone server used by `wrangler dev` removes the cap, which is why 600k works locally. **Decision (final):** M1 uses **PBKDF2 100k + HMAC pepper** (`pbkdf2-sha256-hmac$<pepperId>$100000$salt$hash`, §8.1). Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works with precompiled modules, also in production (19 MiB/t=2 in ~85 ms round trip); scrypt N=2^17 also runs. Both remain later upgrade options. *Confirmed in production.*
-- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, replay refusal and `sign_count` clone detection. **Decision:** use it with `requireUserVerification: false`; compare counters ourselves after signature verification (≤ stored and not both 0 → `clone_detected`) and update with compare-and-set (`UPDATE … WHERE sign_count = ?`) (Identity §4.4). *Verified locally.*
-- **Rate Limiting binding:** periods are exactly 10 or 60 s; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. **Decision:** binding only for abuse throttles (sign-in per IP, setup/recovery/invites, link previews, general API); the wrapper treats results as advisory and returns `rate_limited` with retry-after equal to the period; the other platform §8 rows stay DO or D1. Production let **one call over** the limit (6 of 12 at limit 5) and accepted an unvalidated per-call `period`, so the wrapper never passes one. *Confirmed in production (one colo).*
+**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md), and the decisions below are applied in §8.1, §8.3, Identity §4.4 and platform §8, §11 and §16 (the PBKDF2 result no longer applies, since sign-in is passwordless):
+- **PBKDF2 production cap** (**no longer used**: sign-in became passwordless on 15 Nov 2026, §8.1; kept for the record): **100,000, confirmed in production** (the probe's 100,001 and 600,000 calls fail with "iteration counts above 100000 are not supported"). The standalone server used by `wrangler dev` removes the cap, which is why 600k works locally. **Decision at the time:** M1 would use **PBKDF2 100k + HMAC pepper** (`pbkdf2-sha256-hmac$<pepperId>$100000$salt$hash`); superseded by the passwordless decision. Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works with precompiled modules, also in production (19 MiB/t=2 in ~85 ms round trip); scrypt N=2^17 also runs. *Confirmed in production.*
+- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, replay refusal and `sign_count` clone detection. **Decision:** use it with `requireUserVerification: false`; compare counters ourselves after signature verification (≤ stored and not both 0 → `clone_detected`) and update with compare-and-set (`UPDATE … WHERE sign_count = ?`) (Identity §4.4). *Verified locally.* **Since 15 Nov 2026** SimpleWebAuthn comes through better-auth's passkey plugin; user verification is now **required** (product owner), and the counter rule carries over, enforced by the library or by our own after hook as the M1a-0 spike decides (§8.1).
+- **Rate Limiting binding:** periods are exactly 10 or 60 s; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. **Decision:** binding only for abuse throttles (passkey sign-in and magic-link confirmation per IP, setup/recovery/invites, link previews, general API); the wrapper treats results as advisory and returns `rate_limited` with retry-after equal to the period; the other platform §8 rows stay DO or D1. Production let **one call over** the limit (6 of 12 at limit 5) and accepted an unvalidated per-call `period`, so the wrapper never passes one. *Confirmed in production (one colo).*
 - **Queue `delaySeconds` maximum:** **24 hours** (86,400 s) for send, sendBatch and retries per current docs, not 12 hours; Miniflare rejects 86,401. **Decision:** the `email_release` threshold is 24 h; delays are Zod-validated (0–86,400) and out-of-range values are typed results (platform §11). Production rejects 86,401 on `send` (10210) and `sendBatch` (10202). *Confirmed in production.*
 - **PDF preview under `Content-Security-Policy: sandbox`:** Chromium's viewer renders it, directly and in an `<iframe>`. An `<iframe sandbox>` attribute blocks it. **Decision:** keep the CSP header and preview in an iframe without the `sandbox` attribute (§8.3); Firefox, Safari and branded Chrome are M6 acceptance checks, with PDF.js as the fallback. The headless shell has no PDF viewer. *Verified locally (Chromium 153).*
 
 **New in v1.4:**
-- **WebAuthn library spike before M1:** done. SimpleWebAuthn runs in Workers (see the M0 foundation spike above).
+- **WebAuthn library spike before M1:** done. SimpleWebAuthn runs in Workers (see the M0 foundation spike above); since 15 Nov 2026 it is used through better-auth's passkey plugin.
+
+**New in v1.7: the M1a-0 better-auth spike** (time-boxed, before M1a; PLAN §4). Each item ends in a recorded decision, and a failed item is fixed in the design before M1a starts.
+
+**Go/no-go.** better-auth is a **no-go** if any of these fails: it can't run correctly on D1 without transactions (with our ordered steps and repair job); `user.create.before` can't be shown to cover every user-creation path; or a hook can't see the authenticator counter (or the library's own regression error) reliably. **Fallback:** keep the hand-built sessions from the M1a branch (PR #17), add passkeys with `@simplewebauthn/server` directly and our own magic links, keeping every rule in Identity §4, and report back to the product owner before M1a proceeds. Other failures are design fixes, not a no-go.
+
+Spike items:
+- **D1 adapter:** custom table and field names, epoch-millisecond dates (otherwise an exception recorded in Platform §14), and behaviour **without transactions** (confirming the ordered steps and repair job in §8.1).
+- **Magic links:** `auth.api` magic-link verify called in-process returns the session cookie headers we can forward; `storeToken: "hashed"`; the request route's behaviour for unknown emails under `disableSignUp` (same response, no account).
+- **Passkeys:** whether verify with `requireSession: false` and `resolveUser` creates a session itself; whether user verification can be required in both options and verification; how a hook reads the authenticator counter, and whether SimpleWebAuthn already refuses regressions, which settles the counter-check choice in §8.1.
+- **Hooks:** whether `user.create.before` covers every `auth.api` creation path; whether `session.create.before` can refuse; whether a session-delete hook exists (otherwise the UserHub recheck is the only path for expiry, §3.5).
+- **Secrets:** the `BETTER_AUTH_SECRETS` rotation format.
+- **Cookies:** whether the `__Host-` prefix works with better-auth's cookie options.
+- **Origin and CSRF:** better-auth's origin check together with our `X-Officebox-Request` middleware; the token-stripping response filter.
+- **Rate limits:** the limiter's custom storage interface, as a backstop behind our middleware.
+- **Canonical origin:** `trustedOrigins`, `baseURL` and `rpID` from the installation record, with one instance per installation origin.
+- **Step-up:** re-authenticating with a passkey while signed in through better-auth, updating the current session's `fresh_auth_at` without leaving a second session.
+- **Domain move:** a second better-auth instance for the pending origin, used only by the completion routes.
+- **Runtime:** that `nodejs_compat` is on by default from compatibility date 2026-08-04 (from the better-auth docs; not yet checked against Cloudflare's), the per-request cost of reading the session row from the primary, and the bundle size of better-auth and its passkey plugin against the Worker limit (AGENTS §4.4).
 - **Holiday dataset before M5:** licence compatible with AGPL, plus the bundle size against the Worker limit.
 - **Size version compare before M6b:** a custom diff of two document states (§4.3); it may move to Later.
 - **ReminderScheduler load:** confirm a single instance handles a 100-member workspace's 48-hour trigger window, or shard it.

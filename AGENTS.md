@@ -24,6 +24,7 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 - [Calendar](specs/calendar.md)
 - [Documents, Whiteboards & Files](specs/documents.md)
 - [Assistant](specs/assistant.md)
+- [Admin & Operations](specs/admin.md)
 - [Projects, Tasks & Issues](specs/projects.md)
 
 **Cross-cutting specs** (every feature follows these):
@@ -144,6 +145,8 @@ Before adding a dependency, check all of these and note them in the PR:
 - It works in the Workers runtime (for server code).
 - It has a reasonable bundle size.
 - The version is pinned.
+
+**Security-sensitive dependencies** (today: `better-auth` and `@better-auth/passkey`) are pinned to exact versions, covered by Dependabot or GitHub advisory alerts and a CI gate on High or Critical advisories, and upgraded only after reviewing their published advisories, noted in the PR (TDD §8.1).
 
 Prefer the platform (WebCrypto, Workers APIs) over a library when the code is small.
 

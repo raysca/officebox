@@ -1,9 +1,9 @@
 # Spec: Platform Rules
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
+**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: exports by owners and admins including private content, export retention and coverage, new settings, limits, dispatcher jobs, maintenance RPC, tables and endpoints; updated for passwordless sign-in on better-auth (15 Nov 2026, [Identity](identity.md) §2): §2, §3, §5–§8, §10, §14, §16 and §17, then for the product owner's answers and two reviews of that change (same day: step-up, the two-step domain move, the notice banner, setup and invitation repair, timers)
 **Feature name:** Platform Rules (cross-cutting; not a user-facing feature)
-**Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md)
+**Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Admin & Operations](admin.md)
 
 Decisions marked **(default)** were not discussed; change them on review. Where a feature spec and this spec disagree on a cross-cutting rule, **this spec wins** and the feature spec is fixed.
 
@@ -34,13 +34,16 @@ The rules every feature follows, so features behave consistently and no data is 
 | Anonymous poll votes | **Hashed voter key per poll.** No member ID is stored, so voters can't be recovered from exports or logs. |
 | External event invitations | **On by default**, capped at **50 external recipients per member per day**. Admins can turn them off. |
 | ICS-in subscriptions | **Personal only.** URLs encrypted and masked. |
-| Owners' sign-in | **Owners must keep a password** in addition to any passkeys |
+| Owners' sign-in | **Passkeys only** (passwordless, and no magic links: those are for members only). User verification is required. Owners are reminded to keep **two passkeys** and **can't invite anyone until they have a second passkey or a set `RECOVERY_TOKEN`**; they recover through another owner's recovery link or `RECOVERY_TOKEN` ([Identity](identity.md) §2, §4.6). Changed 15 Nov 2026 from "owners must keep a password". |
+| Canonical origin | Recorded in `installation` at the setup claim (canonical origin and allowed hosts). Auth routes answer only there; the passkey relying-party ID and **every emailed or copied link** come from it, never the request's `Host`. Changed only by an owner's **two-step domain move**, committed by a passkey registration on the new origin; the old host then redirects (302/307, never 301) ([Identity](identity.md) §2, §4.4). `allowed_hosts` entries come only from the setup claim and committed moves. |
+| Step-up | Sensitive actions (passkey add or remove, domain move, role changes and promotion, recovery links, email changes) need a passkey assertion within the last 10 minutes; otherwise `reauth_required` ([Identity](identity.md) §4.5) |
 | Admin self-access | Admins need an **owner** to add themselves to a group or grant themselves drive or folder access; audited ([Permissions](permissions.md) §6) |
 | Recovery links without email | Allowed for members, but **loudly flagged**: a notice on the member's sign-in page and a flag on the owners' member list |
 | Group or channel calendar purged | Each event **moves to its organiser's personal calendar**, so attendees keep it. Events whose organiser is deleted are deleted, and attendees get `event_cancel`. |
 | Orphaned private events | An **owner or admin** can delete a private event whose organiser is disabled or deleted, without seeing its details |
 | Restore from Trash | The item's **owner**, the **person who deleted it**, **drive managers** of its drive, and **admins** |
 | Access-change mechanism | RPC `updateAccess(userId, role \| null)`; WebSocket message `{ type: "access.changed", role }`; close code **4403** when the role is null |
+| Exports | **Owners and admins; private content included; disclosed.** Workspace and per-member exports are an owner and admin power and include private content (DMs, private channels, restricted documents, time-off type and note, personal reminders); members can't export their own data. Every export is audited and the privacy statement says so ([Admin](admin.md) §2, [Permissions](permissions.md) §6). Changed by the approved Admin spec, replacing owner-only and personal exports. |
 
 ## 3. Member lifecycle
 
@@ -48,12 +51,12 @@ The rules every feature follows, so features behave consistently and no data is 
 
 | Feature | Disabled | Deleted |
 |---|---|---|
-| **Identity** | Sign-in refused. `session_epoch` bumped. All sockets closed with `4401`, including chat, documents, hub **and calls** (room registry kind `huddle`, so the member drops out of calls immediately: the HuddleRoom socket closes and their SFU tracks are closed). Anyone who **loses access to a call's context** (removed from the channel, document or event) is removed the same way, but with close code **`4403`**. Revocation uses the durable room registry plus the Worker-side fallback (§12). Shown under **Deactivated** in the directory. Handle kept. | Everything for *disabled*, then the [erase list](#31-personal-data-erase-list) runs. Handle released (held 30 days). Shown as "Former member". |
+| **Identity** | Sign-in refused. All their sessions revoked (better-auth session rows deleted). All sockets closed with `4401`, including chat, documents, hub **and calls** (room registry kind `huddle`, so the member drops out of calls immediately: the HuddleRoom socket closes and their SFU tracks are closed). Anyone who **loses access to a call's context** (removed from the channel, document or event) is removed the same way, but with close code **`4403`**. Revocation uses the durable room registry plus the Worker-side fallback (§12). Shown under **Deactivated** in the directory. Handle kept. | Everything for *disabled*, then the [erase list](#31-personal-data-erase-list) runs. Handle released (held 30 days). Shown as "Former member". |
 | **Chat** | DMs and group DMs are kept and marked **"deactivated"**. Sending to them is disabled **(default)**. Excluded from mention autocomplete and from `@here`. `@channel` and `@group` no longer notify them. Offline emails stop. If they were the **last channel admin**, the longest-standing remaining member is promoted (audited). | Messages stay, attributed to "Former member". Their `thread_follows`, `saved_items` and `sidebar_prefs` are erased. `@handle` text in plain-text copies and the search index is re-rendered as **"Former member"** **(default)**. |
 | **Calls** | Removed from any active call (above). Rings to them are **refused** ("*Name* is deactivated"). They can't host. Moderation of a call they hosted passes as set out in [Calls](calls.md) §6.7 (a present moderator; otherwise any participant in DM calls; otherwise the earliest remaining participant). | As disabled. Huddle participant rows, `call_notes.started_by` and transcript speakers (`call_transcript_segments.speaker_id`) show "Former member", like messages. Call notes and mention replies they triggered stay. |
 | **Calendar** | They **stay organiser** of their events **(default)**. An owner or admin can delete a **private** event they organised without seeing its details. Their reminders and emails stop. Invitations to them are refused. Hidden from find-a-time. **ICS-out feed tokens are revoked.** ICS-in refreshes pause. | **Events on their personal calendar:** an event with other attendees moves to the **first remaining attendee's** personal calendar (earliest to accept, otherwise earliest invited), and that attendee becomes organiser **(default)**. An event with no other attendees is deleted. **Events they organised on shared calendars:** the organiser becomes the first remaining editor of that calendar, or the calendar owner **(default)**. Private events among these can also be deleted by an owner or admin without seeing details. Standalone calendars they owned are **transferred to an admin**. ICS-in subscriptions and ICS-out feeds are **revoked**. `time_off` is **erased** (it holds sensitive types). `event_notes` and `event_reminders` are deleted. Attendee rows show "Former member". |
 | **Documents and files** | They **keep ownership** (PRD §6). Shares stay. Pending access requests to them are re-routed to other editors or managers. | **My files** (documents, whiteboards, files, folders) is **transferred to an admin**, who can then read it. This is stated in the privacy statement ([Permissions](permissions.md) §6). So is ownership of individual items elsewhere. Drives they managed get an admin as manager if none remains. `stars`, `recent_items` and `access_requests` are erased. Comments stay as "Former member". |
-| **Notifications** | No new inbox items, emails or rings. Pending delayed emails are dropped when they fire. | `inbox_items`, `notification_preferences`, `user_preferences`, `pending_emails` and `notify_anyway_log` rows are erased. |
+| **Notifications** | No new inbox items, emails or rings, except a per-member export `security_notice`, which is held and delivered on re-enable ([Admin](admin.md) §12, [Notifications](notifications.md) §3). Pending delayed emails are dropped when they fire. | `inbox_items`, `notification_preferences`, `user_preferences`, `pending_emails` and `notify_anyway_log` rows are erased. |
 | **Search** | Their content stays searchable. Hidden from people search **(default)**. | Content stays (attributed to "Former member"). Removed from people search. `@handle` occurrences re-rendered (Chat row). |
 | **Presence** | Removed from WorkspacePresence immediately. | Same. |
 | **Assistant** | Assistant DO kept but unreachable. `/ws/assistant` sockets close with `4401`. Proactive triggers, personal reminders and proactive opt-ins are suspended. Queued mention, nudge and proactive requests for them are **dropped** at their status check. **Purges (`assistant-purge`), vector deletes and the DO's `retention_sweep` keep running**, because they're housekeeping, not requests. Re-enabling runs the **reconcile pass** before the DO serves requests ([Assistant](assistant.md) §4.4, §13). | The member's **Assistant DO storage is deleted** (all tables), and their proactive triggers removed ([erase list](#31-personal-data-erase-list)). Every Worker path checks the member's status in D1 before addressing an Assistant DO, so queue consumers and alarms never recreate it. |
@@ -65,11 +68,11 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 
 | Store | What is erased |
 |---|---|
-| `users` | email, password_hash, **handle** (cleared), avatar_key, phone, pronouns, job_title, team, location, status_emoji, status_text, status_expires_at, timezone (reset to `UTC`), working_hours, region, **`pending_security_notice`**. `display_name` becomes "Former member". `status` becomes `deleted`. |
+| `users` | email, email_verified, **handle** (cleared), avatar_key, phone, pronouns, job_title, team, location, status_emoji, status_text, status_expires_at, timezone (reset to `UTC`), working_hours, region, **`pending_security_notice`**. `display_name` becomes "Former member". `status` becomes `deleted`. |
 | R2 | Avatar object |
-| Auth | `passkeys`, `auth_tokens`, `sessions`, `ws_tickets`, `mfa_factors` |
+| Auth | `passkeys`, `auth_tokens`, `sessions`, `auth_accounts`, `auth_verifications` and `magic_link_issues` (pending magic links for their email), `user_devices`, `ws_tickets`, `mfa_factors` |
 | Identity | `handles` row released (held 30 days). **`invitations.email`** on invitations sent to that person is redacted (replaced by a hash). |
-| Audit | **`audit_log.metadata`**: personal values (emails, names, handles) are replaced with the user ID and "Former member". Audit entries never store raw passwords or tokens in the first place. |
+| Audit | **`audit_log.metadata`**: personal values (emails, names, handles) are replaced with the user ID and "Former member". Audit entries never store raw tokens or secrets in the first place. |
 | Preferences | `user_preferences`, `notification_preferences`, `sidebar_prefs` |
 | Chat | `thread_follows`, `saved_items`; `@handle` text re-rendered as "Former member" in the D1 message copy, `search_index`, **and the ChatChannel DO's plain-text body** (a DO-side erase task run per channel the member posted in) |
 | Calendar | `time_off`, `event_notes`, `event_reminders`, `ics_feeds`, `ics_subscriptions` (and their cached events) |
@@ -77,10 +80,12 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | Notifications | `inbox_items`, `pending_emails`, `notify_anyway_log`, **`user_availability`** |
 | Membership | `group_members`, `channel_members` (channel history stays) |
 | Assistant | **Assistant DO storage** (all tables), `assistant_interactions`, `assistant_optins`, `assistant_source_refs`, `personal_reminders`, and their `assistant_brief`, `assistant_prep` and `personal_reminder` triggers ([Assistant](assistant.md) §13) |
-| Projects & Issues | `issue_follows`; completed/cancelled solo personal tasks (`project_id IS NULL`) and their `personal:<userId>` `ProjectRoom` DO storage (after open personal tasks are transferred to an admin); `@handle` text re-rendered as "Former member" in `issues`, `issue_comments`, `search_index` and each `ProjectRoom` DO the member participated in ([Projects](projects.md) §10.3) |
+| Projects & Issues | `issue_follows`; completed/cancelled solo personal tasks (`project_id IS NULL`) deleted from `ProjectRoom("personal")` and D1 `issues` (after open personal tasks are transferred to an admin); `@handle` text re-rendered as "Former member" in `issues`, `issue_comments`, `search_index`, `ProjectRoom("personal")` and each project `ProjectRoom` DO the member participated in ([Projects](projects.md) §10.3) |
 | Calls | Nothing erased: `call_notes.started_by` and `call_transcript_segments.speaker_id` keep the user ID and show "Former member", like messages |
 
 `ON DELETE CASCADE` on `users` never fires, because user rows are anonymised, not deleted. The purge job must delete each table explicitly.
+
+**Exports aren't rewritten** on deletion. Workspace and per-member export archives are snapshots, so a deleted member's data can remain in an archive until it expires (§5), and restoring an older export brings it back. The restore report warns about this, and the privacy statement says so ([Admin](admin.md) §11.2, [Permissions](permissions.md) §6).
 
 ## 4. Deletion cascades
 
@@ -123,13 +128,13 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | | Search text and stars, recents and access requests | Removed from search immediately; the rest purged |
 | **File → delete** | All versions | To Trash, which removes the file's derived text from retrieval (restore re-indexes it). Purge deletes every version's R2 object, its `file_derived_text` rows and their vectors ([Assistant](assistant.md) §9). |
 | **Comment thread → delete** | Comments | Deleted immediately (no Trash) by the author (own comments) or the document owner, editors or admins (moderation, audited) |
-| **Project → archive** | Issues & board, project channel, project drive, project calendar | All become read-only. Active calls end; open polls close. Reversible via Unarchive ([Projects](projects.md) §10.1). |
-| **Project → delete (Trash)** | Project, issues, project channel, project drive, project calendar, `project_memories` | To Trash for 30 days as one unit. Restorable by a Project Lead, the person who deleted it, or an admin. |
+| **Project → archive** | Issues & board, project channel, project drive, project calendar | All become read-only. Active channel and issue calls end; open polls close. Reversible via Unarchive ([Projects](projects.md) §10.1). |
+| **Project → delete (Trash)** | Project, issues, project channel, project drive, project calendar, `project_memories` | To Trash for 30 days as one unit (active channel and issue calls end). Restorable by a Project Lead, the person who deleted it, or an admin. |
 | **Project → purge** | Project Drive documents, whiteboards and files | **Moved to each creator's My files** (or an admin's if the creator was deleted), keeping explicit item grants and removing project-inherited access. Empty Project Drive and folders deleted. |
 | | Project Calendar | Purged. Milestones deleted; meeting events with attendees **move to their organiser's personal calendar** (or are deleted with `event_cancel` if the organiser is deleted). |
 | | Project Channel | Purged as in **Channel → purge** (`ChatChannel` DO `deleteAll()`, message-owned files, call notes/transcripts). |
-| | Issues, sub-issues, comments, checklists, relations, key aliases, issue-owned files, `project_memories`, `project_pulses` | Deleted (`ProjectRoom` DO `deleteAll()`, D1 rows, R2 issue attachments, `file_derived_text`, `search_index` and Vectorize entries; `assistant-purge` fan-out for members' personal memories). Project key held 30 days. |
-| **Issue / personal task → delete** | Sub-issues, comments, checklists, relations, issue-owned files | To Trash for 30 days (removed from search, vectors and active boards; inbox items resolved), then purged with `assistant-purge` fan-out (Projects §10.2). |
+| | Issues, sub-issues, comments, checklists, relations, key aliases, issue-owned files, issue calls (`huddle_messages`, `call_notes`, `call_transcript_segments`), `project_memories`, `project_pulses` | Deleted (`ProjectRoom` DO `deleteAll()`, D1 rows, R2 issue attachments, `file_derived_text`, issue-call chat/notes/transcripts, `search_index` and Vectorize entries; `assistant-purge` fan-out for members' personal memories). Project key held 30 days. |
+| **Issue / personal task → delete** | Sub-issues, comments, checklists, relations, issue-owned files, issue calls (`huddle_messages`, `call_notes`, `call_transcript_segments`) | To Trash for 30 days (active issue call ends; removed from search, vectors and active boards; inbox items resolved), then purged with `assistant-purge` fan-out (Projects §10.2). |
 | **Source object → delete/purge** | `project_memories` citing the object (`project_memory_sources`) | Moving a cited source to 30-day Trash immediately hides citing `project_memories` from Overview, `search_index` and Vectorize (restoring the source un-hides them); permanent deletion or purge deletes the `project_memories` rows immediately along with their FTS5 and Vectorize entries (Projects §8.2). |
 | **User → delete** | See §3 | |
 
@@ -158,11 +163,15 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | Huddle metadata (`huddles`, `huddle_participants`) | 365 days | No | — |
 | Call rings (`call_rings`) | 365 days, with huddle metadata | No | — |
 | **In-call chat**, channel and DM calls | A thread in the conversation, so it follows the channel | With the channel | — |
-| **In-call chat**, document and event calls | **Life of the context.** `huddle_messages` is **reparented** to the context (`context_type`, `context_id`) and **must not cascade** from `huddles`. | With the context | As the context |
+| **In-call chat**, document, event and issue calls | **Life of the context.** `huddle_messages` is **reparented** to the context (`context_type`, `context_id`) and **must not cascade** from `huddles`. | With the context | As the context |
 | Link previews (`link_previews`) | Cache 24 hours. Rows unreferenced for 30 days are purged with their R2 image **(default)**. | No | — |
 | Access requests | Decided requests 90 days after decision; pending ones expire after 30 days **(default)** | No | — |
 | `ws_tickets` | Deleted daily after expiry | No | — |
 | `auth_tokens` | Deleted 7 days after use or expiry | No | — |
+| `auth_verifications` (better-auth: magic-link tokens, WebAuthn challenges) | Deleted on use; expired rows deleted daily | No | — |
+| `magic_link_issues` | Deleted 7 days after use, revocation or expiry | No | — |
+| `user_devices` | Deleted after 400 days unused **(default)**, and with the user | No | — |
+| `recovery_token_uses` | Kept (so a used `RECOVERY_TOKEN` value never works again) | No | — |
 | `pending_emails` | Deleted when sent or cancelled | No | — |
 | **Assistant conversations and memory** (Assistant DO) | `assistant_memory_retention_days` (365 **(default)**), or shorter if the member chose; applied by the DO's daily `retention_sweep`, which keeps running while the assistant is off. **Incognito** conversations: deleted at End or 24 hours after last activity **(default)**. Content whose source the member lost access to: deleted after 7 days hidden **(default)**. Undecided pending items: 30 days **(default)**. Finished, cancelled and expired pending actions: 24 hours ([Assistant](assistant.md) §4, §5.1, §13). | No | — |
 | `assistant_interactions` (metadata) | `assistant_interaction_retention_days` (30, PRD §10.2) | No | — |
@@ -170,6 +179,11 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | Personal reminders (`personal_reminders`) | Deleted 30 days after done or dismissed **(default)** | No | — |
 | **Call notes** (`call_notes`) | **Life of the context.** Keyed to the context (`context_type`, `context_id`) and **must not cascade** from `huddles`. | With the context | As the context |
 | **Call transcripts** (`call_transcript_segments`) and their vectors | `call_transcript_retention_days` (90 **(default)**), then purged by the daily purge job; earlier if the context is purged | With the context | As the context |
+| **Workspace exports, on demand** | Deleted **45 days** after completion **(default)** (`export_retention_days`, §7), or earlier by an owner or admin. Downloads check `expires_at` themselves; deleted objects are removed within the hour ([Admin](admin.md) §11.1). | No | — |
+| **Workspace exports, scheduled** | The latest **4 complete** scheduled exports are kept; older ones are deleted only after a new one completes ([Admin](admin.md) §11.1) | No | — |
+| **Per-member exports** | Deleted **7 days** after completion **(default)**, or earlier; the daily job deletes expired archives ([Admin](admin.md) §12) | No | — |
+| Download tokens (`download_tokens`) | Valid for **1 hour (default)**; expired rows deleted daily ([Admin](admin.md) §11.3, §16) | No | — |
+| Admin job previews (`admin_jobs`) | Previews valid for 10 minutes; expired previews deleted daily ([Admin](admin.md) §5, §16) | No | — |
 | `file_derived_text` and its vectors | Per file version, following the file: Trash removes it from retrieval, restore re-indexes it, purge deletes it. An owner can delete the whole assistant index (audited) **(default)**. | With the file | As the file |
 | **Projects** (`projects`, milestones, labels, pulses) | Until deleted | 30 days | Project Lead, person who deleted it, admin |
 | **Issues & personal tasks** (`issues`, sub-issues, checklists, relations, comments, activity, issue-owned files) | Until deleted | 30 days | Project Lead, issue creator/owner, person who deleted it, admin |
@@ -190,36 +204,52 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 
 ## 6. Export coverage
 
-This extends TDD §7.5.
+This extends TDD §7.5. Exports are run by **owners and admins** and include private content ([Admin](admin.md) §2, §11).
 
 | Included | Notes |
 |---|---|
+| Private content: DMs, group DMs, private channels, private projects, personal tasks, restricted documents | Included in admin-run exports, so a restore is complete; disclosed in the privacy statement ([Permissions](permissions.md) §6) |
 | Calendars, events, event exceptions, attendees, reminders | External attendee emails are included (personal data the organiser holds) |
-| Time off | Including type and note (the export is owner-only) |
+| Time off | Including type and note, in admin-run exports (workspace and per-member, [Admin](admin.md) §2) |
+| `personal_reminders` | Included in admin-run exports (workspace and per-member, [Admin](admin.md) §2, [Assistant](assistant.md) §7.1) |
 | Drives, folders, documents, whiteboards, files **with all versions** | `files/<file id>/<version>` |
 | Comment threads and comments | |
 | Polls and votes | Anonymous polls export **votes as hashed `voter_key`s only**, never member IDs; `poll_secret` is excluded. Non-anonymous polls export voter IDs. |
 | Saved items, stars, sidebar prefs, user and notification preferences | |
-| In-call chat | From `huddle_messages` (document and event calls) **and** from channel threads (channel and DM calls, part of channel export) |
+| In-call chat | From `huddle_messages` (document, event and issue calls) **and** from channel threads (channel and DM calls, part of channel export) |
 | Huddle metadata, call rings | Within retention |
 | `assistant_interactions` | Metadata only, within retention ([Assistant](assistant.md) §13) |
 | Call notes and transcripts | Within retention |
+| `passkeys` (public keys, credential IDs, counters, names, how each was created) | **Included** (product owner, 15 Nov 2026). Public keys aren't secret. A restore onto the **same canonical origin** keeps them working; onto another origin they're dropped, and members use a magic link (email configured) while everyone else gets a recovery link. The restore summary lists who needs one ([Identity](identity.md) §2). |
 | **Projects, milestones, labels, issues, sub-issues, checklists, comments, relations, activity, key aliases, Project Pulses and active Project Memory** | Exported from each project's `ProjectRoom` DO plus `ProjectRoom("personal")` (`projects/<id>/state.jsonl` and `projects/personal/state.jsonl` for authoritative `issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments` and `issue_activity`) and D1 (`projects`, `project_milestones`, `project_labels`, `issue_relations`, `issue_follows`, `issue_key_aliases`, `project_memories`, `project_memory_sources`, `project_pulses`), plus issue-owned attachments in R2 ([Projects](projects.md)) |
 
 | Excluded | Reason |
 |---|---|
-| `sessions`, `auth_tokens`, `ws_tickets` | Credentials |
+| `sessions`, `auth_tokens`, `auth_accounts`, `auth_verifications`, `magic_link_issues`, `user_devices`, `ws_tickets` | Credentials (better-auth's session tokens, magic-link tokens and challenges, our own tokens and device markers) |
 | `pending_emails`, `notify_anyway_log`, `scheduled_triggers` | Transient operational state, rebuilt after restore |
 | `assistant_optins`, `assistant_source_refs` | Assistant operational state: opt-ins are re-chosen after a restore, and the source mirror is rebuilt from the members' Assistant DOs, which aren't restored either ([Assistant](assistant.md) §13) **(default)** |
-| `passkeys` | Bound to the domain (WebAuthn relying-party ID). Members **re-register** after restoring to a new domain. Owners can sign in with their required password (§2). |
 | `mfa_factors` | Encrypted with an installation key |
 | `ics_feeds` tokens | Credentials. Members create new feed URLs after a restore. |
 | ICS-in URLs | Secrets. Subscriptions are exported **without URLs** and need re-entry after a restore **(default)**. |
 | `search_index` | Rebuilt on restore (TDD §2.4) |
 | `file_derived_text`, assistant vectors | Rebuilt by back-fill, like `search_index` ([Assistant](assistant.md) §9) |
-| Assistant conversations and memory (Assistant DO) | Admins can't read them (Assistant §11). Members use the personal export ("Download my assistant data") **(default)**. Not part of a workspace restore. |
-| `personal_reminders` | Often come from private conversations. Personal export only **(default)** (Assistant §7.1). |
-| Setup, recovery and Worker secrets | Never exported. Password hashes are exported but are only usable with the same `PEPPER_*` secrets (§16), which the restore guide tells owners to carry over. |
+| Assistant conversations and memory (Assistant DO) | **Not exportable by anyone**; admins can't read them (Assistant §11). Members see their memory in "What Butler remembers" and their history in the assistant DM ([Admin](admin.md) §2). Not part of a workspace restore. |
+| Operational tables: `exports`, `maintenance_windows`, `admin_alerts`, `health_checks`, `admin_jobs`, `download_tokens` | Installation state, so a restore never starts read-only or with stale alerts ([Admin](admin.md) §11.1) |
+| Setup, recovery and Worker secrets | Never exported, including `BETTER_AUTH_SECRET` (§16). There are no password hashes to export (changed 15 Nov 2026), so a restore needs no secret carried over; it sets up new secrets and all sessions are invalid. |
+
+**Per-member exports** ([Admin](admin.md) §12) contain everything above, **filtered to the subject**:
+- profile, preferences and notification preferences
+- messages they wrote in every conversation, including DMs, with conversation names and their message-owned attachments
+- their reactions, saved items, stars and non-anonymous poll votes
+- documents, whiteboards and files they own, with versions, including items in Trash
+- issues and personal tasks they created or are assigned to, their `issue_reviewers` rows and `issue_follows`, issue comments they wrote, and their issue-owned attachments ([Projects](projects.md) §10.4)
+- events they organise or attend, their time off (with type and note) and personal reminders
+- comments they wrote, and call-note transcript segments they spoke
+- their `assistant_interactions` metadata
+- group memberships, and their sessions list (devices and times, no tokens)
+- audit entries where they are the actor or target.
+
+They **never** contain credentials (including passkey public keys), assistant conversations or memory, or other people's messages and content (quoted or forwarded content written by others appears only as a reference **(default)**).
 
 ## 7. Admin settings
 
@@ -229,7 +259,7 @@ The single list of workspace settings. Feature specs reference this table instea
 |---|---|---|---|---|
 | `allowed_invite_domains` | off (any domain) | Admin | `settings.invite_domains` | Identity §4.2 |
 | `magic_link_enabled` | on when email is configured | Admin | `settings.magic_link` | Identity §4.11 |
-| `min_password_length` | 10 (raise only) | Owner | `settings.password_policy` | Identity §4.11 |
+| Canonical origin (domain move) | the setup claim's origin | **Owner**, with step-up, in two steps (start, then commit by registering a passkey on the new origin); not a `PATCH /admin/settings` key | `domain.move_started`, `domain.move_committed`, `domain.move_cancelled`, `domain.move_expired` | Identity §4.4 |
 | `default_channels` | `#general` (**public channels only**) | Admin | `settings.default_channels` | Identity §4.3 |
 | `welcome_post_enabled` | on | Admin | `settings.welcome_post` | Identity §4.3 |
 | `general_read_only` | off | **Owner** | `settings.general_read_only` | Chat §3.1 |
@@ -268,6 +298,10 @@ The single list of workspace settings. Feature specs reference this table instea
 | `call_transcript_retention_days` | 90 **(default)** | **Owner** | `settings.call_transcript_retention` | Assistant §12.3 |
 | `assistant_live_voice` | on **(default)** | Admin | `settings.assistant_live_voice` | Assistant §12.2 |
 | `assistant_file_media` | on **(default)** (image and audio reading) | Admin | `settings.assistant_file_media` | Assistant §9 |
+| `audit_retention_days` | 365 (PRD §10.2) (90–3,650 **(default)**). `export.*` and `member_export.*` entries are kept at least 365 days whatever the value **(default)**. | **Owner** | `settings.audit_retention` | Admin §7 |
+| `export_retention_days` | 45 **(default)** (31–365 **(default)**); applies to on-demand workspace exports only | **Owner** | `settings.export_retention` | Admin §11.1 |
+| `scheduled_export` | off. `{ enabled, weekday, time, include_files, set_by }`; when on, weekly **(default)**, files included, latest 4 complete exports kept (fixed) | Admin | `settings.scheduled_export` | Admin §11.1 |
+| `workspace_timezone` | the first owner's time zone (IANA name) **(default)** | Admin | `settings.workspace_timezone` | Admin §11.1 |
 | `project_creation` | `everyone` (`everyone` / `admins`) **(default)** | Admin | `settings.project_creation` | Projects §3.2 |
 
 Every change writes the audit event with old and new values (values that are personal data, such as email addresses, are stored hashed). Settings are read and written through `GET` / `PATCH /admin/settings` (§15). Settings are cached per Worker isolate for at most 30 seconds **(default)**. Durable Objects that enforce a setting (for example ChatChannel for `general_read_only`) receive it through their config RPC.
@@ -279,23 +313,30 @@ Every change writes the audit event with old and new values (values that are per
 Every limit names its **mechanism**:
 - **binding:** the Workers Rate Limiting binding. Windows of **exactly 10 or 60 seconds** (no other period is supported); counted **per Cloudflare location**, **approximate and eventually consistent** (bursts can exceed the limit before counts converge). Good for abuse protection, not exact quotas. The wrapper treats a binding result as **advisory**: a refusal returns `rate_limited` with retry-after equal to the period. Local Miniflare is exact, so tests must not rely on production being exact (M0 foundation spike).
 - **DO:** a counter inside the Durable Object that already owns the action (exact, per object). For example, per-conversation sends are counted in that channel's ChatChannel DO, and rings in the caller's UserHub.
-- **D1 counter:** rows in a `rate_counters` table keyed `(scope, key, window_start)` for windows **longer than 60 seconds** and daily quotas. Daily windows use the member's time zone.
+- **D1 counter:** rows in a `rate_counters` table keyed `(scope, key, window_start)` for windows **longer than 60 seconds** and daily quotas. Daily windows use the member's time zone, **except** invitation sending (CSV invite) and per-member exports, which use the **UTC day** **(default)** ([Admin](admin.md) §5.1, §12).
 
 Exceeding a limit returns a typed `rate_limited` result with a retry-after value, never a thrown error (AGENTS §4.1).
 
+**Client IP:** every per-IP limit uses `cf-connecting-ip`, with IPv6 addresses grouped by /64. better-auth must be configured the same way (`advanced.ipAddress.ipAddressHeaders: ["cf-connecting-ip"]` plus `ipv6Subnet`), because its default IP detection was the subject of an advisory (TDD §8.1).
+
+**Sign-in limits are enforced in our middleware, before `auth.handler`**, on atomic D1 `rate_counters` or the binding. better-auth's own limiter (custom storage on the same counters, never memory) is only a backstop. Emails are **normalised** (trim, lowercase, NFKC) before they become limiter keys. **The per-email magic-link limit can't lock a victim out:** inside the window, further requests send no more mail but **don't extend the window**, and the response is identical to an accepted request.
+
+**Removed 15 Nov 2026:** the password sign-in limits (5 attempts per minute per IP, 10 per hour per account with progressive delays) and the M1a draft's slow mode, with its `sign_in_throttle`, `sign_in_failure_buckets` and `sign_in_slots` tables. There are no passwords to guess ([Identity](identity.md) §2).
+
 | Action | Limit | Mechanism | Source |
 |---|---|---|---|
-| Sign-in attempts, per IP | 5 per minute | binding | TDD §8.1 |
-| Sign-in attempts, per account | 10 per hour; attempts 1–5 immediate, then a progressive delay of 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s; no lockout | D1 counter | TDD §8.1, Identity §4.4 |
-| Magic-link and password-reset requests | 3 per 15 minutes per account; 20 per hour per IP **(default)** | D1 counter | Identity §4.4 |
-| Setup, recovery, invitation acceptance | 5 per minute per IP | binding | TDD §8.1 |
+| Magic-link requests, per email | 3 emails per fixed 15-minute window per normalised address, counted the same for unknown emails (keyed by an HMAC of the address); later requests in the window send nothing and don't extend it **(default)** | D1 counter, in our middleware | Identity §4.4, TDD §8.1 |
+| Magic-link requests, per IP | 20 per hour per IP **(default)** | D1 counter, in our middleware | Identity §4.4 |
+| Magic-link confirmation POSTs, per IP | 10 per minute **(default)** | binding, in our middleware | Identity §4.4 |
+| Passkey sign-in and registration (options and verification), per IP | 20 per minute **(default)** | binding, in our middleware | Identity §4.4 |
+| Setup, setup resume, recovery links, owner recovery (`/recover`), invitation lookup and acceptance | 5 per minute per IP | binding, in our middleware | TDD §8.1 |
 | Message sends | 10 per 10 seconds per user per conversation **(default)** | DO (ChatChannel) | Chat §20 |
 | `@channel` / `@here` | 1 per 5 minutes per user per channel **(default)** | DO (ChatChannel) | Chat §20 |
 | "Notify anyway" (break through DND) | Once per sender per recipient per 30 minutes **(default)** | D1 counter (`notify_anyway_log`) | Notifications §5.2 |
 | Group DM creation | 20 per hour per user **(default)** | D1 counter | Chat §20 |
 | Poll creation | 10 per hour per user **(default)** | D1 counter | Chat §20 |
 | Rings | 5 rings to the same person per 10 minutes **(default)** | DO (caller's UserHub) | Calls §4 |
-| In-call chat (`call_chat`) | 20 messages per 10 seconds per user per call **(default)**, separate from the per-conversation send limit | DO (ChatChannel, or HuddleRoom for document and event calls) | Chat §4.7 |
+| In-call chat (`call_chat`) | 20 messages per 10 seconds per user per call **(default)**, separate from the per-conversation send limit | DO (ChatChannel, or HuddleRoom for document, event and issue calls) | Chat §4.7 |
 | Handle changes | 3 per 30 days per user **(default)** | D1 counter (from `handles` history) | Identity §4.8 |
 | Access requests | 1 pending request per object per requester (unique index); 20 per day per requester **(default)** | D1 (unique index) + D1 counter | Permissions §7 |
 | External event invitation emails | 50 external recipients per member per day (setting) | D1 counter | Calendar §8 |
@@ -310,6 +351,12 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Assistant burst | 10 requests per 60 seconds per member **(default)** | binding | Assistant §10.2 |
 | Assistant mentions | 5 per 60 seconds per conversation **(default)** | DO (ChatChannel) | Assistant §10.2 |
 | Live voice session | 30 minutes per session **(default)**; one at a time per member | DO (Assistant) | Assistant §10.2 |
+| CSV invite upload | 500 rows and 1 MB per file (UTF-8) **(default)** | Request check | Admin §5.1 |
+| Bulk member actions (group changes, disable) | 500 members per action **(default)** | Request check | Admin §5.2, §5.3 |
+| Invitation sending | 200 per workspace per **UTC day** **(default)**. Rows beyond the limit stay **pending** and are sent the next day, rather than being refused. | D1 counter | Admin §5.1 |
+| Step-up re-authentication (`POST /me/reauth`) | 5 attempts per 10 minutes per session **(default)**. Failed attempts also count toward the per-IP passkey sign-in limit (above) and are audited. (Admin §11.3 counted them toward a per-account password throttle, which no longer exists.) | D1 counter, in our middleware | Admin §11.3, Identity §4.5 |
+| Per-member exports | 10 per actor per **UTC day** **(default)**; one running per subject | D1 counter + D1 (one running per subject) | Admin §12 |
+| `GET /status/public` (signed out) | 60 per minute per IP **(default)**; responses cacheable for 30 seconds | binding | Admin §8.2 |
 
 **Structural limits** (enforced at write time, validated with Zod and checked in the service):
 
@@ -361,17 +408,20 @@ Workers can't reach private networks directly, so these checks are **defence in 
 
 **Rule:** every link that changes state opens a **confirmation page**, and the state changes only on a **POST** from that page. Mail scanners and link prefetchers (for example Outlook Safe Links) issue GETs, so they can't use up a token or answer an RSVP.
 
+**Magic links and better-auth** (15 Nov 2026). better-auth's magic-link plugin verifies with a GET (`/magic-link/verify`) and doesn't handle scanner prefetch, so its link is never emailed. The `sendMagicLink` callback emails a link to **our confirmation page** instead; the page's POST consumes the token with our compare-and-set (`magic_link_issues`) and then calls better-auth's verification on the server (`auth.api`), which signs in. better-auth's GET verify route isn't reachable from outside. Magic links go to **members only**, never owners or admins ([Identity](identity.md) §2, §4.4, TDD §8.1).
+
+**Identity links carry their token in the URL fragment** (15 Nov 2026, review): `/sign-in/link#t=…`, `/auth/recover#t=…`, `/invitations/accept#t=…`, `/me/email/confirm#t=…`. Fragments never reach the server, proxies, logs or `Referer`. The page's script POSTs the token in a JSON body and strips the fragment with `history.replaceState`. These pages send **`Referrer-Policy: no-referrer`** and **`Cache-Control: no-store`**. Every link is built from the **canonical origin** (§2), never the request's `Host`. RSVP and opt-out links keep their current form for now.
+
 | Link | Token type | Valid for | Confirmation page |
 |---|---|---|---|
-| Magic link | Single-use | 15 minutes | "Sign in to *Workspace* as *email*" → Continue |
-| Password reset | Single-use | 1 hour | Set new password |
-| Recovery link (admin-issued) | Single-use | 24 hours | Set password or register passkey |
+| Magic link (members only) | Single-use (our compare-and-set, then better-auth verification) | 15 minutes (`expiresIn: 900`, not better-auth's 300 s default) | "Sign in to *Workspace* as **_email_**" → Continue, with the email prominent so a shared link is obvious; the POST runs better-auth's verification on the server |
+| Recovery link (admin- or owner-issued) | Single-use | 24 hours | Register a new passkey |
 | Invitation | Single-use | 7 days | Accept form |
 | Email change confirmation | Single-use | 24 hours | Confirm |
 | **External RSVP** | **Per-attendee, reusable** | Until the event (or series) ends | Event summary with **Accept / Maybe / Decline** buttons. Response can be changed until the token expires. |
 | External opt-out | Per-recipient, reusable | Indefinite | "Stop invitations from *Workspace*" → Confirm **(default)** |
 
-Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_token_hash`). Using a single-use token marks it used atomically.
+Our tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_token_hash`). Using a single-use token marks it used with a compare-and-set, so concurrent POSTs succeed at most once. Magic-link tokens are generated by better-auth and stored in `auth_verifications` (hashed if the M1a-0 spike confirms `storeToken: "hashed"`); we also record each token's hash and the normalised email in `magic_link_issues`, which is what we consume, and revoke by email on an email change or recovery link. Password-reset links are removed (15 Nov 2026).
 
 **External invitation email template** (fixed; no free-form HTML):
 - **From display name:** "*Name* via Officebox (*Workspace*)". The envelope sender is the workspace's configured email address.
@@ -412,6 +462,14 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 | Room-registry sweep | Daily cron | §12 |
 | Purge, retention, reconciliation, version thinning, release check | Daily cron | TDD §7.8. The purge job also deletes expired `assistant_interactions`, `call_transcript_segments` past retention (and their vectors), `file_derived_text` for purged versions, finished `personal_reminders` (Assistant §14.3), and undecided `pending` `project_memories` past 30 days (Projects §8.2). |
 | Scheduled-trigger refill | Hourly cron | Below |
+| Identity repair job | Hourly cron | Completes setup when the owner has a passkey but setup isn't complete; rolls forward or releases partial invitation accepts under the rules in [Identity](identity.md) §4.3; idempotent |
+| Setup claim expiry | Hourly cron, and the next setup request | One conditional batch, 24 hours after the claim ([Identity](identity.md) §4.1) |
+| Pending domain move expiry | Hourly cron | 24 hours after the start **(default)** |
+| Identity token sweeps | Daily cron | Deletes expired `auth_verifications`, `magic_link_issues` 7 days after use or expiry, `auth_tokens` 7 days after use or expiry, and `user_devices` unused for 400 days (§5) |
+| Health checks, alert raise and clear | 5-minute cron (dispatcher) | Writes `health_checks` and `admin_alerts` with compare-and-set, so concurrent runs send no duplicate emails ([Admin](admin.md) §4) |
+| Maintenance transitions, notices and the 24-hour cap | 5-minute cron (dispatcher), or the first request that reads the state | Applies clock-driven transitions with compare-and-set and sends `maintenance_scheduled` notices ([Admin](admin.md) §13.2) |
+| Scheduled-export slot | Hourly cron (dispatcher) | Claims the slot with compare-and-set (`installation.scheduled_export_last_slot`); a missed slot runs within 24 hours, then is skipped ([Admin](admin.md) §11.1) |
+| Audit retention purge; export and member-export expiry; expired download tokens and job previews; pending CSV invitations | Daily cron (dispatcher) | [Admin](admin.md) §16. Pending invitations wait while maintenance or protective mode is on. |
 
 **Offline unread email:**
 1. When a qualifying notification (mention, DM, thread reply, …) is created for an offline or inactive member, the consumer inserts a row into **`pending_emails`** with a uniqueness key `(user_id, conversation_id, window)`. `window` is the time bucket of the member's delay, so repeated events in one conversation share one row. Queues don't deduplicate, so this table does.
@@ -432,6 +490,8 @@ CREATE TABLE pending_emails (
   PRIMARY KEY (user_id, conversation_id, window)
 );
 ```
+
+The admin jobs above add **no ReminderScheduler kinds**. During maintenance, content-creating timers, purges, retention sweeps and scheduled exports are **deferred** until it ends; reminders and other notification-only triggers fire on time ([Admin](admin.md) §13.3).
 
 **Why a queue rather than a UserHub alarm:** a UserHub alarm would wake the hub of every offline recipient just to check a cursor. A delayed queue message costs nothing until it fires, survives restarts, and is checked against D1 read state, which is the truth for unread counts (TDD §3.5).
 
@@ -487,6 +547,11 @@ This replaces TDD §3.5's "at most three WebSockets per tab".
 - The DO sends **`{ type: "access.changed", role }`** on the member's sockets and **switches them to read-only** (viewer or commenter), or **closes them with `4403`** when the role is `null`. This complements `closeConnections` for full revocation (TDD §3.5).
 - **Offline edits after losing access:** on reconnect the server rejects updates from a connection without edit rights. The client keeps the unsynced changes in a local copy the user can **export as Markdown**, and shows "You no longer have edit access — your offline changes were not saved" **(default)**.
 
+**Maintenance mode** ([Admin](admin.md) §13.2):
+- On each maintenance transition, the Worker calls a room-level **`setMaintenance(epoch, active)`** RPC on **open rooms only**, found through the room registry below.
+- The room sets a **read-only flag separate from each socket's role** and sends `status.changed { maintenance }`. When maintenance ends, the flag clears and each socket's own role applies again. Nobody reconnects.
+- `updateAccess` is **not** used for maintenance. Closed DOs aren't woken; they check `installation.maintenance_epoch` lazily (cached for 10 seconds **(default)**) before any refused write.
+
 **Durable room registry (revocation):**
 - Each member's UserHub keeps a **room registry in its SQLite storage**, keyed by `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board`, `huddle`, `project` and `assistant`. `assistant` sockets close with `4401` when the member is disabled and `4403` when they lose assistant access (Assistant §14.1).
 - A room DO **registers** a connection when it accepts the socket and **unregisters** it when the socket closes (the DO calls the hub). Heartbeats refresh `last_seen_at`.
@@ -532,14 +597,29 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | Table | Change | Final value | Source |
 |---|---|---|---|
 | `users.role` | Add value | `owner`, `admin`, `member`, `guest` (guest reserved; Phase 2) | Identity §2, PRD §10.1 |
-| `users` | Add columns | handle (denormalised copy of `handles`), avatar_key, timezone, working_hours, region, job_title, team, pronouns, phone, location, status_*, onboarded_at, tour_dismissed_at, `pending_security_notice` | Identity §5 |
-| `handles`, `passkeys`, `auth_tokens` | New tables | As Identity §5 (`handles` is authoritative) | Identity §5 |
+| `users` | Add columns | handle (denormalised copy of `handles`), avatar_key, timezone, working_hours, region, job_title, team, pronouns, phone, location, status_*, onboarded_at, tour_dismissed_at, `pending_security_notice`, **`email_verified`** (better-auth) | Identity §5 |
+| `users` | Remove (baseline, never created) | **`password_hash`** and **`session_epoch`** (15 Nov 2026: passwordless; revocation deletes sessions and closes sockets by session ID, TDD §3.5) | Identity §2, §4.5 |
+| `users`, `sessions` | better-auth mapping | better-auth's `user` and `session` models map onto these core tables with `modelName` and `fields` (`name` → `display_name`, `emailVerified` → `email_verified`, `image` → `avatar_key`, `userId` → `user_id`, …). `role`, `status`, `handle` and the profile columns are `additionalFields` with `input: false`. IDs are ULIDs (`advanced.database.generateId`). | Identity §5, TDD §2.1 |
+| `handles`, `passkeys`, `auth_tokens` | New tables | As Identity §5 (`handles` is authoritative). `passkeys` is better-auth's `passkey` model, mapped, plus our `verified_sign_count` and `last_used_at`. | Identity §5 |
+| `auth_accounts`, `auth_verifications` | New tables (better-auth) | better-auth's `account` and `verification` models, mapped to these names. `auth_accounts.password` is always NULL. better-auth's optional `rateLimit` table isn't created (`rate_counters` is the limiter storage). | Identity §5 |
+| better-auth tables | Migration rule | SQL from `npx auth generate`, edited to our names and checked in as expand-only feature migrations (`NNNN_identity_<change>.sql`, safe to re-run); runtime `getMigrations` is never used **(default)**. A better-auth upgrade that changes its schema gets a new reviewed migration, never an edit to a merged one. | Identity §5, TDD §6.5 |
+| better-auth date columns | Possible exception | If better-auth's D1 adapter can't store dates as epoch milliseconds, its own date columns (`sessions.expires_at`, `auth_verifications.expires_at`, `created_at` and `updated_at` on its tables) hold what the adapter writes, and this row records the exception to AGENTS §4.1. Checked in the M1a-0 spike. | Identity §11 |
 | `invitations.email` | Nullability | **NOT NULL** (copy-link invites always carry the email) | Identity §4.2 |
 | `invitations` | Add | `group_ids` | Identity §5 |
 | `groups`, `group_members` | Add | `groups.handle`; `group_members.role` (`manager`, `member`) | Identity §5 |
-| `sessions` | Add | `device_label`, `approx_location`, `previous_refresh_hash`, `rotated_at` (30-second refresh grace window) | Identity §4.5, §5 |
+| `sessions` | Add | `device_label`, `approx_location` (better-auth `additionalFields`). **Not created:** `refresh_token_hash`, `session_epoch`, `previous_refresh_hash`, `rotated_at`, `revoked_at` and the M1a draft's `retired_refresh_hashes` (15 Nov 2026: no refresh tokens) | Identity §4.5, §5 |
 | `users` | Add | `admin_reset_at`, `admin_reset_by`, `admin_reset_acknowledged_by` (no-email recovery flag) | Identity §4.6, §5 |
-| `auth_tokens.kind` | Values | `magic_link`, `password_reset`, `recovery`, `email_change`; plus a `payload` column (pending new email) | Identity §4.11, §5 |
+| `auth_tokens.kind` | Values | `recovery`, `email_change`, **`passkey_enrol`** (enrolment tickets, bound to a registration challenge in `payload`); plus `payload` and `revoked_at` columns. `magic_link` moves to better-auth's `auth_verifications` plus our `magic_link_issues`; `password_reset` is removed (15 Nov 2026). | Identity §4.4, §4.11, §5 |
+| `installation` | Add columns | `canonical_origin`, `allowed_hosts` (JSON), written at the setup claim and by an owner's domain move; `setup_claimed_at` (incomplete claims expire 24 hours after the claim); `pending_origin`, `pending_origin_started_by`, `pending_origin_expires_at` (two-step domain move) | Identity §4.1, §4.4; TDD §2.1, §6.8 |
+| `recovery_token_uses` | New table | One row per `RECOVERY_TOKEN` value used (hash, owner, time), replacing a single consumed-hash column | Identity §4.6, §5 |
+| `sessions` | Add columns | `fresh_auth_at`, `fresh_auth_method` (step-up) | Identity §4.5, §5 |
+| `invitations` | Add columns | `email_normalised` with a **unique index on pending invitations**; `accepted_attempt_id` (repair job; `accepted_by` holds the accepted user) | Identity §4.2, §4.3, §5 |
+| `users`, `handles` | Add column | `created_attempt_id` (repair job) | Identity §4.3, §5 |
+| `users.pending_security_notice` | Shape | A JSON **list** of notices (kind, time, details), not a single notice | Identity §4.6a |
+| `users` | Add columns | `email_normalised` (trim, lowercase, NFKC) with a **unique index**; `first_signed_in_at` (gates setup resume and invitation reopening) | Identity §4.1, §4.3, §5 |
+| `passkeys` | Add column | `created_via` (`setup`, `invitation`, `recovery_link`, `owner_recovery`, `magic_link`, `signed_in`; Zod) | Identity §4.4, §5 |
+| `magic_link_issues`, `user_devices` | New tables | Our consumption and revocation record for magic links, and known devices for the new-device notice; excluded from export | Identity §4.4, §5 |
+| `sign_in_throttle`, `sign_in_failure_buckets`, `sign_in_slots`, `users.password_version` | Dropped from the design (never on `main`) | Drafted in the M1a branch for password throttling and slow mode; not created, because there are no passwords (15 Nov 2026) | §8, Identity §2 |
 | `channels.type` | Add value | `public`, `private`, `dm`, **`group_dm`**. `dm_key` is required for `dm` and `group_dm`. Converting a group DM to a private channel clears `dm_key` and sets a name. | Chat §3.1 |
 | `channels` | Add | `topic`, `description`, `posting_policy`, **`config_version`** (`INTEGER NOT NULL DEFAULT 0`, bumped on every change pushed by `applyConfig`), **`project_id`** (nullable, for project channels) | Chat §3.4, §15; Projects §3.1 |
 | `channel_members` | Add | `can_post`, `hidden` (no per-conversation email delay; the delay lives only in `user_preferences.email_delay`, Notifications §7) | Chat §15 |
@@ -571,7 +651,12 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | UserHub room registry | Durable | SQLite table keyed `(kind, room_id, connection_id)`; kinds `channel`, `doc`, `board`, **`huddle`**, **`project`**, **`assistant`** (§12) | §3, §12, Assistant §14.1, Projects §11.3 |
 | `user_preferences`, `notify_anyway_log`, **`user_availability`** | New tables | Defined in Notifications §7 (`user_preferences.reminder_defaults`, `offline_cache`, `dnd_until`, `dnd_schedule`, ...; `user_availability.focus_until`, `away_until`, `schedule_dnd_until`, ...) | Notifications §5.7, §7 |
 | `inbox_items` | Replace | As Notifications §7: adds `count`, `preview` (redactable, up to 140 characters), `last_event_at` and a `message_id` index; `UNIQUE (user_id, dedupe_key)`, with resolved records reopened in place | Notifications §3.1, §7 |
-| `inbox_items.event_type` | Add values | `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`, `assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment` | Notifications §3, Assistant §14.2, Projects §9.1 |
+| `inbox_items.event_type` | Add values | `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`, `admin_alert`, `maintenance_scheduled`, `assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment` | Notifications §3, Assistant §14.2, Admin §16, Projects §9.1 |
+| `admin_alerts`, `health_checks`, `maintenance_windows`, `admin_jobs`, `download_tokens` | New D1 tables (M7 baseline) | As Admin §16. Enums Zod-validated. `maintenance_windows` has a unique index on `open` (one scheduled or active window). Excluded from export as operational tables (§6). | Admin §16 |
+| `exports` | Columns | `kind` (`export`, `member_export`, `restore`), `state` (`running`, `packing`, `complete`, `failed`, `cancelled`, `expired`, `deleted`), `include_files`, `in_maintenance`, `scheduled`, `subject_user_id`, `schema_version`, `size_bytes`, `object_count`, `archive_r2_key`, `restore_report`, `error`, `manifest_r2_key`, `requested_by`, `schedule_set_by`, `created_at`, `completed_at`, `expires_at`; a partial unique index enforcing one running workspace export. Excluded from export. | Admin §16, TDD §7.5 |
+| `sessions` | Add (Admin) | The step-up field Admin §11.3 and §16 call `authenticated_at` is **`fresh_auth_at`** (with `fresh_auth_method`, above): one column, set only by a passkey assertion, in M1's baseline | Admin §11.3, §16; Identity §4.5 |
+| `installation` | Add | `checklist` (JSON), `maintenance_epoch INTEGER NOT NULL DEFAULT 0`, `scheduled_export_last_slot`. Admin §4's `public_origin` is **`canonical_origin`** (above): recorded at the setup claim and changed only by an owner's two-step domain move | Admin §4, §13.2, §15, §16; Identity §4.4 |
+| Shared error codes | Add values | `reauth_required`, `maintenance` | Admin §16, §17 |
 | `scheduled_triggers`, `trigger_outbox` | New tables (ReminderScheduler DO SQLite) | §11.1 | §11 |
 | `scheduled_triggers.kind` | Add values | `assistant_brief`, `assistant_prep`, `personal_reminder`, `issue_due`, `project_pulse` | §11.1, Assistant §14.2, Projects §8.1, §9.1 |
 | `pending_emails`, `rate_counters`, `ics_opt_outs` | New D1 tables | §11, §8, §15 | here |
@@ -595,7 +680,12 @@ Cross-cutting endpoints not owned by a feature spec. All responses are typed res
 | `PATCH /admin/settings` | Owner or admin, **per key** (§7) | Change settings; each change writes its audit event |
 | `GET /admin/audit?actor=&action=&target=&from=&to=&cursor=` | Owner, admin | Audit log with filters and paging |
 | `GET /admin/usage` | Owner | Usage and cost panel (TDD §7.9) |
-| `GET /health` | Public (minimal) / owner (detailed) | Health checks (TDD §7.1) |
+| `GET /health` | Public (minimal) | Health checks (TDD §7.1). The detailed view is `GET /admin/health`. |
+| `GET /admin/health` | **Owner, admin** | Detailed checks from stored state; loading it raises no alerts ([Admin](admin.md) §8.1) |
+| `GET /status` | Any signed-in member | Per-feature flags and the maintenance state only; changes pushed by `status.changed` ([Admin](admin.md) §8.2) |
+| `GET /status/public` | Anyone | Magic-link availability and the maintenance state and message only; cacheable 30 seconds, rate-limited (§8) ([Admin](admin.md) §8.2) |
+| `POST /me/reauth/options` · `POST /me/reauth` | Any signed-in member | Step-up re-authentication with a passkey, rate-limited (§8) ([Identity](identity.md) §4.5, [Admin](admin.md) §11.3; Admin called it `POST /auth/reauth`) |
+| Admin area: `/admin/overview`, `/admin/alerts`, `/admin/members` (list, CSV, bulk, exports), `/admin/invitations/csv`, `/admin/jobs`, `/admin/audit.csv`, `/admin/diagnostics`, `/admin/telemetry/preview`, `/admin/storage`, `/admin/exports`, `/admin/member-exports`, `/admin/maintenance`, `/admin/updates`, `/admin/checklist` | As listed in [Admin](admin.md) §17 | Admin pages, exports, maintenance, updates and setup ([Admin](admin.md) §17) |
 | `GET /ics/opt-out/:token` | External recipient | Confirmation page "Stop invitations from *Workspace*" (scanner-safe, §10) |
 | `POST /ics/opt-out/:token` | External recipient | Record the opt-out |
 
@@ -619,18 +709,20 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 
 | Secret | Purpose | Required | Rotation |
 |---|---|---|---|
-| `SESSION_SIGNING_KEY` | Signs access tokens (session cookie) | Yes | Rotating signs everyone out once access tokens expire (15 min); refresh tokens survive. Support a previous-key slot for overlap **(default)**. |
-| `TOKEN_HASH_KEY` | HMAC key for stored token hashes (`auth_tokens`, RSVP and opt-out tokens, `ws_tickets`) and email hashes | Yes | Rotation invalidates outstanding emailed links; schedule with care |
+| `BETTER_AUTH_SECRET` | better-auth's secret: signs the session cookie and signs or encrypts its other values. At least **32 characters**, random. Created by the deploy step if missing (TDD §6.1). | Yes (from M1) | Rotate through `BETTER_AUTH_SECRETS` (below), never by replacing the value outright, which signs everyone out and invalidates outstanding magic links. |
+| `BETTER_AUTH_SECRETS` | better-auth's rotation list: the new secret plus the previous ones, so values signed with an old secret still verify during the overlap (format per the pinned better-auth version) | No (rotation only) | Add the new secret, keep the old one for **30 days** (the session lifetime) **(default)**, then remove it and set `BETTER_AUTH_SECRET` to the new value |
+| `TOKEN_HASH_KEY` | HMAC key for our stored token hashes (`auth_tokens`, invitations, RSVP and opt-out tokens, `ws_tickets`), email hashes in rate-limit keys and audit metadata. Still needed: better-auth doesn't hold these tokens. Created by the deploy step if missing. | Yes | Rotation invalidates outstanding recovery, invitation, email-change and RSVP links; schedule with care |
 | `DATA_ENCRYPTION_KEY` | Encrypts ICS-in URLs (and MFA secrets later) | Yes (from M5c) | Re-encrypt on rotation (migration job) |
 | `POLL_SECRET_KEY` | Derives per-poll secrets for anonymous voter keys (alternatively, per-poll secrets are generated and stored in the channel DO) **(default: derive)** | Yes (from M3b) | Never rotated for existing polls; rotating changes keys only for new polls |
 | `SETUP_TOKEN` | First-run setup | Optional (generated if absent) | Ignored after setup; delete it |
-| `RECOVERY_TOKEN` | Owner recovery | Optional | Set only during recovery, then delete |
+| `RECOVERY_TOKEN` | Owner recovery: lets one owner register a new passkey, once ([Identity](identity.md) §4.6). **At least 32 characters**, compared in constant time, rate-limited per IP. Its hash is recorded as consumed after use, so the same value never works twice. While **set and not yet consumed**, it also satisfies the owners' gate before inviting and promotion to owner. Used values are kept as rows in `recovery_token_uses`. | Optional | Set a fresh value for each recovery, then delete |
 | Email provider key(s), SMTP credentials | Outgoing email when not using the default Cloudflare Email Service binding, which needs no secret | Optional | Rotate at the provider |
 | `REALTIME_APP_ID`, `REALTIME_APP_SECRET` | Realtime SFU for calls | Optional (calls) | Rotate in the Cloudflare dashboard |
 | `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | TURN credentials | Optional | Rotate in the dashboard |
 | `ANALYTICS_API_TOKEN` | Read-only usage panel | Optional | Rotate in the dashboard |
-| `PEPPER_1`, `PEPPER_2`, … | HMAC pepper applied to passwords before PBKDF2; the number is the `pepperId` in `pbkdf2-sha256-hmac$<pepperId>$…` (Identity §4.4). Each at least **32 random bytes**. | Yes (from M1); at least one | Add `PEPPER_<n+1>` and hash new passwords with it; re-hash at next sign-in; after a published deadline, accounts still on a retired pepper must reset; delete the old secret only after that deadline. **Restoring an export to another installation needs the same `PEPPER_*` secrets**, or every password must be reset. |
 | AI Gateway authentication token | Sent as `cf-aig-authorization` when the configured AI Gateway requires authentication (TDD §5.1) | Optional (assistant, authenticated gateway only) **(default)** | Rotate in the dashboard |
+
+**Removed 15 Nov 2026:** `SESSION_SIGNING_KEY` (and the M1a draft's `SESSION_SIGNING_KEY_PREVIOUS`), because better-auth signs the session cookie with `BETTER_AUTH_SECRET`; and `PEPPER_1`, `PEPPER_2`, …, because there are no passwords. The deploy step no longer creates either.
 
 **The assistant adds no other secrets** ([Assistant](assistant.md) §10.1, §11). Workers AI and Vectorize are bindings. BYOK provider keys live only in AI Gateway's Secrets Store (TDD §5.1), never in Worker secrets, D1, logs or client code. `assistant_gateway_id` is a setting (§7), not a secret.
 
@@ -647,11 +739,16 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
   - a deleted whiteboard's embeds show "deleted"
   - purging a channel, event or document deletes its call notes, transcripts and their vectors; purging a file deletes its `file_derived_text` and vectors; each deleting pipeline enqueues `assistant-purge` for members whose memory cites the object, including disabled members.
 - **Retention:** document and event in-call chat survives the 365-day huddle purge. External attendee emails are gone 90 days after the event ends.
-- **Export:** an export contains file versions, calendars, time off and hashed poll votes. It contains no sessions, auth tokens, passkeys, ICS feed tokens or ICS-in URLs. A restore into a new domain requires passkey re-registration and works with owner passwords.
+- **Export:** an export contains file versions, calendars, time off, hashed poll votes and passkey public keys. It contains no sessions, auth tokens, better-auth accounts or verifications, Worker secrets, ICS feed tokens or ICS-in URLs. After a restore onto the same canonical origin, passkeys still sign in; onto another origin they're dropped, the restoring owner registers a passkey during the restore's setup step, members use a magic link and everyone else a recovery link.
+- **Export coverage** ([Admin](admin.md) §18):
+  - a workspace export run by an admin includes DMs, private channels, time-off type and note, personal reminders and passkey public keys; it excludes assistant conversations and memory and the operational tables in §6
+  - a per-member export contains only the subject's data per §6 and never credentials
+  - restoring an export taken during maintenance starts the new installation writable, with no stale alerts.
+- **Export retention:** on-demand exports expire after `export_retention_days` (45 by default); scheduled exports keep the latest 4 complete ones; per-member exports expire after 7 days. A download after `expires_at` returns `not_found`, even before the daily job. Expired download tokens and job previews are deleted by the daily job.
 - **Admin settings:** every key in §7 is enforced, changeable only by the listed role, and writes its audit event.
-- **Rate limits:** each limit in §8 returns `rate_limited` with retry-after at the threshold, using its stated mechanism. The 51st external recipient in a day is refused. Sign-in attempts 1–5 are immediate; the 6th onwards are delayed 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s.
+- **Rate limits:** each limit in §8 returns `rate_limited` with retry-after at the threshold, using its stated mechanism. The 51st external recipient in a day is refused. The 4th magic-link request for one email within the 15-minute window sends no email, returns the same response, and doesn't extend the window, for unknown emails too; sign-in limits are enforced before better-auth runs. The client IP is read from `cf-connecting-ip`, so a forged `X-Forwarded-For` doesn't change the key.
 - **Outbound fetching:** preview and ICS fetches to IP-literal hosts `127.0.0.1`, `10.0.0.0/8`, `169.254.169.254`, `[::1]`, `fc00::/7`, `[::ffff:127.0.0.1]`, `2130706433` and `0177.0.0.1`, and redirects to them, are refused. Non-443 ports and `http://` URLs are refused. Responses over the byte cap are aborted. (DNS-rebinding protection is best-effort and not part of the pass criteria.)
-- **Email links:** a GET to any email link changes nothing (scanner-safe); only the confirmation POST does. An RSVP token works repeatedly until the event ends. Opted-out addresses can't be invited.
+- **Email links:** a GET to any email link changes nothing (scanner-safe); only the confirmation POST does. Identity links carry the token only in the fragment, are built from the canonical origin, and their pages send `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. An RSVP token works repeatedly until the event ends. Opted-out addresses can't be invited.
 - **Timers:**
   - reminders fire within 1 minute of their time
   - each trigger has **at most one effect, retried until delivered**: killing the DO between firing and delivery still delivers exactly one notification after restart, and a redelivered queue message creates no duplicate
@@ -665,7 +762,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 
 ## 18. Later
 
-Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF.js fallback for PDF preview, only if a browser fails the M6 check (the **M0 foundation spike** answered the sandbox question: Chromium's viewer renders under `Content-Security-Policy: sandbox` in an iframe without the `sandbox` attribute; TDD §8.3) · server-side image resizing for previews · legal hold · per-member data export (self-service).
+Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF.js fallback for PDF preview, only if a browser fails the M6 check (the **M0 foundation spike** answered the sandbox question: Chromium's viewer renders under `Content-Security-Policy: sandbox` in an iframe without the `sandbox` attribute; TDD §8.3) · server-side image resizing for previews · legal hold.
 
 ## 19. Open questions
 

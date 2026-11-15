@@ -1,8 +1,10 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.6  
+**Version:** 1.8  
 **Date:** 15 November 2026  
+**Changes in 1.8:** sign-in is **passwordless**: passkeys for everyone and magic links for members, with no passwords, password resets or password policy, built on the **better-auth** library (MIT). Owners are asked for two passkeys and keep the recovery secret as a fallback (product-owner decisions, 15 Nov 2026; §6, §7, §10.1, §10.2, §13, §15, §16, Appendix A; detail in [specs/identity.md](specs/identity.md)).  
+**Changes in 1.7:** the [admin spec](specs/admin.md) is adopted. Owners **and admins** export the workspace, including private content, and this is disclosed in the privacy statement. Admins run per-member data exports for data-protection requests; members can't export data themselves, so "Download my assistant data" is removed. New or changed: export retention, step-up re-authentication for downloads, in-app alerts, scheduled maintenance mode, and the command-line export tool going through the Worker (§10.1, §10.2, §13, §15, Appendix A).  
 **Changes in 1.6:** the [assistant spec](specs/assistant.md) is adopted. Personal memory moves from deferred into the first AI release. New or changed: the assistant's display name, audience-safe mentions, voice, call notes and captions, AI Gateway logging off, indexing only while the assistant is enabled, the privacy scope, personal reminders, and assistant retention and export rules. Tasks and issues stay with projects. Phase 3 maps to PLAN M9 (§2, §4, §5.3, §5.8, §5.9, §10.2, §11, §13, §14, §15, §18, Appendix A).  
 **Changes in 1.5:** second independent review decisions: admin self-access to groups and drives needs an owner; recovery links issued without email are flagged on the sign-in page and to every owner; first-release setup creates identity objects only, with other objects arriving with their milestones; editors moderate comments; viewers can start document calls; admins moderate private channels they belong to; orphaned private events can be removed by owners and admins; one Trash restore rule; calendar purge moves events to organisers; time off has no Trash (§5.3, §5.8, §6, §8, §10.1, §10.2, §18).  
 **Changes in 1.4:** Feature specs ([identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md)) and cross-cutting specs ([permissions](specs/permissions.md), [notifications](specs/notifications.md), [platform rules](specs/platform.md)) adopted. Calendar becomes a first-class feature (§5.10). Decisions from the spec interviews and the independent review are folded in: identity (§6), chat (§5.4), documents and files (§5.5, §5.7), calls (§5.8), notifications (§8), permissions (§10.1), retention (§10.2), export (§13), phases (§15) and limits (§18). **Where this PRD and a spec differ on feature detail, the spec wins.**  
@@ -278,7 +280,7 @@ Capabilities:
   2. **Project Channel** (`#proj-<slug>` or the promoted channel) with a split-pane drawer and low-noise `project_event` system messages.
   3. **Project Drive** (`drives.kind = 'project'`) for specs, whiteboards and files.
   4. **Project Calendar** (`calendars.kind = 'project'`) for milestones, releases (`type = 'release'`), demos (`type = 'demo'`) and meetings.
-- **Unified issues & personal tasks:** project issues (`ENG-42`) and projectless personal tasks (`TASK-12`, in `ProjectRoom("personal")`) share the `issues` model with configurable workflow columns mapped to 5 status categories (`backlog`, `unstarted`, `started`, `completed`, `cancelled`), priority, single assignee, optional `issue_reviewers` (`requested` / `approved` / `changes_requested`), 1 level of sub-issues, checklists, `effort_days`, and `blocks` / `blocked_by` / `relates_to` / `duplicate_of` relations. Moving an issue between projects keeps permanent `issue_key_aliases`.
+- **Unified issues & personal tasks:** project issues (`ENG-42`) and projectless personal tasks (`TASK-12`, in `ProjectRoom("personal")`) share the `issues` model with configurable workflow columns mapped to 5 status categories (`backlog`, `unstarted`, `started`, `completed`, `cancelled`), priority, single assignee, optional `issue_reviewers` (`pending` / `approved` / `changes_requested` / `cancelled`), 1 level of sub-issues, checklists, `effort_days`, and `blocks` / `blocked_by` / `relates_to` / `duplicate_of` relations. Moving an issue between projects keeps permanent `issue_key_aliases`.
 - **Views:** 5 tabs per project (*Overview (Pulse)*, *Issues* [List, Kanban board via `dnd-kit` MIT, Table], *Calendar & Capacity*, *Docs & Files*, *Channel*) plus workspace-wide **My Work** and **All Projects**.
 - **Capacity planning:** overlays team members' declared `time_off` (dates only, never private type or note), public/company holidays and working hours against assigned open issue `effort_days` (`On track ≤ 80%`, `Tight 80–100%`, `Overallocated > 100%`).
 - **Butler, Project Pulse & Shared Project Memory (M10c):** cited health updates (`project_pulses`), curated `project_memories` (`decision`, `convention`, `context`, `risk`) with prompt-injection tainting (`pending` until a Lead/Editor confirms) and source-deletion auto-purge, and 7 project/issue tools.
@@ -442,10 +444,14 @@ Initial product direction:
 
 First-release sign-in and security (detail in [specs/identity.md](specs/identity.md)):
 
-- **Email and password, magic links by email, and passkeys.** Members may be passkey-only; **owners must keep a password**. Passkeys are tied to the workspace's domain (§13).
+- **Passwordless: passkeys, plus magic links by email for members.** There are no passwords. Everyone signs in with a passkey, and passkeys always require the device's PIN or biometric (user verification). Members can also use a magic link when email is configured; **owners and admins use passkeys only**. Owners are reminded to keep **two passkeys** (for example a laptop and a phone) and can't invite anyone until they have a second passkey or the recovery secret is set. Passkeys are tied to the workspace's address, which is recorded at setup and changed only by an owner (§13).
+- People are told about every new passkey on their account, a magic-link sign-in from a new device, recovery, email changes and address moves, by a banner after sign-in that stays until they acknowledge it on a fresh passkey sign-in, and by email when it's configured.
+- **Sensitive actions need a fresh passkey:** adding or removing a passkey, moving the workspace address, changing a role or email address, and issuing a recovery link all require a passkey sign-in within the last 10 minutes.
+- **Moving the workspace address** takes two steps: an owner starts the move, then registers a passkey on the new address, which commits it. The old address redirects afterwards.
+- Built on **better-auth**, an MIT-licensed authentication library, pinned to exact versions and upgraded only after reviewing its security advisories.
 - Secure browser sessions: 30 days, sliding. Members can see their devices and sign them out ("My devices" doubles as login-activity visibility).
-- **Scanner-safe email links:** magic-link, reset, recovery, invitation and email-change links open a confirmation page, and only a deliberate click uses them. Mail scanners can't use them up.
-- Password reset when email is configured. Email changes are confirmed through the new address.
+- **Scanner-safe email links:** magic-link, recovery, invitation and email-change links open a confirmation page, and only a deliberate click uses them. Mail scanners can't use them up.
+- A lost passkey is replaced by signing in with a magic link (members, when email is configured) or with a recovery link (from an admin for members, from an owner for admins and owners). Email changes are confirmed through the new address.
 - **Admin powers are limited:**
   - Admins can disable, delete, change the email of, or issue a **recovery link** to *members*.
   - Doing any of those to admins or owners needs an owner.
@@ -460,8 +466,8 @@ First-release sign-in and security (detail in [specs/identity.md](specs/identity
 
 Further identity capabilities:
 
-- **SSO through Cloudflare Access (Phase 2):** customers can put their workspace behind Cloudflare Access, which is free for small teams. Officebox then signs members in with the company's identity provider, such as Google Workspace, Microsoft Entra, Okta or GitHub. This gives single sign-on and identity-provider MFA without Officebox implementing OIDC. Only existing or invited members can sign in this way. Owners can turn off local passwords for members.
-- **Owner recovery:** if every owner is locked out (password and MFA lost, and no email configured), someone with access to the Cloudflare account can set a one-time recovery secret. The secret allows resetting one owner's password and MFA. Recovery is audited, and a banner shows until the secret is removed.
+- **SSO through Cloudflare Access (Phase 2):** customers can put their workspace behind Cloudflare Access, which is free for small teams. Officebox then signs members in with the company's identity provider, such as Google Workspace, Microsoft Entra, Okta or GitHub. This gives single sign-on and identity-provider MFA without Officebox implementing OIDC. Only existing or invited members can sign in this way.
+- **Owner recovery:** if every owner is locked out (passkeys lost, and no email configured), someone with access to the Cloudflare account can set a one-time recovery secret. The secret lets one owner register a new passkey (and resets their MFA, once MFA exists). Recovery is audited, and a banner shows until the secret is removed.
 - **Disabled members:** their content stays, and so does their ownership. Their open issue assignments are flagged for reassignment. **Deleting** a member transfers their My files to an admin and erases their personal data. What happens per feature is set out in [platform §3](specs/platform.md).
 - **Device data:** signing out clears cached workspace data from the device. Revoking a session clears it the next time that device connects.
 
@@ -470,7 +476,7 @@ Further identity capabilities:
 Officebox does not operate a mail server. Outgoing email uses **Cloudflare Email Service** by default, when the workspace's domain is on Cloudflare DNS. An external email API provider or SMTP relay can be configured instead (TDD §7.6). Likely uses:
 
 - Invitations.
-- Password resets.
+- Magic sign-in links.
 - Email verification.
 - Optional notifications.
 - Important system/security notices.
@@ -545,8 +551,8 @@ All object relationships, previews, inbox aggregations, search results and AI re
 
 | Role | Can |
 |---|---|
-| Owner | Everything an admin can, plus invite, promote and manage admins and owners, transfer ownership, and see installation, upgrade, backup and export settings. Owners must keep a password. At least one active owner must always exist. |
-| Admin | Invite members; disable, delete, change the email of, or issue recovery links to *members* (acting on admins or owners needs an owner, and the person is always notified); manage groups (adding **themselves** to a group or drive needs an owner); configure workspace settings; archive or delete any channel or object (without reading private content); delete messages in public channels and in private channels they're a member of; view the audit log. |
+| Owner | Everything an admin can, plus invite, promote and manage admins and owners, transfer ownership, manage upgrades and maintenance mode, and see installation settings, the post-deploy checklist, usage and cost, telemetry and diagnostics ([admin §2](specs/admin.md)). Owners are asked to keep two passkeys, and need a second passkey or the recovery secret before inviting. At least one active owner must always exist. |
+| Admin | Invite members; disable, delete, change the email of, or issue recovery links to *members* (acting on admins or owners needs an owner, and the person is always notified); manage groups (adding **themselves** to a group or drive needs an owner); configure workspace settings; archive or delete any channel or object (without reading private content); delete messages in public channels and in private channels they're a member of; view the audit log, health and storage; **export the workspace, including private content**, and run per-member data exports (§13). |
 | Member | Use the workspace; create public and private channels, documents, whiteboards and files; share what they own. |
 
 Guest and external-collaborator accounts are out of scope for the first release. A **guest** role is planned for Phase 2. Guests can see only the channels and documents explicitly shared with them. They never see the member directory, public channels or workspace-wide search, and they can't create channels or invite others. The `users.role` column reserves this value, so adding guests needs no schema redesign.
@@ -599,6 +605,7 @@ Channel roles are *channel admin* (rename, manage members, archive), *poster* (a
 **Administrative access to private content.**
 
 - Admins and owners **cannot read** private channels, DMs, private projects, personal tasks or restricted documents in the app unless they are granted access.
+- Admins and owners **can export** the whole workspace, including private content: DMs, private channels, private projects, personal tasks, restricted documents, time-off type and note, and personal reminders (§13). Every export is audited, and the privacy statement says so plainly ([admin §2](specs/admin.md), [permissions §11](specs/permissions.md)).
 - Admins can see that private objects exist (name, member count, size) and can delete them. Every such action is audited.
 - Officebox states clearly that the Cloudflare account owner has direct technical access to all stored data. Content is not end-to-end encrypted.
 
@@ -614,8 +621,11 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 | Document revisions | Same as the parent document | Purged with the parent. |
 | Files | Kept until deleted | Moved to Trash for 30 days, then the R2 object and its metadata are purged. Files attached to a deleted message are purged with it. |
 | Inbox items | 90 days after being completed or dismissed | Purged automatically. Underlying objects are unaffected. |
-| User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, password, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents and open personal tasks passes to an admin. |
+| User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, passkeys, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents and open personal tasks passes to an admin. |
 | Audit log | 365 days, configurable | Purged automatically. It never stores message or document content. |
+| Workspace exports (on demand) | 45 days after completion **(default)**, set by an owner (`export_retention_days`) | Deleted automatically, or earlier by an admin. Exports aren't rewritten when a member is deleted, so that member's data can remain in an archive until it expires ([admin §11.2](specs/admin.md)). |
+| Workspace exports (scheduled) | The latest 4 complete exports | Older ones are deleted only after a new one completes. |
+| Per-member data exports | 7 days after completion **(default)** | Deleted automatically, or earlier by an admin. |
 | AI interaction logs (Phase 3) | 30 days, configurable by an owner (`assistant_interaction_retention_days`) | Metadata only, never prompts or replies. Purged automatically. |
 | Assistant memory (conversations and remembered items) | 365 days **(default)**, set by an owner (`assistant_memory_retention_days`). Members can shorten it for themselves. | Private to the member. Members can delete one item, a conversation or everything. Content derived from a deleted source is purged; content whose source the member can no longer open is hidden at once and deleted after 7 days **(default)**. Erased when the member is deleted. |
 | Incognito assistant conversations | Until the member ends them, or 24 hours after their last activity **(default)** | Never remembered. |
@@ -701,11 +711,11 @@ The primary deployment mechanism is the Deploy to Cloudflare button. It copies t
 
 During deployment the customer can set a setup token secret. If they skip it, the application generates a one-time token and writes it to the Worker's logs, which only the Cloudflare account can see. The first visit to the workspace asks for this token before the owner account can be created.
 
-**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later signs everyone out, push must be re-enabled, and passkeys stop working: passkey-only members recover through an admin recovery link. Officebox warns when a passkey is registered on a `workers.dev` address.
+**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later is an explicit owner action: it signs everyone out, push must be re-enabled, and passkeys stop working; members sign in again with a magic link (when email is configured) or a recovery link, admins and owners with a recovery link, and everyone registers a new passkey. Officebox warns when a passkey is registered on a `workers.dev` address.
 
 **Data location.** D1 keeps its primary copy in one location, chosen at deployment with a location hint. Durable Objects are created near their first user. Performance targets assume members are in the same broad region as the data; members elsewhere see higher latency. An **EU data-residency option** (Phase 2) keeps D1, R2 and Durable Objects in Cloudflare's EU jurisdiction wherever each service supports it.
 
-Some capabilities need a short manual step after deployment. The admin UI shows these as a post-deploy checklist:
+Some capabilities need a short manual step after deployment. The admin UI shows these as a post-deploy checklist (the full list, including Cloudflare's own outage and billing notifications and a first export, is in [admin §15](specs/admin.md)):
 - allowing GitHub Actions to open pull requests, needed for upgrades
 - AI Gateway provider keys
 - Realtime SFU credentials
@@ -721,16 +731,17 @@ A safe, understandable upgrade path is a product requirement:
 - **Versioned releases.** Officebox publishes signed, semantically versioned releases.
   - Stable channel: `vX.Y.Z` tags from the main branch.
   - Beta channel: `vX.Y.Z-beta.N` tags from the beta branch. Free and opt-in.
-- **Update awareness.** The workspace checks the public Officebox release feed daily. It shows owners the installed version, any available update for their channel, release notes, and a prominent flag on security releases.
+- **Update awareness.** The workspace checks the public Officebox release feed daily. It shows owners (and admins, read-only) the installed version, any available update for their channel, release notes, and a prominent flag on security releases.
 - **Upgrade delivery as a pull request.** The customer's repository is a disconnected copy, so it includes a release-sync GitHub Actions workflow. It runs on a schedule, or on demand when the owner clicks **Check for updates now** in GitHub. When a new release is available on the chosen channel, the workflow opens a pull request in the customer's repository. The PR contains the release notes, migration notes and a rollback-compatibility statement.
 - **Upgrading is merging.** Merging the pull request triggers Workers Builds, which runs migrations and deploys the new version. The admin UI links directly to the open pull request. No Cloudflare or GitHub credentials are stored inside the running application.
-- **Optional auto-merge.** Owners can opt in to automatic merging of patch and security releases on the stable channel.
+- **Optional auto-merge.** Off by default. Owners can opt in to automatic merging of patch and security releases on the stable channel, in the repository's `.officebox/config.json` ([admin §14](specs/admin.md)).
 - **Customisation.** Customers may modify their copy, but only changes inside documented extension points are guaranteed to merge cleanly. If a release conflicts with local changes, the pull request is marked as conflicted and links to resolution guidance.
 - **Channel selection.** The channel is a setting in the customer's repository, shown in the admin UI. Switching from beta back to stable takes effect at the next stable release that is newer than the installed beta.
 - **Build history and rollback.** Workers Builds keeps build history and logs for 90 days. Worker versions remain in version history and can be rolled back from the Cloudflare dashboard or Wrangler, which immediately creates a new active deployment. To make a rollback permanent, the customer also reverts the upgrade pull request so the next build doesn't redeploy it.
 - **Rollback-compatible migrations.** Every release's database changes must work with the previous release's code, so rolling back one version never needs a database restore. Changes that can't meet this rule (for example, dropping data) are spread over at least two releases and called out in the release notes.
 - **Pre-upgrade checks.** The deploy step checks the required resources and bindings before migrating.
 - **Clear migration status.** Progress and failures are shown in the admin UI and the build log.
+- **Maintenance mode.** Owners can schedule a read-only maintenance window or start one now, with an optional message. Everyone sees a banner from 24 hours before **(default)** and during. Reading works and writes are refused, with exemptions such as sign-in and handling a compromised account; maintenance ends automatically after 24 hours at most **(default)** ([admin §13](specs/admin.md)).
 
 ### Health and diagnostics
 
@@ -742,8 +753,9 @@ The administrator experience includes:
 - **Post-deploy checklist** status (see One-click deployment).
 - Application version and upgrade status.
 - Backup and data export status.
+- **Alerts** for storage, failing checks, failed or missing exports, security releases and other problems: a persistent banner and an inbox item for owners and admins, and email to owners for serious alerts ([admin §4](specs/admin.md)). Outages of Officebox itself (D1 or the Worker) are caught by Cloudflare's own notifications, which the post-deploy checklist requires.
 - Diagnostic information and a support bundle. The owner reviews the bundle before sharing it, and sends it only by attaching it to a support request. It contains versions, configuration, counts and error summaries. It never contains message, document or file content, email addresses or secrets.
-- **Optional telemetry,** off by default. If enabled, a weekly anonymous report sends Officebox the version, channel, a member-count range, enabled features and error counts. It never sends content, names or emails. Owners can view the exact payload before turning it on.
+- **Optional telemetry,** off by default. If enabled, a weekly anonymous report sends Officebox a random installation ID, the version, channel, a member-count range, enabled features and error counts. It never sends content, names or emails. Owners can view the exact payload before turning it on.
 - Clear guidance for moving or restoring an installation.
 
 Officebox does not claim that a backup exists or is healthy unless it has reliable evidence.
@@ -761,22 +773,29 @@ D1 Time Travel provides point-in-time recovery to any minute within the last 30 
 
 **Export and restore:**
 
-- **Format:** owners can produce an **Officebox export**, a versioned archive written to the installation's R2 bucket. It contains:
+- **Who:** owners and admins export the workspace. Members can't export data themselves ([admin §2](specs/admin.md)). Every export is audited, and downloading one needs re-authentication within the last 10 minutes **(default)** ([admin §11.3](specs/admin.md)).
+- **Format:** an **Officebox export** is a versioned archive written to the installation's R2 bucket. It contains:
   - a manifest (format version, Officebox version, counts, checksums)
   - one JSON Lines file per table
   - channel messages
   - document and whiteboard state, both in native Yjs form and as readable Markdown or JSON
   - all files and their versions
-  - calendars, events, attendees and time off; drives and folders; comments; polls (votes as hashed keys only); saved items and preferences.
+  - calendars, events, attendees and time off (including type and note); personal reminders; drives and folders; comments; polls (votes as hashed keys only); saved items and preferences
+  - **passkey public keys**, so a restore onto the same workspace address keeps passkeys working (on another address, people register again).
 
-  **Excluded:** sessions, sign-in tokens, passkeys (members register again after a restore to a new domain), MFA secrets, ICS feed tokens and the URLs of subscribed external calendars, which are secrets. Full coverage is in [platform §6](specs/platform.md).
+  It includes **all private content**: DMs, group DMs, private channels and restricted documents, so a restore is complete. There are no password hashes to export, because sign-in is passwordless ([admin §2](specs/admin.md), [identity §2](specs/identity.md)).
 
-  **Assistant data:** the export includes assistant interaction metadata, and call notes and transcripts within retention. It **excludes** assistant conversations and memory **(default)**, because admins can't read them, and personal reminders. Members download these themselves with "Download my assistant data" ([specs/assistant.md](specs/assistant.md) §13).
+  **Excluded:** sessions, sign-in tokens, MFA secrets, ICS feed tokens and the URLs of subscribed external calendars, which are secrets. Full coverage is in [platform §6](specs/platform.md).
+
+  **Assistant data:** the export includes assistant interaction metadata, personal reminders, and call notes and transcripts within retention. It **excludes** assistant conversations and memory **(default)**, because admins can't read them. Nobody can export assistant memory; members see it in "What Butler remembers" ([specs/assistant.md](specs/assistant.md) §13).
 
   The format is documented and stable across versions, so other tools can read it.
-- **Running exports:** an export can be started on demand or on a schedule (for example, weekly). Each export is internally consistent per object, recording each channel's message position and each document's state. It is not one instant across the whole workspace. For a fully consistent export, the owner can put the workspace in read-only maintenance mode while the export runs.
+- **Running exports:** an export can be started on demand or on a schedule. Scheduled exports are off by default; when turned on they run weekly, with files, and keep the latest 4. Each export is internally consistent per object, recording each channel's message position and each document's state. It is not one instant across the whole workspace. For a fully consistent export, an owner can put the workspace in read-only maintenance mode while the export runs.
+- **Large exports:** archives too large to pack into one file are downloaded with a command-line tool. It goes through the Worker, with the same sign-in, re-authentication, permission check and audit as the browser ([admin §11.1](specs/admin.md)). Direct access to the R2 bucket needs Cloudflare account access, which is outside Officebox's control.
+- **Per-member data exports:** for data-protection access requests, an admin runs an export scoped to one member and hands it over. It holds that member's own data, never credentials or other people's content. Exporting an admin or owner needs an owner. The member gets a notice when the export completes ([admin §12](specs/admin.md)).
 - **Restore:** a fresh Officebox installation offers **Restore from export** as an alternative to first-run setup. It imports everything into the new installation, which is also how a workspace moves to a different Cloudflare account. A command-line restore tool covers very large exports. Assistant memory is not part of a restore, and the AI index is rebuilt by back-fill.
 - **Testing:** restore is tested on every release.
+- **Retention:** exports expire as listed in §10.2.
 
 Data ownership is the customer's. They can export, delete or migrate their data at any time. Deletion follows the rules in §10.2, including Cloudflare's recovery windows of up to 30 days. Officebox does not hold customer data outside the customer's Cloudflare account.
 
@@ -824,7 +843,7 @@ Delivered in the milestones in [PLAN.md](PLAN.md): foundation → identity → r
 - Trash, purge and the retention rules in §10.2.
 - Member invitations and basic administration.
 - React application shell and responsive experience.
-- Sign-in with password, magic links and passkeys; profiles, @handles, groups and group managers (§6).
+- Passwordless sign-in with passkeys (and magic links for members); profiles, @handles, groups and group managers (§6).
 - Notifications, levels, do-not-disturb and offline email (§8).
 - Chat: channels, announcement channels, DMs and group DMs, threads, pins, saved items, polls and link previews (§5.4).
 - Durable message history in channel Durable Objects, with a D1 copy for search.
@@ -839,11 +858,11 @@ Delivered in the milestones in [PLAN.md](PLAN.md): foundation → identity → r
 - Basic in-app notifications via Durable Objects.
 - Email configuration for transactional email (Cloudflare Email Service sender domain, or a provider or SMTP).
 - Application realtime via Durable Object WebSockets with hibernation.
-- Health checks, diagnostics, storage protective mode, post-deploy checklist and usage panel.
+- Health checks, alerts, diagnostics, storage protective mode, maintenance mode, post-deploy checklist and usage panel ([admin](specs/admin.md)).
 - Owner recovery procedure.
 - Markdown document import.
 - Stable and beta channels with release-sync upgrade pull requests, update awareness in the admin UI, and rollback.
-- Application export/migration foundation.
+- Application export/migration foundation: workspace exports by owners and admins, per-member data exports, and restore (§13).
 
 ### Phase 2 — Connected collaboration and work management
 
@@ -915,7 +934,7 @@ Before Phase 1 exit, validate at minimum:
 - A member without access cannot read a private channel, DM or restricted document through any route: the API, WebSocket, search, previews or links.
 - The permission engine passes the matrix test across every role and object type in [specs/permissions.md](specs/permissions.md). Admins can't act on admins or owners without an owner.
 - Disabling or deleting a member behaves as the lifecycle matrix in [platform §3](specs/platform.md) says, including dropping them from open calls, documents and channels.
-- Email links (magic link, reset, recovery, invitation, RSVP) survive being opened by a mail scanner without being used up.
+- Email links (magic link, recovery, invitation, RSVP) survive being opened by a mail scanner without being used up.
 - Storage warnings and protective mode behave safely as D1 approaches its limit, and trimming the searchable message copy frees space without losing messages.
 - Durable Object WebSocket hibernation keeps idle channels connected without accruing billable duration.
 - Durable Object Yjs sync supports a stock Yjs client and persists document state across object eviction.
@@ -996,9 +1015,10 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Media | Cloudflare Realtime SFU (SFU + TURN) | Agreed |
 | File storage | R2 | Agreed |
 | AI | Workers AI by default; BYOK via AI Gateway optional, per model role | Agreed ([assistant](specs/assistant.md)) |
-| Authentication | Built-in local accounts: password, magic link and passkeys at launch; owners keep a password; TOTP after launch | Agreed |
+| Authentication | Built-in local accounts, **passwordless**: passkeys for everyone (user verification required), magic links for members only, no passwords; owners need a second passkey or the recovery secret before inviting; exports include passkey public keys; TOTP after launch | Agreed (revised 15 Nov 2026) |
+| Authentication library | **better-auth** (MIT) for sessions, magic links and passkeys; exact version pins and an advisory review on every upgrade | Agreed (15 Nov 2026) |
 | First-run setup | Protected by a one-time setup token; disabled after use | Agreed |
-| Role model | Owner/admin/member workspace roles; channel, drive and calendar roles; union inheritance; admins cannot read or join private content; only owners act on admins and owners | Agreed ([permissions](specs/permissions.md)) |
+| Role model | Owner/admin/member workspace roles; channel, drive and calendar roles; union inheritance; admins cannot read or join private content in the app (they can export it, disclosed); only owners act on admins and owners | Agreed ([permissions](specs/permissions.md)) |
 | Retention and deletion | Kept until deleted; 30-day Trash; immediate message deletion; documented 30-day platform recovery window | Baseline |
 | Message storage | Channel Durable Object is the source of truth; guaranteed asynchronous copy to D1 for search, inbox and export | Agreed |
 | Onboarding | Invitation-based; manual links supported without SMTP | Agreed |
@@ -1024,7 +1044,13 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Calls | Ad-hoc, audio-first; channel calls never ping; DM calls ring; event and document calls; 25 participants | Agreed ([calls](specs/calls.md)) |
 | Feature names | Generic names for now; marketing names later | Agreed |
 | AI log visibility | Users: own history; admins: metadata only | Agreed |
-| Export and restore | Versioned open archive; Restore from export in a fresh installation | Agreed |
+| Export and restore | Versioned open archive; Restore from export in a fresh installation; must ship before the first customer | Agreed |
+| Who exports data | Owners and admins only; exports include all private content; every export audited and disclosed in the privacy statement; downloads need step-up re-authentication | Agreed ([admin](specs/admin.md)) |
+| Member self-export | None; "Download my assistant data" removed. Data-protection requests are met by an admin per-member export, and assistant memory through "What Butler remembers" | Agreed ([admin](specs/admin.md)) |
+| Export retention | On-demand exports 45 days (default); scheduled exports keep the latest 4; per-member exports 7 days (default); exports aren't rewritten on member deletion | Agreed ([admin](specs/admin.md)) |
+| Admin split | Owners alone: upgrades, usage and cost, post-deploy checklist, telemetry and diagnostics, maintenance mode. Owners and admins: members, settings (per key), audit log, health, storage, exports | Agreed ([admin](specs/admin.md)) |
+| Admin alerts | Banner and inbox item for owners and admins; email to owners for serious alerts; Cloudflare notifications for outages of Officebox itself | Agreed ([admin](specs/admin.md)) |
+| Maintenance mode | Owners schedule it or start it now; banner beforehand and during; read-only with listed exemptions | Agreed ([admin](specs/admin.md)) |
 | Support plans | Community, Standard and Priority plus one-off packages; per installation | Pricing to validate |
 | Screen sharing | Screen, window or tab; one presenter at a time with take-over; text-first quality; desktop sharing, view anywhere; admin policy and resolution cap | Agreed |
 | Present mode | Follow-the-presenter for documents and whiteboards, with no video | Agreed |
@@ -1041,7 +1067,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 ## Appendix B — Related documents
 
 - [Technical Design Document (TDD)](TDD.md): architecture, Durable Object design, D1 schema, Yjs sync, AI pipeline, deployment, upgrades and operations.
-- [Feature specs](specs/): [identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md), [assistant](specs/assistant.md), [projects](specs/projects.md); cross-cutting [permissions](specs/permissions.md), [notifications](specs/notifications.md) and [platform rules](specs/platform.md).
+- [Feature specs](specs/): [identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md), [assistant](specs/assistant.md), [admin](specs/admin.md), [projects](specs/projects.md); cross-cutting [permissions](specs/permissions.md), [notifications](specs/notifications.md) and [platform rules](specs/platform.md).
 - [Build plan](PLAN.md): milestones, slices and the definition of done.
 - [AGENTS.md](AGENTS.md): how we work, for people and coding agents.
 - Open-Source Component Evaluation Register: candidate projects, licences, maturity, integration model, data ownership and replacement strategy.

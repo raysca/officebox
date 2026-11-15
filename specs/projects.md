@@ -22,7 +22,7 @@
 
 Decisions marked **(default)** were not discussed; change them on review.
 
-**Cross-cutting rules:** permissions follow [Permissions](permissions.md); notifications follow [Notifications & Attention](notifications.md); lifecycle, cascades, retention, export, admin settings, limits and timers follow [Platform Rules](platform.md). Those specs win on cross-cutting rules. §18 lists the changes those documents need when this spec is approved.
+**Cross-cutting rules:** permissions follow [Permissions](permissions.md); notifications follow [Notifications & Attention](notifications.md); lifecycle, cascades, retention, export, admin settings, limits and timers follow [Platform Rules](platform.md). Those specs win on cross-cutting rules. §16 lists the changes those documents need when this spec is approved.
 
 ## 1. Summary
 
@@ -45,11 +45,11 @@ Every work item uses **one unified model** (`issues`):
 | Work-item model | **One unified model (`issues`)** for both project issues (`ENG-42`) and projectless personal/ad-hoc tasks (`TASK-12`), plus lightweight checklists inside an issue. Document `[ ]` checkboxes stay document-only unless explicitly promoted to an issue. |
 | Project provisioning | **Auto-provisioned ecosystem.** Creating a project automatically creates its dedicated channel, project drive and project calendar—or promotes an existing channel into a project. |
 | Project permissions | **Unified membership and role list.** One set of grants on the project (**Lead · Editor · Commenter · Viewer**, plus `general_access`) governs the project's issues, channel, drive and calendar through the permission engine's union rule. |
-| Storage & realtime architecture | **`ProjectRoom` Durable Object per project** is the source of truth for project issues, board ordering, checklists and live board presence, syncing to D1 via the outbox helper. Personal tasks (`project_id IS NULL`) live in a per-member **`PersonalTasks` Durable Object** (or the member's UserHub/D1 path; see §14.1 **(default: `ProjectRoom` DO keyed `personal:<userId>`)**) using the same schema and outbox. |
+| Storage & realtime architecture | **`ProjectRoom` Durable Object per project (`idFromName(projectId)`)** is the source of truth for project issues, board ordering, checklists and live board presence, syncing to D1 via the outbox helper. Personal tasks (`project_id IS NULL`) live in a single workspace-wide **`ProjectRoom` Durable Object (`idFromName("personal")`)** (§11.1) using the same schema and outbox, with sequential `TASK-<n>` numbering and per-task access isolation (live updates for personal tasks are pushed through each authorised participant's `UserHub` socket rather than a shared board room). |
 | Issue descriptions | **Rich-text Markdown composer** (ProseMirror JSON + plain-text copy, like Chat and Comments) with live Officebox embeds. No Yjs DocRoom DO per issue; longer specs link or embed a collaborative project document. |
 | Issue keys | **Per-project uppercase prefix + counter** (`ENG-1`, `ENG-2`, 2–8 letters). Personal tasks use `TASK-<n>` per workspace **(default)**. Moving an issue to another project assigns a new key in the destination project and keeps a permanent redirect from the old key (`issue_key_aliases`). |
 | Workflow statuses | **Configurable columns mapped to 5 fixed status categories:** `backlog`, `unstarted`, `started`, `completed`, `cancelled`. Default columns: *Backlog* (`backlog`), *Todo* (`unstarted`), *In Progress* (`started`), *In Review* (`started`), *Done* (`completed`), *Cancelled* (`cancelled`). |
-| Assignees & reviewers | **One primary assignee** plus **optional reviewers** (`issue_reviewers` with state `pending`, `approved`, `changes_requested`). Adding a reviewer raises the `review_request` inbox notification. |
+| Assignees & reviewers | **One primary assignee** plus **optional reviewers** (`issue_reviewers` with state `pending`, `approved`, `changes_requested`, `cancelled`). Adding a reviewer raises the `review_request` inbox notification. |
 | Hierarchy & relations | **One level of sub-issues** (parent → child; a child cannot have children) plus **checklists** inside an issue, and typed issue relations: `blocks` / `blocked_by`, `relates_to`, `duplicate_of`. |
 | Personal tasks access | **Private to the creator by default.** Visible in **My Work**. Can be assigned or shared with specific members (granting them editor access to that task) or moved into a project at any time (inheriting the project's access). |
 | Views | **Inside a project (5 tabs):** *Overview (Pulse)* · *Issues* (List, Kanban Board via `dnd-kit`, Table/Group-by) · *Calendar & Capacity* · *Docs & Files* · *Channel* (also available as a split-pane drawer alongside any tab). **Workspace-wide:** *My Work* (Assigned to me, Reviewing, Created by me, Personal tasks) and *All Projects*. |
@@ -186,9 +186,11 @@ Not every piece of work belongs to a project immediately:
 - Creating a task from **My Work**, the Personal Inbox or the quick switcher (`Cmd/Ctrl+K` → *New task*) with **no project selected** creates a personal task (`project_id = NULL`, key `TASK-12`).
 - **Default access:** private to the creator (`creator_id`). Nobody else—including admins—can see it unless the creator assigns it to someone, adds a reviewer, or shares it via `resource_grants` (`resource_type = 'issue'`).
 - **Assigning or sharing a personal task:** assigning a personal task to a colleague (or adding them as a reviewer) automatically grants them `editor` access on that task so they can view, comment and update its status.
-- **Promoting to a project:** any editor of a personal task (who also has `editor` access to the target project) can move it into a project. Moving:
-  - assigns the next sequential key in that project (e.g. `ENG-88`) and records `TASK-12 → ENG-88` in `issue_key_aliases` so old links redirect
-  - switches access from private to the project's access (keeping any explicit grants on the issue itself, with a confirmation prompt if people gain or lose access, matching [Permissions §5.3](permissions.md)).
+- **Promoting to a project (or moving an issue between projects):** any editor of a personal task or issue (who also has `editor` access to the target project) can move it via `POST /issues/:id/move`. Because issues live in per-project `ProjectRoom` DOs (and `ProjectRoom("personal")` for personal tasks), moving an issue at `version = V` runs a 3-step cross-DO transfer:
+  1. **Freeze on source DO:** sets `moved_to_project_id` on the source `ProjectRoom` row (and any sub-issues) at `version = V`, refusing further writes on the source DO.
+  2. **Import on target DO:** allocates the next sequential key in the target `ProjectRoom` (e.g. `ENG-88`), imports the issue (and its sub-issues, checklists, reviewers, comments and activity, plus an `issue_activity` `'moved'` entry) at `version = V + 1`, and emits a `project-projection` outbox upsert—which updates `issues` in D1 (satisfying `WHERE excluded.version > issues.version`) and records `TASK-12 → ENG-88` in `issue_key_aliases` so old links redirect.
+  3. **Clean up source DO:** deletes the frozen row(s) from the source `ProjectRoom` SQLite *without* emitting a D1 delete projection.
+  - Moving switches inherited access to the target project's access (keeping any explicit grants on the issue itself, with a confirmation prompt if people gain or lose access, matching [Permissions §5.3](permissions.md)).
 
 ### 4.5 Document checklists vs. Issues
 
@@ -359,14 +361,14 @@ This activates the `assignment` and `review_request` event types reserved in [No
 
 | Event type | Source | Recipients | Default delivery | Dedupe / grouping key | Resolves when |
 |---|---|---|---|---|---|
-| `assignment` | Assigned an issue or personal task (or an assigned issue is reopened) | The assignee (never the actor themselves) | In-app; email after delay | `assignment:<issueId>` | The issue moves to `completed` or `cancelled`, or is reassigned to someone else |
-| `review_request` | Added as a reviewer on an issue | The requested reviewer | In-app; email after delay | `review_request:<issueId>` | The reviewer submits `approved` or `changes_requested`, is removed as reviewer, or the issue closes |
+| `assignment` | Assigned an issue or personal task (or an assigned issue is reopened) | The assignee (never the actor themselves) | In-app; email after delay | `assignment:<issueId>` | The issue moves to `completed` or `cancelled`, is reassigned to someone else, or is marked done in the inbox (opening marks `read` without resolving the action item) |
+| `review_request` | Added as a reviewer on an issue | The requested reviewer | In-app; email after delay | `review_request:<issueId>` | The reviewer submits `approved` or `changes_requested`, is removed as reviewer, or the issue closes (opening marks `read` without resolving the action item) |
 | `issue_review_decided` | A reviewer approves or requests changes on an issue | The issue's assignee (or creator if unassigned) | In-app; email **(default)** | `issue_review_decided:<issueId>` | The recipient opens the issue |
-| `issue_mention` | `@person` or `@group` in an issue description or issue comment | Mentioned members who have access to the issue | In-app; email after delay | `issue_mention:<issueId>:<commentIdOrDesc>` | The member opens the issue |
+| `issue_mention` | `@person` or `@group` in an issue description or issue comment | Mentioned members who have access to the issue | In-app; email after delay | `issue_mention:<issueId>:<commentOrDescId>` | The member opens the issue |
 | `issue_comment` | New comment on an issue | Issue followers (creator, assignee, reviewers, prior commenters, explicit followers), except the author and mentioned users (who get `issue_mention`) | In-app; email **(default)** | `issue_comment:<issueId>` (one record per issue, with a count) | The member opens the issue |
-| `issue_status` | An issue you created or are blocked by is completed or cancelled | Creator and assignees of issues blocked by this issue **(default)** | In-app only **(default)** | `issue_status:<issueId>` | The member opens the issue or dismisses it |
-| `issue_due_soon` | An open issue assigned to you is due today (fires at start of working hours via `ReminderScheduler` `issue_due`) | The assignee | In-app; email if chosen **(default)** | `issue_due:<issueId>:<dueDate>` | The issue is completed/cancelled, its due date changes, or it is dismissed |
-| `issue_needs_reassignment` | An open issue's assignee was disabled or deleted | Project Leads of the project | In-app; email **(default)** | `issue_reassign:<issueId>` | A new assignee is set or the issue is closed |
+| `issue_status` | An issue you follow or are blocked by is completed, cancelled or reopened | Issue followers and assignees of issues blocked by this issue (excluding the actor) **(default)** | In-app only **(default)** | `issue_status:<issueId>` | The member opens the issue or dismisses it |
+| `issue_due_soon` | An open issue assigned to you is due today (fires at start of working hours via `ReminderScheduler` `issue_due`) | The assignee | In-app; email if chosen **(default)** | `issue_due_soon:<issueId>:<dueDate>` | The issue is completed/cancelled, its due date changes, or it is dismissed |
+| `issue_needs_reassignment` | An open issue's assignee was disabled or deleted | Project Leads of the project | In-app; email **(default)** | `issue_needs_reassignment:<issueId>` | A new assignee is set or the issue is closed |
 
 - **Privacy in offline emails ([Notifications §6](notifications.md)):**
   - For **private projects** and **personal tasks**, email notifications include **no issue title or comment text** by default (only *"Ana assigned you an issue in a private project"* or *"2 new comments on an issue"*), unless the recipient has enabled `email_include_private_text`.
@@ -391,24 +393,33 @@ This activates the `assignment` and `review_request` event types reserved in [No
 
 | Action | Who can do it | What happens |
 |---|---|---|
-| **Archive project** | Project Lead, Workspace Admin | `projects.status` becomes `'archived'`, `archived_at` set. The project board/issues, project channel, project drive and project calendar all become **read-only**. Open polls in the channel close; active calls end. Issues stay searchable (with an "Archived" filter). **Reversible** at any time by a Project Lead or Admin (**Unarchive** restores everything to active). Audited (`project.archive` / `project.unarchive`). |
-| **Delete project (to Trash)** | Project Lead, Workspace Admin | `deleted_at` and `purge_after` (+30 days) set on the project, its channel, its drive and its calendar. Hidden from normal views, boards, My Work, calendar overlays, search and AI retrieval. Open `assignment` and `review_request` inbox items for its issues are hidden while in Trash. **Restorable for 30 days** by a Project Lead, the person who deleted it, or a Workspace Admin (canonical Trash rule, [Platform §5](platform.md)). Restoring brings back the project, channel, drive, calendar, issues and Project Memory intact. Audited (`project.delete` / `project.restore`). |
-| **Purge project (after 30 days in Trash)** | Daily purge pipeline | 1. **Project Drive contents preserved:** every non-trashed document, whiteboard and drive file inside the Project Drive **moves to its creator's My files** (or to an admin's My files if the creator was deleted), keeping its explicit item grants and removing project-inherited access—matching the channel-purge rule ([Platform §4](platform.md)). The empty Project Drive and its folders are then deleted.<br>2. **Project Calendar purged:** project milestones are deleted; any standard meeting events on the project calendar with attendees **move to their organiser's personal calendar** (or are deleted with `event_cancel` if the organiser is deleted, matching [Platform §4](platform.md)).<br>3. **Project Channel purged:** `ChatChannel` DO `deleteAll()`, D1 messages copy, message-owned files in R2, call notes and transcripts deleted.<br>4. **Issues & ProjectRoom purged:** `ProjectRoom` DO `deleteAll()`, D1 `issues`, `issue_reviewers`, `issue_relations`, `issue_follows`, `issue_key_aliases`, `project_milestones`, `project_labels`, issue-owned R2 attachments and their `file_derived_text` / vectors deleted.<br>5. **Project Memory & Assistant purge:** `project_memories`, `project_memory_sources`, `project_pulses` and their vectors are deleted, and `assistant-purge` jobs are enqueued via `assistant_source_refs` for any member whose personal Assistant memory cited an issue, project memory, doc or message from the project ([Platform §4](platform.md)). |
+| **Archive project** | Project Lead, Workspace Admin | `projects.status` becomes `'archived'`, `archived_at` set. The project board/issues, project channel, project drive and project calendar all become **read-only**. Open polls in the channel close; active channel and issue calls end. Issues stay searchable (with an "Archived" filter). **Reversible** at any time by a Project Lead or Admin (**Unarchive** restores everything to active). Audited (`project.archive` / `project.unarchive`). |
+| **Delete project (to Trash)** | Project Lead, Workspace Admin | `deleted_at` and `purge_after` (+30 days) set on the project, its channel, its drive and its calendar; active channel and issue calls end. Hidden from normal views, boards, My Work, calendar overlays, search and AI retrieval. Open `assignment` and `review_request` inbox items for its issues are hidden while in Trash. **Restorable for 30 days** by a Project Lead, the person who deleted it, or a Workspace Admin (canonical Trash rule, [Platform §5](platform.md)). Restoring brings back the project, channel, drive, calendar, issues and Project Memory intact. Audited (`project.delete` / `project.restore`). |
+| **Purge project (after 30 days in Trash)** | Daily purge pipeline | 1. **Project Drive contents preserved:** every non-trashed document, whiteboard and drive file inside the Project Drive **moves to its creator's My files** (or to an admin's My files if the creator was deleted), keeping its explicit item grants and removing project-inherited access—matching the channel-purge rule ([Platform §4](platform.md)). The empty Project Drive and its folders are then deleted.<br>2. **Project Calendar purged:** project milestones are deleted; any standard meeting events on the project calendar with attendees **move to their organiser's personal calendar** (or are deleted with `event_cancel` if the organiser is deleted, matching [Platform §4](platform.md)).<br>3. **Project Channel purged:** `ChatChannel` DO `deleteAll()`, D1 messages copy, message-owned files in R2, call notes and transcripts deleted.<br>4. **Issues & ProjectRoom purged:** `ProjectRoom` DO `deleteAll()`, D1 `issues`, `issue_reviewers`, `issue_relations`, `issue_follows`, `issue_key_aliases`, `project_milestones`, `project_labels`, issue-owned R2 attachments and their `file_derived_text` / vectors, and issue-call `huddle_messages`, `call_notes` and `call_transcript_segments` (with their vectors) deleted.<br>5. **Project Memory & Assistant purge:** `project_memories`, `project_memory_sources`, `project_pulses` and their vectors are deleted, and `assistant-purge` jobs are enqueued via `assistant_source_refs` for any member whose personal Assistant memory cited an issue, project memory, doc or message from the project ([Platform §4](platform.md)). |
 
 ### 10.2 Deleting a single Issue or Personal Task
 
 - **Who can delete an issue (to Trash):**
   - Project issues: **Project Leads**, **Workspace Admins** (on projects they can access), and the **issue's creator** (if they are still an Editor on the project **(default)**).
   - Personal tasks: the **creator** (owner).
-- **30-day Trash:** deleting an issue moves it (and any sub-issues under it) to Trash for 30 days (`deleted_at`, `purge_after`), removes it from search, Vectorize and active boards, hides any `project_memories` citing it while in Trash, and resolves its inbox items. Restorable under the canonical rule.
-- **Purge:** after 30 days, the issue, its comments, checklist items, reviewers, activity, relations, key aliases, issue-owned files in R2, search entries, citing `project_memories` and vectors are permanently deleted, and `assistant-purge` runs for any member's assistant memory citing that issue.
+- **30-day Trash:** deleting an issue moves it (and any sub-issues under it) to Trash for 30 days (`deleted_at`, `purge_after`), ends any active call on the issue, removes it from search, Vectorize and active boards, hides any `project_memories` citing it while in Trash, and resolves its inbox items. Restorable under the canonical rule.
+- **Purge:** after 30 days, the issue, its comments, checklist items, reviewers, activity, relations, key aliases, issue-owned files in R2, issue-call `huddle_messages`, `call_notes` and `call_transcript_segments` (with their vectors), search entries, citing `project_memories` and vectors are permanently deleted, and `assistant-purge` runs for any member's assistant memory citing that issue.
 
 ### 10.3 Member Disabled or Deleted ([Platform §3](platform.md))
 
 | Event | Impact on Projects, Tasks & Issues |
 |---|---|
 | **Member disabled** | - **Open sockets:** any open `ProjectRoom` WebSocket closes immediately with code **`4401`**.<br>- **Assigned project issues:** stay open with `assignee_id` kept, and `needs_reassignment = 1` is set on every open issue assigned to them. An `issue_needs_reassignment` inbox notification is raised for the Project Lead(s), and the issues are highlighted on the Project Overview.<br>- **Pending review requests:** their pending `issue_reviewers` rows are marked `cancelled` so reviews aren't blocked.<br>- **Last Project Lead:** if the disabled member was the **only active Project Lead** on a project, the longest-standing active **Editor** (or a workspace admin if no Editor exists) is automatically promoted to Project Lead (audited, with a system message in the project channel—matching Chat's last-channel-admin rule).<br>- **Capacity planning:** a disabled member's available days drop to `0` so milestone capacity reflects their absence immediately.<br>- **Personal tasks (`project_id IS NULL`):** kept in their account while disabled; if a personal task was shared/assigned to another active member, that member can still view and complete it. |
-| **Member deleted (anonymised)** | Everything for *disabled*, plus:<br>- **Authorship & history:** `issues.creator_id`, `issue_comments.author_id`, `issue_activity.actor_id` and `project_memories.created_by` stay linked to the anonymised user ID and display as **"Former member"**. `@handle` mentions in issue descriptions, comments and D1 search projections are re-rendered as **"Former member"** (via a `ProjectRoom` DO erase task, matching `ChatChannel`).<br>- **Assigned project issues:** `assignee_id` is kept as "Former member" with `needs_reassignment = 1` until a Project Lead reassigns or closes them **(default)**.<br>- **Personal tasks (`project_id IS NULL`):** **open** personal tasks owned by the deleted member are **transferred to an admin** (matching My files in [Platform §3](platform.md)), and **completed/cancelled** personal tasks (which have no other participants) are **erased** **(default)**.<br>- **Follows & preferences:** their `issue_follows` and board filter preferences are erased. |
+| **Member deleted (anonymised)** | Everything for *disabled*, plus:<br>- **Authorship & history:** `issues.creator_id`, `issue_comments.author_id`, `issue_activity.actor_id` and `project_memories.created_by` stay linked to the anonymised user ID and display as **"Former member"**. `@handle` mentions in issue descriptions, comments and D1 search projections are re-rendered as **"Former member"** (via a `ProjectRoom` DO erase task on `ProjectRoom("personal")` and each project `ProjectRoom` DO the member participated in, matching `ChatChannel`).<br>- **Assigned project issues:** `assignee_id` is kept as "Former member" with `needs_reassignment = 1` until a Project Lead reassigns or closes them **(default)**.<br>- **Personal tasks (`project_id IS NULL`):** **open** personal tasks owned by the deleted member are **transferred to an admin** (matching My files in [Platform §3](platform.md)), and **completed/cancelled** solo personal tasks (which have no other participants) are **erased** from `ProjectRoom("personal")` and D1 `issues` **(default)**.<br>- **Follows & preferences:** their `issue_follows` and board filter preferences are erased. |
+
+### 10.4 Export and Restore ([Platform §6](platform.md), [Admin §11–§13](admin.md), TDD §7.5)
+
+- **Workspace export (`workspace.export`):** run by owners and admins ([Admin §11.1](admin.md)), and includes private projects and personal tasks:
+  - D1 tables: `projects`, `project_milestones`, `project_labels`, `issues`, `issue_key_aliases`, `issue_reviewers`, `issue_relations`, `issue_follows`, `project_memories`, `project_memory_sources`, `project_pulses`.
+  - `ProjectRoom` DO state: `projects/<id>/state.jsonl` (from each project's `ProjectRoom` DO) plus `projects/personal/state.jsonl` (from `ProjectRoom("personal")`), containing authoritative `issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments` and `issue_activity`, plus each room's exported `seq` and `next_issue_number` in `manifest.json`.
+  - Issue-owned attachments in R2 (`files/<file id>`).
+- **Per-member export (`member.export`):** run by owners and admins for data-protection requests ([Admin §12](admin.md)); includes issues and personal tasks the subject created or is assigned to, their `issue_reviewers` rows and `issue_follows`, issue comments they wrote, and their issue-owned attachments.
+- **Restore:** rebuilds D1 tables in foreign-key order, calls `importProjectState` on each project's `ProjectRoom` DO and on `ProjectRoom("personal")` (preserving `outbox_seq` and `next_issue_number`), and rebuilds `search_index` and Vectorize chunks for `issue` and `project_memory`.
 
 ---
 
@@ -416,14 +427,14 @@ This activates the `assignment` and `review_request` event types reserved in [No
 
 ### 11.1 `ProjectRoom` Durable Object SQLite (authoritative for issues & board)
 
-One `ProjectRoom` Durable Object per project (`idFromName(projectId)`), plus one workspace-wide instance `idFromName("personal")` for personal tasks (`project_id IS NULL`), extending the core DO base class (AGENTS §4.2: `meta`, `core_timers`, `core_outbox` and `core_outbox_dead` from TDD §2.2, lazy schema migration in `blockConcurrencyWhile`, single multiplexed alarm, WebSocket hibernation):
+One `ProjectRoom` Durable Object per project (`idFromName(projectId)`), plus one workspace-wide instance `idFromName("personal")` for personal tasks (`project_id IS NULL`), extending the core DO base class (AGENTS §4.2: `meta`, `core_timers`, `core_outbox` and `core_outbox_dead` from TDD §2.2, lazy schema migration in `blockConcurrencyWhile`, single multiplexed alarm, WebSocket hibernation). Supports `updateAccess(userId, role | null)` for live role changes, `closeConnections(userId, reason, scope)` for revocation, and `setMaintenance(epoch, active)` (plus lazy `maintenance_epoch` check before any refused write, returning `maintenance` during a maintenance window per [Admin §13.2–§13.3](admin.md)):
 
 ```sql
 -- Core base tables (meta, core_timers, core_outbox, core_outbox_dead) are owned by the base class (TDD §2.2).
 -- meta keys used by ProjectRoom:
 --   schema_version, config_version, project_config (JSON: key, visibility, archived, columns, members/roles),
 --   next_issue_number (monotonic counter: 1, 2, ... for project issues or workspace TASK-<n>),
---   outbox_seq (monotonic event sequence projected to projects.projected_seq in D1).
+--   outbox_seq (monotonic event sequence projected to projects.projected_seq in D1; for ProjectRoom("personal"), reconciliation checks core_outbox depth directly).
 
 CREATE TABLE issues (
   id TEXT PRIMARY KEY,
@@ -506,7 +517,7 @@ CREATE TABLE issue_activity (
 CREATE INDEX issue_activity_issue ON issue_activity(issue_id, created_at);
 ```
 
-- **Outbox projection (`core_outbox`):** every mutation in `ProjectRoom` increments `meta.outbox_seq` and `issues.version` in the same SQLite transaction and appends a message to `core_outbox` (stream `'project-projection'`). The `project-projection` queue consumer upserts D1 `issues` (guarded by `WHERE excluded.version > issues.version`), `issue_reviewers`, `issue_key_aliases` and `search_index`, advances `projects.projected_seq`, and triggers inbox notifications and curated project-channel activity cards.
+- **Outbox projection (`core_outbox`):** every mutation in `ProjectRoom` increments `meta.outbox_seq` and `issues.version` in the same SQLite transaction and appends a message to `core_outbox` (stream `'project-projection'`). The `project-projection` queue consumer upserts D1 `issues` (guarded by `WHERE excluded.version > issues.version`), `issue_reviewers`, `issue_key_aliases` and `search_index`, advances `projects.projected_seq` for project rooms (while `ProjectRoom("personal")` reconciliation checks `core_outbox` depth directly and fans out live personal-task updates to authorised participants' `UserHub`s), and triggers inbox notifications and curated project-channel activity cards.
 
 ### 11.2 D1 Schema (Projects, Milestones, Relations, Project Memory & Search Copy)
 
@@ -688,7 +699,7 @@ CREATE INDEX IF NOT EXISTS project_pulses_project ON project_pulses(project_id, 
 
 ## 12. API & WebSocket Protocol
 
-All bodies and WebSocket messages are validated with Zod schemas in `packages/shared` (AGENTS §4.1). Expected denials and validation errors return typed `Result<T, ProjectError>` values (`not_found`, `forbidden`, `conflict`, `key_taken`, `invalid_hierarchy`, `project_archived`, `validation_error`), never thrown exceptions across DO RPC.
+All bodies and WebSocket messages are validated with Zod schemas in `packages/shared` (AGENTS §4.1). Expected denials and validation errors return typed `Result<T, ProjectError>` values (`not_found`, `forbidden`, `conflict`, `key_taken`, `invalid_hierarchy`, `project_archived`, `maintenance`, `validation_error`), never thrown exceptions across DO RPC.
 
 ### 12.1 REST Endpoints
 
@@ -714,11 +725,13 @@ All bodies and WebSocket messages are validated with Zod schemas in `packages/sh
 
 ### 12.2 `ProjectRoom` WebSocket Protocol (`/ws/projects/:id`)
 
+`/ws/projects/:id` connects to a project's `ProjectRoom` DO (requires at least `viewer` access on the project; `:id = "personal"` is rejected with `forbidden` so multi-tenant personal tasks in `ProjectRoom("personal")` never broadcast across users—live updates for personal tasks are pushed to authorised participants via `UserHub`):
+
 | Client → Server | Server → Client |
 |---|---|
 | `issue.move { issueId, statusId, boardOrder, expectedVersion? }` | `issue.created { issue }` · `issue.updated { issue, actorId }` · `issue.deleted { issueId }` |
 | `issue.quick_update { issueId, patch, expectedVersion? }` | `issue.comment_added { issueId, comment }` · `issue.comment_updated` · `issue.comment_deleted` |
-| `checklist.toggle { issueId, itemId, checked }` · `comment.react { issueId, commentId, emoji }` | `project.config_updated { config }` · `access.changed { role }` |
+| `checklist.toggle { issueId, itemId, checked }` · `comment.react { issueId, commentId, emoji }` | `project.config_updated { config }` · `access.changed { role }` · `status.changed { maintenance }` |
 | `board.focus { issueId \| null }` (ephemeral awareness) | `board.presence { users: [{ userId, activeIssueId }] }` |
 
 ---
@@ -807,6 +820,7 @@ Per AGENTS §2, approving this spec updates these sections in the same PR:
 | `specs/permissions.md` §3.2, §4, §5, §9 | Add §4.7 Projects & Issues permission matrix; add `project` and `issue` resource types and union inheritance across a project's channel, drive and calendar. |
 | `specs/notifications.md` §3, §6 | Move `assignment` and `review_request` from reserved to active; add `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment`. |
 | `specs/platform.md` §3, §4, §5, §6, §7, §8, §11, §12, §13, §14 | Add Projects & Issues rows to member lifecycle, deletion cascades (project drive files move to creators' My files on purge), retention, export, settings (`project_creation`), `ReminderScheduler` kinds (`issue_due`, `project_pulse`), room registry (`project`), and schema reconciliation. |
+| `specs/admin.md` §2, §6, §12, §13.3, §18 | Include private projects and personal tasks in workspace and per-member exports, `Projects` in settings groups, and projects/issues/personal tasks/pulses in maintenance-mode write classes. |
 | `specs/calendar.md` §3, §4.1 | Add `project` calendar kind and `release` / `demo` event types. |
 | `specs/documents.md` §3.1, §4.1, §6 | Add `project` drive kind, issue-owned attachments (`parent_type = 'issue'`), and "Promote checklist item to issue". |
 | `specs/chat.md` §3.2, §4.6, §8 | Add "Promote channel to project", `project_event` system message kind, and `ENG-42` live issue chips. |
