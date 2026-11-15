@@ -173,6 +173,12 @@ test.describe("Content-Security-Policy (TDD §8.2)", () => {
     });
   });
 
+  // The page keeps polling /health in the background. Drop the route before the test ends, so a
+  // request still in flight doesn't fail with "route.fetch: Test ended" (a flake seen in CI).
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+  });
+
   test("the shell runs with no violations, including the theme script and the menu", async ({ page }) => {
     await page.addInitScript(() => window.localStorage.setItem("officebox.theme", "dark"));
     await page.setViewportSize({ width: 390, height: 844 });
