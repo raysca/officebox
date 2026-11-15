@@ -41,6 +41,8 @@ export interface ItemRow {
 export class TestObject extends CoreDurableObject {
   readonly outbox: Outbox;
   private batches = 0;
+  /** Calls to the fake sender, successful or not. */
+  private sendCalls = 0;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -57,6 +59,13 @@ export class TestObject extends CoreDurableObject {
         this.setTimer(timer.name, Date.now() + 60_000);
       }
     });
+    // Waits `meta.slow_ms` (real time), so a test can act while the handler is mid-I/O.
+    this.onTimer("slow", async (timer) => {
+      await new Promise((resolve) => setTimeout(resolve, Number(this.getMeta("slow_ms") ?? "50")));
+      this.record(timer);
+    });
+    this.onTimer("hang", () => new Promise<void>(() => {}), { timeoutMs: 50 });
+    this.retireTimerKind("old");
   }
 
   protected override migrations(): readonly DoMigration[] {
@@ -67,9 +76,16 @@ export class TestObject extends CoreDurableObject {
     this.sql.exec("INSERT INTO timer_log (name, payload) VALUES (?, ?)", timer.name, timer.payload);
   }
 
-  /** Fake queue `sendBatch`: fails while `meta.outbox_fail` is "1", otherwise records the batch. */
+  /**
+   * Fake queue `sendBatch`: fails while `meta.outbox_fail` is "1", or when the batch holds a body
+   * with `poison: true`; otherwise records the batch.
+   */
   private fakeSend(bodies: unknown[]): Promise<void> {
+    this.sendCalls += 1;
     if (this.getMeta("outbox_fail") === "1") return Promise.reject(new Error("queue unavailable"));
+    if (bodies.some((b) => (b as { poison?: boolean }).poison === true)) {
+      return Promise.reject(new Error("message rejected"));
+    }
     this.batches += 1;
     for (const body of bodies) {
       this.sql.exec("INSERT INTO sent (batch, body) VALUES (?, ?)", this.batches, JSON.stringify(body));
@@ -84,12 +100,12 @@ export class TestObject extends CoreDurableObject {
   }
 
   /** Writes an item and its outbox message in one transaction. */
-  addItem(id: string, name: string, payloadBytes = 0): Promise<RpcResult<{ id: string }>> {
+  addItem(id: string, name: string, payloadBytes = 0, poison = false): Promise<RpcResult<{ id: string }>> {
     return this.rpc(() => {
       if (name === "") return err(apiError("validation_failed", "Name required."));
       this.ctx.storage.transactionSync(() => {
         this.sql.exec("INSERT INTO items (id, name) VALUES (?, ?)", id, name);
-        this.outbox.enqueue({ type: "test.item", id, name, pad: "x".repeat(payloadBytes) });
+        this.outbox.enqueue({ type: "test.item", id, name, pad: "x".repeat(payloadBytes), poison });
       });
       return ok({ id });
     });
@@ -105,8 +121,34 @@ export class TestObject extends CoreDurableObject {
     );
   }
 
-  timer(name: string, dueAt: number, payload: string | null = null): void {
-    this.setTimer(name, dueAt, { payload });
+  timer(name: string, dueAt: number, payload: string | null = null, ifEarlier = false): void {
+    this.setTimer(name, dueAt, { payload, ifEarlier });
+  }
+
+  /** Sets a timer inside a transaction that then rolls back. */
+  rolledBackTimer(name: string, dueAt: number): string {
+    try {
+      this.ctx.storage.transactionSync(() => {
+        this.setTimer(name, dueAt);
+        throw new Error("roll back");
+      });
+    } catch (error) {
+      return error instanceof Error ? error.message : "error";
+    }
+    return "committed";
+  }
+
+  timerRows(): Array<{ name: string; due_at: number; payload: string | null; attempts: number; generation: number }> {
+    return this.sql
+      .exec<{ name: string; due_at: number; payload: string | null; attempts: number; generation: number }>(
+        "SELECT name, due_at, payload, attempts, generation FROM core_timers ORDER BY name",
+      )
+      .toArray();
+  }
+
+  outboxStats(): { pending: number; dead: number; maxAttempts: number; sendCalls: number } {
+    const { pending, dead, maxAttempts } = this.outbox.stats();
+    return { pending, dead, maxAttempts, sendCalls: this.sendCalls };
   }
 
   cancel(name: string): void {
@@ -164,7 +206,7 @@ export class TestObject extends CoreDurableObject {
     return this.sockets(socketAttachmentSchema, "room").map(([, a]) => a.userId);
   }
 
-  override webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+  protected override onSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
     const users = this.sockets(socketAttachmentSchema).map(([, a]) => a.userId);
     ws.send(JSON.stringify({ type: "test.echo", message: typeof message === "string" ? message : "[binary]", users }));
   }

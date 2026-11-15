@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   chunkRows,
   MAX_OUTBOX_BATCH_BYTES,
+  MAX_OUTBOX_ATTEMPTS,
   MAX_OUTBOX_BATCH_MESSAGES,
   MAX_OUTBOX_MESSAGE_BYTES,
 } from "../src/core/do/outbox";
@@ -108,6 +109,68 @@ describe("outbox", () => {
     await runDurableObjectAlarm(s);
     expect((await s.sentBodies()).map((r) => r.id)).toEqual(["x"]);
     expect(await pending(s)).toEqual([]);
+  });
+});
+
+describe("outbox failures", () => {
+  const drain = async (s: Stub) => {
+    await s.rewind(10 * 60_000); // past any backoff
+    await runDurableObjectAlarm(s);
+  };
+
+  it("isolates a poison row by bisecting, sending the rest of the chunk", async () => {
+    const s = stub();
+    for (const id of ["a", "b", "c", "d", "e", "f"]) await s.addItem(id, id, 0, id === "c");
+    await drain(s);
+    expect((await s.sentBodies()).map((r) => r.id).sort()).toEqual(["a", "b", "d", "e", "f"]);
+    const rows = await pending(s);
+    expect(rows.map((r) => r.attempts)).toEqual([1]); // only the poison row counts an attempt
+    const stats = await s.outboxStats();
+    expect(stats).toMatchObject({ pending: 1, dead: 0 });
+    expect(stats.sendCalls).toBeLessThanOrEqual(7); // a bisection, not one call per row
+  });
+
+  it("moves a row that keeps failing while others succeed to core_outbox_dead", async () => {
+    const s = stub();
+    await s.addItem("bad", "bad", 0, true);
+    for (let i = 0; i < MAX_OUTBOX_ATTEMPTS; i++) {
+      await s.addItem(`good${i}`, "good");
+      await drain(s);
+    }
+    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 1 });
+    const dead = await runInDurableObject(s, (_i: TestObject, state) =>
+      state.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM core_outbox_dead").toArray(),
+    );
+    expect(dead).toEqual([{ attempts: MAX_OUTBOX_ATTEMPTS }]);
+    expect((await s.sentBodies()).length).toBe(MAX_OUTBOX_ATTEMPTS);
+  });
+
+  it("never kills rows during an outage, and probes cheaply", async () => {
+    const s = stub();
+    await s.meta("outbox_fail", "1");
+    for (let i = 0; i < 20; i++) await s.addItem(`o${i}`, "o");
+    for (let i = 0; i < MAX_OUTBOX_ATTEMPTS + 2; i++) await drain(s);
+    const stats = await s.outboxStats();
+    expect(stats).toMatchObject({ pending: 20, dead: 0 });
+    expect(stats.sendCalls).toBeLessThanOrEqual((MAX_OUTBOX_ATTEMPTS + 2) * 8);
+    // Untried rows wait too, so a down queue isn't hammered.
+    const rows = await pending(s);
+    expect(rows.every((r) => r.next_attempt_at > Date.now())).toBe(true);
+
+    await s.meta("outbox_fail", "0");
+    await drain(s);
+    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 0 });
+  });
+
+  it("delivers in order after the queue recovers", async () => {
+    const s = stub();
+    await s.meta("outbox_fail", "1");
+    for (const id of ["x1", "x2", "x3"]) await s.addItem(id, id);
+    await drain(s);
+    await s.addItem("x4", "x4");
+    await s.meta("outbox_fail", "0");
+    await drain(s);
+    expect((await s.sentBodies()).map((r) => r.id)).toEqual(["x1", "x2", "x3", "x4"]);
   });
 });
 

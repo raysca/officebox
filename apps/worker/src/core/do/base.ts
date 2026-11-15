@@ -15,23 +15,33 @@ import { getAttachment, setAttachment } from "./websocket";
  * `blockConcurrencyWhile`, each in its own transaction together with the new `schema_version` in
  * `meta`. Thousands of objects therefore never need a coordinated migration. If a migration throws,
  * its transaction rolls back, the data is left untouched, and the object refuses work with
- * `unavailable` (`fetch` returns 503 and `rpc()` returns the error) until a fixed release ships. A
- * schema newer than the code (after a rollback) is tolerated: expand/contract keeps it compatible.
+ * `unavailable` (`fetch` returns 503, sockets are closed, `rpc()` returns the error, alarms do
+ * nothing) until a fixed release ships. A schema newer than the code (after a rollback) is
+ * tolerated: expand/contract keeps it compatible. The base class's own tables are versioned the same
+ * way under `meta.core_schema_version`.
  *
  * **Alarm multiplexer.** A Durable Object has one alarm. Named timers live in the `core_timers` table
  * and the alarm is always set to the earliest one. Handlers are registered per timer *kind*: a timer
- * named `poll:01J…` runs the `poll` handler. Timers are durable, so they survive eviction; running
- * them is idempotent (a timer is removed only after its handler succeeds, and only if the handler
- * didn't reschedule it); a failing handler is retried with exponential backoff without blocking the
- * other timers.
+ * named `poll:01J…` runs the `poll` handler.
+ * - Timers are durable, so they survive eviction, and the alarm is re-derived from the table on
+ *   every wake and after every change (never trusted from memory across a rolled-back transaction).
+ * - A timer is removed only after its handler succeeds, and only if nothing rescheduled it while it
+ *   ran, so a run is idempotent.
+ * - A handler that throws or exceeds its timeout (30 s by default) is retried with exponential
+ *   backoff without blocking the other timers; past 5 attempts each failure logs at error level.
+ *   A timed-out handler is abandoned, not cancelled: handlers must tolerate running twice.
+ * - A timer whose kind has no handler is kept (it may belong to a newer release) and retried with
+ *   backoff; only kinds listed with `retireTimerKind` are dropped.
  *
  * **WebSockets.** Keepalive `ping` frames are answered with `pong` by the runtime without waking the
- * object. `acceptSocket` and `sockets` keep typed attachments with each socket (see `websocket.ts`).
+ * object. Subclasses implement `onSocketMessage`, `onSocketClose` and `onSocketError`, which the base
+ * class only calls once the schema is usable. `acceptSocket` and `sockets` keep typed attachments.
  *
- * **Typed RPC results.** Public methods called over RPC return `RpcResult<T>` and never throw an
- * expected denial; the runtime logs thrown errors as uncaught exceptions (spike finding). Wrap the
- * body in `this.rpc(() => ...)` so a failed migration is reported as a result too. Return types must
- * be concrete: no `unknown` or `any` fields (spike finding).
+ * **Typed RPC results.** Public methods called over RPC return `Promise<RpcResult<T>>` and never
+ * throw an expected denial; the runtime logs thrown errors as uncaught exceptions (spike finding).
+ * Wrap the body in `this.rpc(() => ...)` so a failed migration is reported as a result too. Return
+ * types must be concrete: no `unknown` or `any` fields (spike finding). `RpcMethodsReturnResults`
+ * checks this at compile time.
  *
  * **Hibernation rules (TDD §3.2).** The constructor only checks the schema version and the alarm; no
  * D1 calls, no state rebuilds, and no `setInterval`/`setTimeout` that would keep the object awake.
@@ -49,6 +59,22 @@ export interface DoMigration {
 /** Result of a Durable Object RPC method: plain data that survives structured cloning. */
 export type RpcResult<T> = Result<T, ApiError>;
 
+/**
+ * Compile-time check that every public method of a Durable Object (beyond the base class) returns
+ * `Promise<RpcResult<…>>`. Resolves to `true`, or to the names of the offending methods.
+ */
+export type RpcMethodsReturnResults<T> = {
+  [K in Exclude<keyof T, keyof CoreDurableObject>]: T[K] extends (...args: never[]) => Promise<RpcResult<unknown>>
+    ? never
+    : K;
+}[Exclude<keyof T, keyof CoreDurableObject>] extends never
+  ? true
+  : {
+      [K in Exclude<keyof T, keyof CoreDurableObject>]: T[K] extends (...args: never[]) => Promise<RpcResult<unknown>>
+        ? never
+        : K;
+    }[Exclude<keyof T, keyof CoreDurableObject>];
+
 export interface Timer {
   /** Full name, for example `poll:01J…`. */
   name: string;
@@ -64,14 +90,29 @@ export interface Timer {
 
 export type TimerHandler = (timer: Timer) => void | Promise<void>;
 
+export interface TimerHandlerOptions {
+  /** How long a run may take before it counts as failed. Defaults to `DEFAULT_TIMER_TIMEOUT_MS`. */
+  timeoutMs?: number;
+}
+
 export interface SetTimerOptions {
   payload?: string | null;
-  /** Keep an existing timer's due time when it is already earlier (used for batching). */
+  /**
+   * Batching: if the timer already exists with an earlier or equal due time, leave it exactly as it
+   * is (due time, payload, attempts). If that timer is running right now, it is marked as changed so
+   * it runs again rather than being removed when the current run finishes.
+   */
   ifEarlier?: boolean;
 }
 
 const TIMER_KIND = /^[a-z][a-z0-9_]*$/;
-const TIMER_BATCH = 100;
+/** Timers run per alarm; more due timers are picked up by the next alarm, set straight away. */
+export const TIMER_BATCH = 100;
+export const DEFAULT_TIMER_TIMEOUT_MS = 30_000;
+/** Outbox drains send to Queues and may take longer than an ordinary timer. */
+const OUTBOX_TIMER_TIMEOUT_MS = 5 * 60_000;
+/** From this many failed runs, each further failure logs at error level. */
+export const TIMER_ERROR_ATTEMPTS = 5;
 
 /** Tables owned by the base class, versioned separately (`meta.core_schema_version`). */
 const CORE_MIGRATIONS: readonly DoMigration[] = [
@@ -99,6 +140,22 @@ const CORE_MIGRATIONS: readonly DoMigration[] = [
       sql.exec("CREATE INDEX IF NOT EXISTS core_outbox_due ON core_outbox(stream, next_attempt_at, id)");
     },
   },
+  {
+    version: 2,
+    description: "dead outbox rows",
+    up(sql) {
+      sql.exec(`CREATE TABLE IF NOT EXISTS core_outbox_dead (
+        id INTEGER PRIMARY KEY,
+        stream TEXT NOT NULL,
+        body TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        attempts INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        dead_at INTEGER NOT NULL
+      )`);
+      sql.exec("CREATE INDEX IF NOT EXISTS core_outbox_dead_stream ON core_outbox_dead(stream, id)");
+    },
+  },
 ];
 
 function checkMigrationList(list: readonly DoMigration[]): void {
@@ -107,27 +164,58 @@ function checkMigrationList(list: readonly DoMigration[]): void {
   });
 }
 
+/** Stands in for `this` when `migrations()` is probed: any property access means it reads instance state. */
+const INSTANCE_PROBE: object = new Proxy(
+  {},
+  {
+    get(_target, property) {
+      throw new Error(`migrations() must not read instance fields (read ${String(property)})`);
+    },
+  },
+);
+
+class TimerTimeout extends Error {}
+
+type TimerRow = {
+  name: string;
+  due_at: number;
+  payload: string | null;
+  attempts: number;
+  generation: number;
+};
+
 export abstract class CoreDurableObject<E extends Env = Env> extends DurableObject<E> {
   protected readonly sql: SqlStorage;
   protected readonly log: Logger;
   private migrationFailure: string | null = null;
-  private readonly timerHandlers = new Map<string, TimerHandler>();
+  private readonly timerHandlers = new Map<string, { handler: TimerHandler; timeoutMs: number }>();
+  private readonly retiredKinds = new Set<string>();
   private readonly outboxes = new Map<string, Outbox>();
-  /** Alarm time last read or written; `undefined` until read in the constructor. */
+  /** Timers whose handler is running now. */
+  private readonly runningTimers = new Set<string>();
+  /** Alarm time as last read from or written to storage; `undefined` until first read. */
   private alarmAt: number | null | undefined = undefined;
+  private alarmFlushQueued = false;
 
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.log = rootLogger.child({ durableObject: this.constructor.name, objectId: ctx.id.toString() });
+    // Log the object's name and a short ID prefix; full 64-hex IDs are redacted as token-like.
+    this.log = rootLogger.child({
+      durableObject: this.constructor.name,
+      objectName: ctx.id.name ?? null,
+      objectId: ctx.id.toString().slice(0, 16),
+    });
     // Answered by the runtime without waking a hibernated object (TDD §3.2).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(WS_PING, WS_PONG));
+    // If this callback threw, the runtime would reset the object and every request would fail with
+    // the same error; migrate() therefore catches and records failures instead of throwing.
     void ctx.blockConcurrencyWhile(async () => {
       this.migrate();
       this.alarmAt = await ctx.storage.getAlarm();
-      if (this.migrationFailure === null) this.syncAlarm();
+      if (this.migrationFailure === null) this.flushAlarm();
     });
-    this.onTimer("outbox", (timer) => this.drainOutbox(timer));
+    this.onTimer("outbox", (timer) => this.drainOutbox(timer), { timeoutMs: OUTBOX_TIMER_TIMEOUT_MS });
   }
 
   /** The subclass's SQLite migrations, oldest first. Must not depend on instance fields. */
@@ -141,7 +229,7 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
     try {
       this.applyMigrations("core_schema_version", CORE_MIGRATIONS);
-      this.applyMigrations("schema_version", this.migrations());
+      this.applyMigrations("schema_version", this.migrations.call(INSTANCE_PROBE));
     } catch (error) {
       this.migrationFailure = error instanceof Error ? error.message : String(error);
       this.log.error("durable object schema migration failed; refusing work", { error });
@@ -207,137 +295,32 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
     return Response.json({ error: apiError("not_found", "No such endpoint.") }, { status: 404 });
   }
 
-  // ------------------------------------------------------------------ timers
+  // --------------------------------------------------------------- websockets
 
-  /** Registers the handler for timers of `kind` (`kind` or `kind:<id>`). Call from the constructor. */
-  protected onTimer(kind: string, handler: TimerHandler): void {
-    if (!TIMER_KIND.test(kind)) throw new Error(`Invalid timer kind: ${kind}`);
-    this.timerHandlers.set(kind, handler);
-  }
-
-  /**
-   * Creates or moves the timer `name` to `dueAt` (epoch ms) and updates the alarm. Synchronous, so it
-   * can run inside `ctx.storage.transactionSync` with the state change it belongs to.
-   */
-  protected setTimer(name: string, dueAt: number, options: SetTimerOptions = {}): void {
-    const kind = name.split(":", 1)[0] ?? "";
-    if (!TIMER_KIND.test(kind)) throw new Error(`Invalid timer name: ${name}`);
-    const payload = options.payload ?? null;
-    const due = Math.floor(dueAt);
-    this.sql.exec(
-      `INSERT INTO core_timers (name, due_at, payload, attempts, generation) VALUES (?, ?, ?, 0, 0)
-       ON CONFLICT (name) DO UPDATE SET
-         due_at = CASE WHEN ? AND core_timers.due_at <= excluded.due_at THEN core_timers.due_at ELSE excluded.due_at END,
-         payload = excluded.payload, attempts = 0, generation = core_timers.generation + 1`,
-      name,
-      due,
-      payload,
-      options.ifEarlier ? 1 : 0,
-    );
-    this.syncAlarm();
-  }
-
-  protected cancelTimer(name: string): void {
-    this.sql.exec("DELETE FROM core_timers WHERE name = ?", name);
-    this.syncAlarm();
-  }
-
-  protected getTimer(name: string): Timer | null {
-    const row = this.sql
-      .exec<{
-        name: string;
-        due_at: number;
-        payload: string | null;
-        attempts: number;
-      }>("SELECT name, due_at, payload, attempts FROM core_timers WHERE name = ?", name)
-      .toArray()[0];
-    return row ? toTimer(row) : null;
-  }
-
-  /** Points the alarm at the earliest timer, or clears it. Cheap when nothing changed. */
-  protected syncAlarm(): void {
-    const row = this.sql.exec<{ due: number | null }>("SELECT MIN(due_at) AS due FROM core_timers").toArray()[0];
-    const due = row?.due ?? null;
-    if (due === this.alarmAt) return;
-    this.alarmAt = due;
-    if (due === null) void this.ctx.storage.deleteAlarm();
-    else void this.ctx.storage.setAlarm(due);
-  }
-
-  /** Runs due timers. Subclasses register handlers with `onTimer` instead of overriding this. */
-  override async alarm(): Promise<void> {
-    // The alarm that woke us has been consumed.
-    this.alarmAt = null;
-    if (this.migrationFailure !== null) return;
-    const now = Date.now();
-    const due = this.sql
-      .exec<{
-        name: string;
-        due_at: number;
-        payload: string | null;
-        attempts: number;
-        generation: number;
-      }>(
-        "SELECT name, due_at, payload, attempts, generation FROM core_timers WHERE due_at <= ? ORDER BY due_at, name LIMIT ?",
-        now,
-        TIMER_BATCH,
-      )
-      .toArray();
-
-    for (const row of due) {
-      const timer = toTimer(row);
-      const handler = this.timerHandlers.get(timer.kind);
-      if (!handler) {
-        this.log.error("no handler for timer; dropping it", { timer: timer.name });
-        this.sql.exec("DELETE FROM core_timers WHERE name = ? AND generation = ?", row.name, row.generation);
-        continue;
-      }
-      try {
-        await handler(timer);
-        // Removed only if the handler didn't reschedule it (which bumps the generation).
-        this.sql.exec("DELETE FROM core_timers WHERE name = ? AND generation = ?", row.name, row.generation);
-      } catch (error) {
-        const attempts = row.attempts + 1;
-        this.log.error("timer handler failed; will retry", { timer: timer.name, attempts, error });
-        this.sql.exec(
-          "UPDATE core_timers SET attempts = ?, due_at = ? WHERE name = ? AND generation = ?",
-          attempts,
-          Date.now() + backoffMs(attempts),
-          row.name,
-          row.generation,
-        );
-      }
-    }
-    this.syncAlarm();
-  }
-
-  // ------------------------------------------------------------------ outbox
-
-  /**
-   * Creates the outbox for one stream (normally one per queue). Call from the constructor or a field
-   * initialiser. See `outbox.ts`.
-   */
-  protected createOutbox(options: OutboxOptions): Outbox {
-    if (this.outboxes.has(options.stream)) throw new Error(`Outbox ${options.stream} already exists`);
-    const outbox = new Outbox(this.sql, options, (dueAt) =>
-      this.setTimer(`outbox:${options.stream}`, dueAt, { ifEarlier: true }),
-    );
-    this.outboxes.set(options.stream, outbox);
-    return outbox;
-  }
-
-  private async drainOutbox(timer: Timer): Promise<void> {
-    const outbox = timer.id === null ? undefined : this.outboxes.get(timer.id);
-    if (!outbox) {
-      this.log.error("timer for an unknown outbox stream", { timer: timer.name });
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (!this.ready().ok) {
+      ws.close(1011, "unavailable");
       return;
     }
-    const next = await outbox.drain(this.log);
-    // Reschedule for the earliest remaining row; this bumps the timer's generation so it is kept.
-    if (next !== null) this.setTimer(timer.name, Math.max(next, Date.now()));
+    await this.onSocketMessage(ws, message);
   }
 
-  // --------------------------------------------------------------- websockets
+  override async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+    if (!this.ready().ok) return;
+    await this.onSocketClose(ws, code, reason, wasClean);
+  }
+
+  override async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    if (!this.ready().ok) return;
+    await this.onSocketError(ws, error);
+  }
+
+  /** A message from an accepted socket. Not called while the schema is unusable. */
+  protected onSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer): void | Promise<void> {}
+
+  protected onSocketClose(_ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): void | Promise<void> {}
+
+  protected onSocketError(_ws: WebSocket, _error: unknown): void | Promise<void> {}
 
   /**
    * Accepts a hibernatable WebSocket with a typed attachment and returns the 101 response for the
@@ -360,9 +343,175 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
     }
     return out;
   }
+
+  // ------------------------------------------------------------------ timers
+
+  /** Registers the handler for timers of `kind` (`kind` or `kind:<id>`). Call from the constructor. */
+  protected onTimer(kind: string, handler: TimerHandler, options: TimerHandlerOptions = {}): void {
+    if (!TIMER_KIND.test(kind)) throw new Error(`Invalid timer kind: ${kind}`);
+    this.timerHandlers.set(kind, { handler, timeoutMs: options.timeoutMs ?? DEFAULT_TIMER_TIMEOUT_MS });
+  }
+
+  /** Declares a timer kind that an earlier release used and this one no longer handles: such timers are dropped. */
+  protected retireTimerKind(kind: string): void {
+    this.retiredKinds.add(kind);
+  }
+
+  /**
+   * Creates or moves the timer `name` to `dueAt` (epoch ms). Synchronous, so it can run inside
+   * `ctx.storage.transactionSync` with the state change it belongs to. The alarm is updated after the
+   * current synchronous work (and so after the transaction commits or rolls back), from the table.
+   */
+  protected setTimer(name: string, dueAt: number, options: SetTimerOptions = {}): void {
+    const kind = name.split(":", 1)[0] ?? "";
+    if (!TIMER_KIND.test(kind)) throw new Error(`Invalid timer name: ${name}`);
+    const payload = options.payload ?? null;
+    const due = Math.floor(dueAt);
+    const keepIfEarlier = options.ifEarlier ? 1 : 0;
+    const running = this.runningTimers.has(name) ? 1 : 0;
+    this.sql.exec(
+      `INSERT INTO core_timers (name, due_at, payload, attempts, generation) VALUES (?1, ?2, ?3, 0, 0)
+       ON CONFLICT (name) DO UPDATE SET
+         due_at = CASE WHEN ?4 AND core_timers.due_at <= excluded.due_at THEN core_timers.due_at ELSE excluded.due_at END,
+         payload = CASE WHEN ?4 AND core_timers.due_at <= excluded.due_at THEN core_timers.payload ELSE excluded.payload END,
+         attempts = CASE WHEN ?4 AND core_timers.due_at <= excluded.due_at THEN core_timers.attempts ELSE 0 END,
+         generation = CASE WHEN ?4 AND core_timers.due_at <= excluded.due_at AND NOT ?5
+           THEN core_timers.generation ELSE core_timers.generation + 1 END`,
+      name,
+      due,
+      payload,
+      keepIfEarlier,
+      running,
+    );
+    this.syncAlarm();
+  }
+
+  protected cancelTimer(name: string): void {
+    this.sql.exec("DELETE FROM core_timers WHERE name = ?", name);
+    this.syncAlarm();
+  }
+
+  protected getTimer(name: string): Timer | null {
+    const row = this.sql
+      .exec<TimerRow>("SELECT name, due_at, payload, attempts, generation FROM core_timers WHERE name = ?", name)
+      .toArray()[0];
+    return row ? toTimer(row) : null;
+  }
+
+  /**
+   * Schedules the alarm to be re-derived from `core_timers` once the current synchronous work is
+   * done. Deferring past `transactionSync` means a rolled-back timer never moves the alarm.
+   */
+  protected syncAlarm(): void {
+    if (this.alarmFlushQueued) return;
+    this.alarmFlushQueued = true;
+    queueMicrotask(() => this.flushAlarm());
+  }
+
+  /** Points the alarm at the earliest timer, or clears it. Writes only when it changes. */
+  private flushAlarm(): void {
+    this.alarmFlushQueued = false;
+    const row = this.sql.exec<{ due: number | null }>("SELECT MIN(due_at) AS due FROM core_timers").toArray()[0];
+    const due = row?.due ?? null;
+    if (due === this.alarmAt) return;
+    this.alarmAt = due;
+    if (due === null) void this.ctx.storage.deleteAlarm();
+    else void this.ctx.storage.setAlarm(due);
+  }
+
+  /** Runs due timers. Subclasses register handlers with `onTimer` instead of overriding this. */
+  override async alarm(): Promise<void> {
+    // The alarm that woke us has been consumed; re-derive it from the table when we're done.
+    this.alarmAt = null;
+    if (this.migrationFailure !== null) return;
+    const due = this.sql
+      .exec<TimerRow>(
+        "SELECT name, due_at, payload, attempts, generation FROM core_timers WHERE due_at <= ? ORDER BY due_at, name LIMIT ?",
+        Date.now(),
+        TIMER_BATCH,
+      )
+      .toArray();
+
+    for (const row of due) await this.runTimer(row);
+    this.flushAlarm();
+  }
+
+  private async runTimer(row: TimerRow): Promise<void> {
+    const timer = toTimer(row);
+    if (this.retiredKinds.has(timer.kind)) {
+      this.log.info("dropping timer of a retired kind", { timer: timer.name });
+      this.sql.exec("DELETE FROM core_timers WHERE name = ? AND generation = ?", row.name, row.generation);
+      return;
+    }
+    const entry = this.timerHandlers.get(timer.kind);
+    if (!entry) {
+      // Possibly from a newer release (before a rollback): keep it, retry later.
+      this.retryTimer(row, "no handler for timer kind; keeping it", undefined);
+      return;
+    }
+    this.runningTimers.add(row.name);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => entry.handler(timer)),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new TimerTimeout()), entry.timeoutMs);
+        }),
+      ]);
+      // Removed only if nothing rescheduled it while it ran (which bumps the generation).
+      this.sql.exec("DELETE FROM core_timers WHERE name = ? AND generation = ?", row.name, row.generation);
+    } catch (error) {
+      const timedOut = error instanceof TimerTimeout;
+      this.retryTimer(
+        row,
+        timedOut ? "timer handler timed out; will retry" : "timer handler failed; will retry",
+        timedOut ? undefined : error,
+      );
+    } finally {
+      clearTimeout(deadline);
+      this.runningTimers.delete(row.name);
+    }
+  }
+
+  private retryTimer(row: TimerRow, message: string, error: unknown): void {
+    const attempts = row.attempts + 1;
+    const fields = { timer: row.name, attempts, ...(error === undefined ? {} : { error }) };
+    if (attempts >= TIMER_ERROR_ATTEMPTS) this.log.error(message, fields);
+    else this.log.warn(message, fields);
+    this.sql.exec(
+      "UPDATE core_timers SET attempts = ?, due_at = ? WHERE name = ? AND generation = ?",
+      attempts,
+      Date.now() + backoffMs(attempts),
+      row.name,
+      row.generation,
+    );
+  }
+
+  // ------------------------------------------------------------------ outbox
+
+  /**
+   * Creates the outbox for one stream (normally one per queue). Call from the constructor or a field
+   * initialiser. See `outbox.ts`.
+   */
+  protected createOutbox(options: OutboxOptions): Outbox {
+    if (this.outboxes.has(options.stream)) throw new Error(`Outbox ${options.stream} already exists`);
+    const outbox = new Outbox(this.sql, options, (dueAt) =>
+      this.setTimer(`outbox:${options.stream}`, dueAt, { ifEarlier: true }),
+    );
+    this.outboxes.set(options.stream, outbox);
+    return outbox;
+  }
+
+  private async drainOutbox(timer: Timer): Promise<void> {
+    const outbox = timer.id === null ? undefined : this.outboxes.get(timer.id);
+    if (!outbox) throw new Error(`Timer ${timer.name} names an unknown outbox stream`);
+    const next = await outbox.drain(this.log);
+    // Reschedule for the earliest remaining row; this bumps the timer's generation so it is kept.
+    if (next !== null) this.setTimer(timer.name, Math.max(next, Date.now()));
+  }
 }
 
-function toTimer(row: { name: string; due_at: number; payload: string | null; attempts: number }): Timer {
+function toTimer(row: TimerRow): Timer {
   const separator = row.name.indexOf(":");
   return {
     name: row.name,

@@ -1,6 +1,8 @@
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import type { RpcMethodsReturnResults } from "../src/core/do/base";
+import type { SystemObject } from "../src/system-object";
 import type { TestObject } from "./fixtures/test-object";
 
 // Storage is shared between tests in a file: every test uses its own object name (AGENTS §5).
@@ -20,7 +22,7 @@ describe("schema versioning", () => {
   it("migrates a new object to the latest version on first wake", async () => {
     const s = stub();
     expect(await s.version()).toEqual({ ok: true, value: { schemaVersion: 2 } });
-    expect(await metaValue(s, "core_schema_version")).toBe("1");
+    expect(await metaValue(s, "core_schema_version")).toBe("2");
   });
 
   it("migrates an older object lazily after eviction, keeping its data (PLAN M0 exit criterion)", async () => {
@@ -180,12 +182,175 @@ describe("alarm multiplexer", () => {
     expect(rows[0]?.due_at).toBeGreaterThan(Date.now());
   });
 
-  it("drops timers with no handler", async () => {
+  it("keeps timers of an unknown kind for a later release, and drops retired kinds", async () => {
     const s = stub();
     await s.timer("nobody:1", Date.now() + HOUR);
+    await s.timer("old:1", Date.now() + HOUR);
     await s.rewind(HOUR);
     await runDurableObjectAlarm(s);
-    expect(await sqlRows(s, "SELECT * FROM core_timers")).toEqual([]);
+    const rows = await s.timerRows();
+    expect(rows.map((r) => [r.name, r.attempts])).toEqual([["nobody:1", 1]]);
+    expect(rows[0]?.due_at).toBeGreaterThan(Date.now());
+  });
+
+  it("treats a handler that exceeds its timeout as failed and backs off", async () => {
+    const s = stub();
+    await s.timer("hang:1", Date.now() + HOUR);
+    await s.rewind(HOUR);
+    await runDurableObjectAlarm(s);
+    const [row] = await s.timerRows();
+    expect(row).toMatchObject({ name: "hang:1", attempts: 1 });
+    expect(row?.due_at).toBeGreaterThan(Date.now());
+  });
+
+  it("leaves the alarm alone when the transaction that set a timer rolls back", async () => {
+    const s = stub();
+    expect(await s.rolledBackTimer("record:rb", Date.now() + HOUR)).toBe("roll back");
+    expect(await s.timerRows()).toEqual([]);
+    expect(await runInDurableObject(s, (_i: TestObject, state) => state.storage.getAlarm())).toBeNull();
+
+    // With an existing timer, the alarm stays on it.
+    const due = Date.now() + 2 * HOUR;
+    await s.timer("record:keep", due);
+    await s.rolledBackTimer("record:rb", Date.now() + HOUR);
+    expect(await runInDurableObject(s, (_i: TestObject, state) => state.storage.getAlarm())).toBe(due);
+  });
+
+  it("applies concurrent setTimer calls one at a time, without duplicates", async () => {
+    const s = stub();
+    const base = Date.now() + HOUR;
+    await Promise.all(Array.from({ length: 10 }, (_, i) => s.timer("record:c", base + (10 - i) * 1000, null, true)));
+    const rows = await s.timerRows();
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.due_at).toBe(base + 1000); // ifEarlier: the earliest wins
+    expect(await runInDurableObject(s, (_i: TestObject, state) => state.storage.getAlarm())).toBe(base + 1000);
+  });
+
+  it("ifEarlier keeps an earlier timer untouched and moves a later one", async () => {
+    const s = stub();
+    const t = Date.now() + HOUR;
+    await s.timer("record:e", t, "first");
+    const [before] = await s.timerRows();
+    await s.timer("record:e", t + 5000, "second", true);
+    expect((await s.timerRows())[0]).toEqual(before); // due, payload, attempts and generation unchanged
+    await s.timer("record:e", t - 5000, "third", true);
+    expect((await s.timerRows())[0]).toMatchObject({ due_at: t - 5000, payload: "third" });
+  });
+
+  it("keeps a timer rescheduled while its handler is mid-I/O, and runs it again", async () => {
+    const s = stub();
+    await s.meta("slow_ms", "100");
+    await s.timer("slow:1", Date.now() + HOUR);
+    await s.rewind(HOUR);
+    const later = Date.now() + 3 * HOUR;
+    await Promise.all([
+      runDurableObjectAlarm(s),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        await s.timer("slow:1", later);
+      })(),
+    ]);
+    expect(await s.timerLog()).toEqual(["slow:1"]);
+    expect((await s.timerRows()).map((r) => [r.name, r.due_at])).toEqual([["slow:1", later]]);
+  });
+
+  it("an ifEarlier request while the timer runs makes it run again", async () => {
+    const s = stub();
+    await s.meta("slow_ms", "100");
+    await s.timer("slow:2", Date.now() + HOUR);
+    await s.rewind(HOUR);
+    await Promise.all([
+      runDurableObjectAlarm(s),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        await s.timer("slow:2", Date.now() + HOUR, null, true);
+      })(),
+    ]);
+    // Kept (still due), so the next alarm runs it again.
+    expect((await s.timerRows()).map((r) => r.name)).toEqual(["slow:2"]);
+  });
+
+  it("cancelling a timer while its handler runs leaves no timer behind", async () => {
+    const s = stub();
+    await s.meta("slow_ms", "100");
+    await s.timer("slow:3", Date.now() + HOUR);
+    await s.rewind(HOUR);
+    await Promise.all([
+      runDurableObjectAlarm(s),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        await s.cancel("slow:3");
+      })(),
+    ]);
+    expect(await s.timerLog()).toEqual(["slow:3"]);
+    expect(await s.timerRows()).toEqual([]);
+  });
+
+  it("runs more than 100 due timers over successive alarms, each once", async () => {
+    const s = stub();
+    const due = Date.now() + HOUR;
+    for (let i = 0; i < 150; i++) await s.timer(`record:${String(i).padStart(3, "0")}`, due);
+    await s.rewind(HOUR);
+    await runDurableObjectAlarm(s);
+    expect((await s.timerLog()).length).toBeGreaterThanOrEqual(100);
+    // The remaining 50 are past due, so the alarm is set to fire straight away; run it until done.
+    for (let i = 0; i < 5 && (await s.timerLog()).length < 150; i++) await runDurableObjectAlarm(s);
+    const log = await s.timerLog();
+    expect(log.length).toBe(150);
+    expect(new Set(log).size).toBe(150);
+  });
+});
+
+describe("migration failures and newer schemas", () => {
+  it("refuses work when a core migration fails", async () => {
+    const s = stub();
+    await s.version();
+    // Rewind the core schema to 1 and plant a conflicting table so core migration 2 fails.
+    await runInDurableObject(s, (_i: TestObject, state) => {
+      state.storage.sql.exec("DROP TABLE core_outbox_dead");
+      state.storage.sql.exec("CREATE TABLE core_outbox_dead (unrelated TEXT)");
+      state.storage.sql.exec("UPDATE meta SET value = '1' WHERE key = 'core_schema_version'");
+    });
+    await evictDurableObject(s);
+    const result = await s.version();
+    expect(!result.ok && result.error.code).toBe("unavailable");
+  });
+
+  it("keeps serving reads and writes on a schema newer than the code", async () => {
+    const s = stub();
+    await s.version();
+    await runInDurableObject(s, (_i: TestObject, state) => {
+      state.storage.sql.exec("ALTER TABLE items ADD COLUMN added_by_newer TEXT");
+      state.storage.sql.exec("UPDATE meta SET value = '3' WHERE key = 'schema_version'");
+    });
+    await evictDurableObject(s);
+    expect((await s.addItem("n1", "Newer")).ok).toBe(true);
+    const items = await s.items();
+    expect(items.ok && items.value.map((i) => i.id)).toEqual(["n1"]);
+  });
+
+  it("closes sockets instead of handling messages while unavailable", async () => {
+    const s = stub();
+    const res = await s.fetch("http://do/ws?user=u2", { headers: { Upgrade: "websocket" } });
+    const ws = res.webSocket;
+    if (!ws) throw new Error("no socket");
+    ws.accept();
+    const closed = new Promise<number>((resolve) => ws.addEventListener("close", (e) => resolve(e.code)));
+    await s.meta("fail_v2", "1");
+    await runInDurableObject(s, (_i: TestObject, state) => {
+      state.storage.sql.exec("ALTER TABLE items DROP COLUMN note");
+      state.storage.sql.exec("UPDATE meta SET value = '1' WHERE key = 'schema_version'");
+    });
+    await evictDurableObject(s);
+    ws.send("hello");
+    expect(await closed).toBe(1011);
+  });
+});
+
+describe("RPC method types", () => {
+  it("every SystemObject RPC method returns an RpcResult (checked at compile time)", () => {
+    const check: RpcMethodsReturnResults<SystemObject> = true;
+    expect(check).toBe(true);
   });
 });
 

@@ -579,7 +579,7 @@ CREATE TABLE core_outbox (                                -- generic transaction
 );
 ```
 
-Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3).
+Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. Rows that keep failing to send while the queue is otherwise up are moved to `core_outbox_dead` after 10 attempts **(default)**, and the base class adds that table in its second core migration.
 
 **ChatChannel DO** — one per channel. This is the source of truth for the channel's messages.
 
