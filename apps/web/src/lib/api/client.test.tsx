@@ -41,9 +41,9 @@ function hangingFetch() {
 
 describe("apiRequest", () => {
   it("returns the parsed body on success, with same-origin credentials", async () => {
-    const fetch = fetchReturning(jsonResponse({ status: "ok", version: "1.2.3" }));
+    const fetch = fetchReturning(jsonResponse({ status: "ok", version: "1.2.3", checks: {} }));
     const result = await apiRequest("/health", { schema: healthResponseSchema, fetch });
-    expect(result).toEqual({ ok: true, value: { status: "ok", version: "1.2.3" } });
+    expect(result).toEqual({ ok: true, value: { status: "ok", version: "1.2.3", checks: {} } });
     expect(fetch.mock.calls[0]?.[1]?.credentials).toBe("same-origin");
   });
 

@@ -501,6 +501,13 @@ CREATE TABLE purge_jobs (
   UNIQUE (object_type, object_id)
 );
 
+-- Cron overlap guard (§7.8): one lease per schedule. Excluded from export (job table).
+CREATE TABLE cron_leases (
+  schedule TEXT PRIMARY KEY,         -- five_minutes | hourly | daily (Zod-validated, no CHECK)
+  holder TEXT NOT NULL,              -- ULID of the run holding the lease
+  expires_at INTEGER NOT NULL        -- an expired lease can be taken over
+);
+
 CREATE TABLE embedding_jobs (        -- Phase 3
   id TEXT PRIMARY KEY,
   source_type TEXT NOT NULL,
@@ -557,6 +564,44 @@ This replaces v1.3's "stop at the first match".
 
 ### 2.2 Durable Object SQLite schemas
 
+**Core tables in every DO** (`apps/worker/src/core/do/base.ts`, M0b). Every Durable Object extends the core base class, which owns four tables, versioned separately from the feature schema (`meta.core_schema_version`):
+
+```sql
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);   -- schema_version, core_schema_version, feature keys
+CREATE TABLE core_timers (                                -- alarm multiplexer: the alarm is set to MIN(due_at)
+  name TEXT PRIMARY KEY,                                  -- '<kind>' or '<kind>:<id>', e.g. 'poll:01J…'
+  due_at INTEGER NOT NULL,
+  payload TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,                    -- failed runs; retried with backoff
+  generation INTEGER NOT NULL DEFAULT 0                   -- bumped on reschedule, so a rescheduled timer is kept
+);
+CREATE TABLE core_outbox (                                -- generic transactional outbox, one stream per queue
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream TEXT NOT NULL,
+  body TEXT NOT NULL,                                     -- JSON message, at most 128 KB
+  bytes INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,                    -- failures when sent alone
+  next_attempt_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  strikes INTEGER NOT NULL DEFAULT 0,                     -- core migration 3: failures separated by a success
+  last_strike_at INTEGER                                  -- core migration 3: when the row last gained a strike
+);
+CREATE TABLE core_outbox_dead (                           -- rows given up on (core migration 2); same columns
+  id INTEGER PRIMARY KEY, stream TEXT NOT NULL, body TEXT NOT NULL, bytes INTEGER NOT NULL,
+  attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, dead_at INTEGER NOT NULL
+);
+```
+
+Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. **Outbox failure handling** (`apps/worker/src/core/do/outbox.ts`; `strikes` and `last_strike_at` are added by core migration 3, expand only):
+- *Per-row failures.* Every row that was in a failed send during a drain, and wasn't sent later in it, counts an attempt and backs off on its own: `next_attempt_at = MAX(existing, now + backoff)`, 2 s doubling to 5 minutes, with up to 20 % jitter. Failing chunks are bisected down to single rows. Drains take due rows by `attempts, id`, so rows that never failed go first; failed rows move behind them, so good rows always make progress whatever bad rows are in front of them. `attempts` drives backoff and ordering only.
+- *Order and ride-along.* Due rows are selected by `attempts, id` (at most 500). A drain sends in two phases: first rows that failed before, then fresh rows (attempts 0); the first phase gets at most half the 32-send budget when fresh rows are waiting, so fresh rows are never starved. When fresh rows are present and the stream is healthy (the previous drain delivered something; `outbox_failed_drains:<stream>` absent), up to 4 rows that failed before (most strikes, then most attempts) ride along in the first phase even if they aren't due yet (never during an outage, so backoff holds), so a lone bad row is tested whenever real traffic flows. Failing chunks are bisected right half first. Under a sustained backlog of more than 500 fresh rows per drain, rows that failed before (beyond the ride-along) wait until it clears.
+- *Dead-letter rule: a strike needs proof of health after the failure, in the same drain* **(default)**. The stream keeps a success sequence, `outbox_success_seq:<stream>`, incremented the moment each successful send resolves. When a row fails **on its own** (after bisection) the sequence is noted; at the end of the drain it gains a strike only if a later send in that drain succeeded (end sequence > the noted one) and its previous strike, if any, was at least 10 minutes ago (`minStrikeGapMs`, **(default)**). At 10 strikes **(default)** it moves to `core_outbox_dead`. So an outage adds no strikes, nor does a queue that goes down after a success; a queue alternating between success and failure on every send **can still dead-letter a good row** after 10 strikes, which takes at least 90 minutes of it (accepted, **(default)**); a lone bad row is dead-lettered after ten drains, at least 10 minutes apart, in which fresh rows were sent after it (with no other traffic it is never dead-lettered and keeps retrying); rows written before migration 3 start at 0 strikes. Failures inside multi-row batches never add strikes.
+- *Budget.* A drain makes at most 32 sends and runs at most 4 minutes (both configurable), under the 5-minute outbox timer timeout. If a drain sends nothing, the due rows it didn't reach are pushed back by a stream backoff without attempts, so a down queue isn't re-drained in a tight loop; from 10 such drains in a row it logs at error level.
+- *Guarantees.* At least once. Rows that never failed go out in row-ID order; after failures, newer rows overtake older ones being retried, so consumers must be idempotent and order-tolerant.
+- *`meta` keys used by the outbox:* `outbox_success_seq:<stream>` (successful sends so far; the strike sequence), `outbox_last_success_at:<stream>` (epoch ms of the last one, reported by `stats()` only) and `outbox_failed_drains:<stream>` (consecutive drains that sent nothing; the stream backoff exponent, removed on success; from 10 it logs "no send succeeded in N drains: queue outage or all rows failing"). `Outbox.stats()` reports pending, dead, oldest pending age, max attempts and strikes, success sequence, last success and stream backoff.
+
+**Nothing reads or re-drives `core_outbox_dead` until M7**, which adds it to admin health with a re-drive action; until then dead rows are visible only in the error log and `Outbox.stats()` (admin note).
+
 **ChatChannel DO** — one per channel. This is the source of truth for the channel's messages.
 
 ```sql
@@ -599,7 +644,7 @@ CREATE TABLE outbox (
 );
 
 CREATE TABLE meta (
-  key TEXT PRIMARY KEY,    -- schema_version, channel_id, log_horizon_seq, timers
+  key TEXT PRIMARY KEY,    -- schema_version, channel_id, log_horizon_seq (timers: core_timers above)
   value TEXT
 );
 ```
@@ -848,8 +893,8 @@ Limits: body up to 40 KB, which stays far below the 8 MB DO row limit; up to 20 
 3. After the commit, the DO sends `{type: "ack", clientId, seq, id}` to the sender and `{type: "event", seq, ...}` to every connected socket. DO output gating means no acknowledgement leaves the object before its write is durable.
 4. The **alarm handler** drains the `outbox` in `seq` order, in batches of up to 100. For each event it sends the **current full state** of the affected message (from `messages`, not the event delta) to the `message-projection` Queue with `sendBatch`.
    - Rows are deleted only after the send succeeds.
-   - On failure the DO increments `attempts` and reschedules with exponential backoff, capped at 5 minutes.
-   - DOs have one alarm each. Other timers (typing expiry, log trimming) are kept in `meta.timers`, and the alarm is always set to the earliest due timer.
+   - On failure the DO increments `attempts` and reschedules with exponential backoff, capped at 5 minutes. M0b's generic outbox (§2.2) adds bisection of failing chunks, a per-drain send budget, the ride-along and the strike rule for dead-lettering; a queue alternating on every send can still dead-letter a good row after 10 strikes, at least 90 minutes **(default)**.
+   - DOs have one alarm each. Other timers (typing expiry, log trimming) are named timers in `core_timers` (§2.2), and the alarm is always set to the earliest due timer.
 5. The **queue consumer** upserts into D1 `messages`:
    ```sql
    ... ON CONFLICT (channel_id, seq) DO UPDATE SET ...
@@ -1465,7 +1510,7 @@ CREATE TABLE object_sizes (          -- reported by DOs after compaction or dail
 
 ### 7.8 Scheduled jobs
 
-Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
+Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The dispatcher (`apps/worker/src/core/cron.ts`) runs each schedule's jobs one after another, each with its own timeout (60 s by default) and error isolation. A run takes the schedule's lease in `cron_leases` (§2.1), so a trigger that fires while the previous run of the same schedule is still going skips; leases expire after 15 minutes, and a schedule's job timeouts must add up to less than that. If the lease can't be checked (D1 unavailable), the jobs run unguarded and the error is logged **(default)**: jobs are idempotent, and skipping would stall purges.
 
 | Job | Schedule | Section |
 |---|---|---|
@@ -1542,6 +1587,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - **Headers:**
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'` plus the Realtime SFU endpoints.
   - HSTS, `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`.
+  - API responses (`/api/*`, `/health`) are `Cache-Control: no-store`. A route's own `Cache-Control` is parsed into directive names (split on commas, trimmed, the name before any `=`, lower-cased) and kept only if it has a bare `private` (no `=` qualifier) or `no-store`, and no `public` or `s-maxage` (for example `private, max-age=60`). Everything else, including no header and `no-cache` alone (which still lets shared caches store the response), is replaced with `no-store`, so API data is never stored by shared caches.
 - **Rendering user content:**
   - The server never renders user HTML.
   - Rich text is ProseMirror JSON constrained by the Tiptap schema.

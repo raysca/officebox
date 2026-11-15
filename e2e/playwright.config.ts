@@ -6,6 +6,12 @@ const PORT = Number(process.env.E2E_PORT ?? 8788);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const CI = Boolean(process.env.CI);
 
+// Behind an HTTP proxy, Playwright's readiness probe of the local server (and the browser's requests)
+// must not go through the proxy. Add the loopback hosts to NO_PROXY for this process and the server.
+const noProxy = [process.env.NO_PROXY ?? process.env.no_proxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
+process.env.NO_PROXY = noProxy;
+process.env.no_proxy = noProxy;
+
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: true,
@@ -24,6 +30,6 @@ export default defineConfig({
     // is taken, Playwright fails with a clear error; pick another with E2E_PORT.
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { WRANGLER_SEND_METRICS: "false" },
+    env: { WRANGLER_SEND_METRICS: "false", NO_PROXY: noProxy, no_proxy: noProxy },
   },
 });

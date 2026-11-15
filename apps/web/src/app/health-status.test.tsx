@@ -12,7 +12,9 @@ describe("HealthStatus", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
-        Promise.resolve(healthy ? jsonResponse({ status: "ok", version: "0.1.0" }) : new Response("", { status: 400 })),
+        Promise.resolve(
+          healthy ? jsonResponse({ status: "ok", version: "0.1.0", checks: {} }) : new Response("", { status: 400 }),
+        ),
       ),
     );
     const client = createQueryClient();
