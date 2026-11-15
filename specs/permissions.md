@@ -1,7 +1,7 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; token wording, the owners' invite gate and "no impersonation" updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; token wording, the owners' invite gate, "no impersonation", step-up, promotion rules and the domain move updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
 **Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Platform](platform.md)
 
@@ -199,7 +199,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Edit own profile, status, handle, sign-in methods, devices | ✓ | — | — | — | — |
 | Change someone's email · issue a recovery link · disable · delete · sign out all sessions | — | — | — | **Members only** | Anyone |
 | Change role to member or admin | — | — | — | — (admins can't promote) | ✓ |
-| Invite with role member | — | — | — | ✓ | ✓ (once the owner has a second passkey or `RECOVERY_TOKEN` is set) |
+| Invite with role member | — | — | — | ✓ | ✓ (once the owner has a second passkey or a set, unconsumed `RECOVERY_TOKEN`) |
 | Invite with role admin | — | — | — | — | ✓ (same condition) |
 | Create, rename or delete groups; appoint managers | — | — | — | ✓ | ✓ |
 | Add or remove group members | — | — | Own group | ✓ (adding **themselves** needs an owner) | ✓ |
@@ -259,13 +259,16 @@ effective role(user, item) = max(
 | Power | Admin | Owner |
 |---|---|---|
 | Invite members | ✓ | ✓ |
-| Invite or promote admins; demote admins; manage owners | — | ✓ |
+| Invite or promote admins; demote admins; manage owners | — | ✓ (promoting to admin needs the person to have a passkey; to owner, two passkeys or an unconsumed `RECOVERY_TOKEN`) |
 | Change email, issue recovery link, disable, re-enable, delete, sign out all sessions: **members** | ✓ | ✓ |
+| **Move the workspace's domain** (two steps, Identity §4.4) | — | ✓ |
 | Same actions on **admins or owners** | — | ✓ (an owner can't disable or delete the last owner) |
 | Transfer content of leavers (My files, organised events, owned calendars) | ✓ | ✓ |
 | Archive, delete or remove members of **any** channel, including private ones (without reading) | ✓ | ✓ |
 | Join or read **private channels, DMs or restricted items** they haven't been given | **—** | **—** |
 | Delete messages in private channels they're a member of (added by a member) | ✓ | ✓ |
+
+**Step-up** ([Identity](identity.md) §4.5): these powers also need a **fresh passkey assertion within the last 10 minutes** on the acting session, otherwise the typed error `reauth_required`: changing a role (including promotion to admin or owner), changing an email address, issuing a recovery link, moving the domain, and adding or removing one's own passkeys. The permission engine decides *whether* the actor may act; the step-up check runs after it and decides *whether this session may act now*. Both are tested, allowed and denied.
 | Moderate messages in private channels they're not in | — | — |
 | Add **themselves** to a group, or grant **themselves** a role on a group drive or folder | — (needs an owner) | ✓ |
 | Delete a private event whose organiser is disabled or deleted (without seeing details) | ✓ | ✓ |
@@ -277,7 +280,7 @@ effective role(user, item) = max(
 **Notification and token revocation:**
 - When anyone issues a **recovery link** for a person or **changes their email**:
   - an email goes to the person's **current (old) address** (if email is configured): "Your Officebox email was changed by *Admin Name* on *date*" or "*Admin Name* issued a recovery link for your account"
-  - a **notice on the sign-in page** and after sign-in, on any device (`users.pending_security_notice`), plus a `security_notice` inbox item
+  - a **notice on the sign-in page** and after sign-in, on any device (`users.pending_security_notice`, a list acknowledged only on a fresh passkey sign-in), plus a `security_notice` inbox item from M2
   - **without email configured**, the recovery link is also **flagged to every owner** on the member list until an owner acknowledges it (Identity §4.6)
   - all their **pending magic links and recovery tokens are revoked**, except the newly issued recovery link
   - an audit entry is written.
@@ -380,6 +383,9 @@ The engine is internal. It's exposed only through:
 - **Admin powers:**
   - an admin can't issue a recovery link, change the email of, disable or delete an admin or owner; an owner can
   - an admin can't invite or promote an admin
+  - each step-up action returns `reauth_required` without a fresh passkey assertion and succeeds with one
+  - promotion is refused when the person lacks the required passkeys
+  - only an owner can start or commit a domain move
   - a recovery link or email change sends an email to the old address, shows the sign-in notice, and revokes pending tokens
   - without email configured, a recovery link flags the member to every owner until acknowledged
   - an admin adding themselves to a group, or granting themselves a group-drive role, gets 403; an owner can do it for them.

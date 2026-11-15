@@ -1,7 +1,7 @@
 # Spec: Notifications & Attention
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; `security_notice` kinds added for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2: passkey added, magic-link sign-in from a new device, owner recovery used)
+**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; `security_notice` kinds and delivery updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2, §4.6a: passkey added, magic-link sign-in from a new device, owner recovery used, domain moved; banner until acknowledged on a fresh passkey sign-in; email only when configured). Only the §3 row and the §9 M1 row changed.
 **Feature name:** Notifications (marketing name to be decided later)
 **Milestone:** M2 core ([PLAN](../PLAN.md)), extended by each feature milestone (§9) · **Related:** PRD §8; TDD §3.5; [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Identity & Access](identity.md), [Assistant](assistant.md), [Platform](platform.md)
 
@@ -68,7 +68,7 @@ Every notification is an `inbox_items` record (§3.1, §7) with an `event_type`.
 | `assistant_nudge` | Commitment nudge after the member's own message ("Want a reminder…?", Assistant §8) | The author, if opted in and with assistant access | As `assistant_brief` | `assistant_nudge:<messageId>` | The member opens the assistant DM |
 | `assistant_reply` | A long assistant task finished (for example an audio file is ready, Assistant §9) | The member who asked | As `assistant_brief` | `assistant_reply:<turnId>` | The member opens the assistant DM |
 | `personal_reminder` | A personal reminder is due (ReminderScheduler `personal_reminder`, Assistant §7.1) | The member who owns it | In-app; email after the delay | `personal_reminder:<reminderId>` | The member marks it done or dismisses it |
-| `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected, passkey added, magic-link sign-in from a new device, owner recovery used** (Identity §4.4, §4.6, §4.11) | The affected member (and, for passkey clone detection, owners; for owner recovery used, the **other** owners) | In-app **and email (always; to the old address for an email change)**, not affected by levels or DND | `security_notice:<kind>:<id>` | Dismissed |
+| `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected, passkey added (not the first at setup or acceptance), magic-link sign-in from a new device, owner recovery used, domain moved** (Identity §4.4, §4.6, §4.6a, §4.11) | The affected member (and, for passkey clone detection, owners; for owner recovery used and domain moved, the **other** owners) | **Sign-in banner** (`users.pending_security_notice` list) until acknowledged on a fresh passkey sign-in, **plus email whenever email is configured** (to the old address for an email change); the inbox record from M2 (§9). Not affected by levels or DND | `security_notice:<kind>:<id>` | Dismissed |
 
 **Reserved for Phase 2** (projects and issues, PRD §5.6): `assignment`, `review_request`. They're not raised in the first release.
 
@@ -323,7 +323,7 @@ What ships in each milestone. Later slices extend earlier ones; nothing ships be
 
 | Slice | Events | Levels and behaviour | Timers |
 |---|---|---|---|
-| **M1** | `security_notice` by **email and the sign-in-page banner** (Identity §4.6) | — | — |
+| **M1** | `security_notice` by the **sign-in banner** (until acknowledged on a fresh passkey sign-in) **and email when configured** (Identity §4.6a) | — | — |
 | **M2** | `security_notice` as inbox records too | `inbox_items` with grouping and reopening (§3.1); notification panel, toasts, sounds, badges, live regions; `user_preferences`, `user_availability`; manual DND and DND schedule (holding banners and sounds); presence and the 2-minute active rule; derived availability (§5.7) and disclosure | ReminderScheduler kinds `dnd_until_end`, `dnd_start`, `dnd_end` (Platform §11); held-notification summary |
 | **M3a** | `mention`, `group_mention`, `channel_mention`, `here_mention`, `dm` | Levels **All** and **Mentions** per conversation; never notify yourself; access checked at delivery; retraction on message deletion | — |
 | **M3b** | `thread_reply`, `poll_closed` | Thread follows, unfollow and muted follows | Poll close (channel DO) |

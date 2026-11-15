@@ -445,10 +445,12 @@ Initial product direction:
 First-release sign-in and security (detail in [specs/identity.md](specs/identity.md)):
 
 - **Passwordless: passkeys, plus magic links by email for members.** There are no passwords. Everyone signs in with a passkey, and passkeys always require the device's PIN or biometric (user verification). Members can also use a magic link when email is configured; **owners and admins use passkeys only**. Owners are reminded to keep **two passkeys** (for example a laptop and a phone) and can't invite anyone until they have a second passkey or the recovery secret is set. Passkeys are tied to the workspace's address, which is recorded at setup and changed only by an owner (§13).
-- People are told about every new passkey on their account and about a magic-link sign-in from a new device.
+- People are told about every new passkey on their account, a magic-link sign-in from a new device, recovery, email changes and address moves, by a banner after sign-in that stays until they acknowledge it on a fresh passkey sign-in, and by email when it's configured.
+- **Sensitive actions need a fresh passkey:** adding or removing a passkey, moving the workspace address, changing a role or email address, and issuing a recovery link all require a passkey sign-in within the last 10 minutes.
+- **Moving the workspace address** takes two steps: an owner starts the move, then registers a passkey on the new address, which commits it. The old address redirects afterwards.
 - Built on **better-auth**, an MIT-licensed authentication library, pinned to exact versions and upgraded only after reviewing its security advisories.
 - Secure browser sessions: 30 days, sliding. Members can see their devices and sign them out ("My devices" doubles as login-activity visibility).
-- **Scanner-safe email links:** magic-link, reset, recovery, invitation and email-change links open a confirmation page, and only a deliberate click uses them. Mail scanners can't use them up.
+- **Scanner-safe email links:** magic-link, recovery, invitation and email-change links open a confirmation page, and only a deliberate click uses them. Mail scanners can't use them up.
 - A lost passkey is replaced by signing in with a magic link (members, when email is configured) or with a recovery link (from an admin for members, from an owner for admins and owners). Email changes are confirmed through the new address.
 - **Admin powers are limited:**
   - Admins can disable, delete, change the email of, or issue a **recovery link** to *members*.
@@ -769,9 +771,10 @@ D1 Time Travel provides point-in-time recovery to any minute within the last 30 
   - channel messages
   - document and whiteboard state, both in native Yjs form and as readable Markdown or JSON
   - all files and their versions
-  - calendars, events, attendees and time off; drives and folders; comments; polls (votes as hashed keys only); saved items and preferences.
+  - calendars, events, attendees and time off; drives and folders; comments; polls (votes as hashed keys only); saved items and preferences
+  - **passkey public keys**, so a restore onto the same workspace address keeps passkeys working (on another address, people register again).
 
-  **Excluded:** sessions, sign-in tokens, passkeys (members register again after a restore to a new domain), MFA secrets, ICS feed tokens and the URLs of subscribed external calendars, which are secrets. Full coverage is in [platform §6](specs/platform.md).
+  **Excluded:** sessions, sign-in tokens, MFA secrets, ICS feed tokens and the URLs of subscribed external calendars, which are secrets. Full coverage is in [platform §6](specs/platform.md).
 
   **Assistant data:** the export includes assistant interaction metadata, and call notes and transcripts within retention. It **excludes** assistant conversations and memory **(default)**, because admins can't read them, and personal reminders. Members download these themselves with "Download my assistant data" ([specs/assistant.md](specs/assistant.md) §13).
 

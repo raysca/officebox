@@ -161,36 +161,41 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 **Must (also):** the "My devices" session list. **Should:** the "allowed email domains" setting for invitations.
 
 **Slices** (product-owner decision, 15 Nov 2026; revised the same day for passwordless sign-in and after review). Each is one branch and PR with its own independent review, built in this order, except M1p, which can be built in parallel:
-- **M1a-0 — better-auth spike (time-boxed, throwaway, in `spikes/`):** answers the feasibility list in TDD §10 (v1.7): the D1 adapter with our names, epoch-ms dates and no transactions; in-process magic-link verify, `storeToken: "hashed"` and unknown emails under `disableSignUp`; passkey `requireSession: false` with `resolveUser`, required user verification, and how a hook reads the counter (settling our own clone check versus the library's); hook coverage for user creation, session creation and deletion; the `BETTER_AUTH_SECRETS` format; the `__Host-` cookie prefix; the origin check with our CSRF header and the token-stripping filter; the rate-limit storage interface; `trustedOrigins`, `baseURL` and `rpID` from the installation record; `nodejs_compat` and bundle size. Each answer is recorded in TDD §10, and any design change lands in the specs before M1a starts.
+- **M1a-0 — better-auth spike (time-boxed, throwaway, in `spikes/`):** answers the feasibility list in TDD §10 (v1.7): the D1 adapter with our names, epoch-ms dates and no transactions; in-process magic-link verify, `storeToken: "hashed"` and unknown emails under `disableSignUp`; passkey `requireSession: false` with `resolveUser`, required user verification, and how a hook reads the counter (settling our own clone check versus the library's); hook coverage for user creation, session creation and deletion; the `BETTER_AUTH_SECRETS` format; the `__Host-` cookie prefix; the origin check with our CSRF header and the token-stripping filter; the rate-limit storage interface; `trustedOrigins`, `baseURL` and `rpID` from the installation record; step-up re-authentication without a second session; a second instance for a pending domain move; `nodejs_compat` and bundle size. Each answer is recorded in TDD §10, and any design change lands in the specs before M1a starts.
+  - **Go/no-go:** better-auth is a no-go if it fails on D1 without transactions, if `user.create.before` can't be shown to cover every user-creation path, or if no hook (or library error) reliably exposes counter regressions.
+  - **Fallback:** keep the hand-built sessions from the M1a branch (PR #17), add passkeys with `@simplewebauthn/server` directly and our own magic links, keep every Identity §4 rule, and **report back to the product owner** before M1a proceeds (TDD §10).
 - **M1a — better-auth foundation, setup with a passkey and sessions:**
   - better-auth wired into Hono (`auth.handler`), pinned, configured from the canonical origin, with the default-deny allowlist, the token-stripping filter, mapped tables and generated migrations
   - first-run setup with the setup token and an atomic claim: WebAuthn preflight, canonical origin, **the owner's passkey** (enrolment ticket bound to the challenge, consumed at verify), resume guard and 24-hour expiry
   - **passkey sign-in** with user verification required and the counter rule chosen in M1a-0
   - better-auth sessions (30 days sliding, cookie cache off, primary reads, `session.create.before` status check), sign out, sign out everywhere and "My devices", with socket-revocation hooks wired for M2
+  - **step-up** (`fresh_auth_at`, `POST /me/reauth`, the typed `reauth_required`)
+  - **signed-in passkey management:** add, rename and remove passkeys, with step-up, the last-passkey rules, labels for how each was created, the owners' second-passkey reminder and the `*.workers.dev` warning. It's here so an owner can meet the M1b invite gate.
+  - the **security-notice banner list** (`users.pending_security_notice`) with acknowledgement on a fresh passkey sign-in. **Interim:** notices for passkeys added in M1a are written to the banner list only; email for them starts in M1b.
+  - the hourly identity repair job's setup half (complete setup when the owner has a passkey) and one-batch claim expiry
   - CSRF header and canonical `Origin` checks; rate limits in our middleware on setup and passkey sign-in
   - the `/not-configured` page and the deploy step that creates `BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` if missing
   - the M1a branch's password sign-in, refresh rotation, `session_epoch`, sign-in throttle, slow mode and `PEPPER_1` / `SESSION_SIGNING_KEY` are replaced, not merged
 - **M1p — Permission engine core:** the permission engine in `packages/shared` with workspace roles, and the first matrix test. **Why separate:** it is pure shared-package logic with no dependency on better-auth, so taking it out keeps M1a reviewable in one sitting and lets it run in parallel after M0. It must land before M1b, whose invitation rules use it. (Lettered "p" so the other slice letters stay as approved.)
 - **M1b — Email, invitations and magic links:**
   - the email adapter (Cloudflare Email Service binding by default; Resend, Postmark, SES and SMTP over STARTTLS as alternatives), its queue, retries and dead-letter queue, and **Send test email**
-  - invitations: copy link and email, single-use, 7-day expiry, role at invite time, links built from the canonical origin with the token in the fragment; the owners' second-passkey gate
-  - the accept flow: invitation consumed by compare-and-set, account created through better-auth with the accept marker, handle claimed, the repair job; the passkey registered; reopening guarded (410)
+  - invitations: copy link and email, single-use, 7-day expiry, role at invite time, one pending invitation per normalised email, links built from the canonical origin with the token in the fragment; the owners' gate (second passkey, or `RECOVERY_TOKEN` set and unconsumed) on every owner invite
+  - the accept flow: invitation consumed by compare-and-set with an attempt ID, account created through better-auth with the accept marker, handle claimed, the repair job's invitation half (never resurrecting a consumed invitation); the passkey registered; reopening guarded (410)
   - **magic links for members only** through our confirmation page, consumed by our compare-and-set, limited per normalised email and per IP without extending a victim's window
-  - the **`security_notice` mechanism** (email and the sign-in banner, notifications §9 M1) for passkey additions and new-device magic-link sign-ins
+  - **email delivery of security notices** (notifications §9 M1), joining the M1a banner, for passkey additions and new-device magic-link sign-ins
   - the "allowed email domains" setting (Should)
 - **M1c — Recovery, passkey management and email change:**
-  - recovery links (copy link), with the notices, owner flag, token revocation and invalidation of other enrolment tickets
-  - owner recovery with `RECOVERY_TOKEN` (consumed hash, constant-time compare, IP limit, notice to the other owners)
-  - extra passkeys: add, rename, remove (last-passkey rules), labels for how each was created, the owners' second-passkey reminder and the `*.workers.dev` warning
-  - the **email-change flow** (confirmation link, notice to the old address, magic links revoked by email)
-  - the owner's **domain move** (`POST /admin/domain`)
+  - recovery links (copy link, step-up to issue, resumable until a passkey is registered), with the notices, owner flag, token revocation and invalidation of other enrolment tickets
+  - owner recovery with `RECOVERY_TOKEN` (`recovery_token_uses` rows, constant-time compare, IP limit, notice to the other owners)
+  - the **email-change flow** (step-up, confirmation link, notice to the old address, magic links revoked by email)
+  - the owner's **two-step domain move** (step-up start, commit by passkey registration on the new origin, 24-hour expiry, old-host redirect, token revocation, notices)
 - **M1d — Profiles and directory:**
   - display name, avatar (R2), time zone, working hours, location or region, status text with emoji
   - @handles
   - the member directory
 - **M1e — Groups and administration:**
   - admin-managed groups
-  - members administration: list, change role, disable, delete (anonymise), sign out all sessions
+  - members administration: list, change role (with step-up and the promotion passkey rules), disable, delete (anonymise), sign out all sessions
   - admin-power limits
   - audit coverage for every admin action
   - the full M1 permission matrix (workspace roles, groups, profiles)
@@ -202,6 +207,20 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 - **Clone detection:** a counter regression is refused as `clone_detected` with no session left behind, and a race between two legitimate sign-ins raises no alert.
 - **Concurrent tokens:** two concurrent confirm POSTs with one magic-link token, two concurrent registration verifies with one enrolment ticket, and two concurrent accepts of one invitation each succeed at most once.
 - **Session expiry** (injected clock): a session unused for 30 days is rejected and one used on day 29 is extended; a revoked session fails on its next request.
+- **Invite gate:** an owner with one passkey and no unconsumed `RECOVERY_TOKEN` is refused on every invite (negative), and succeeds once they add a second passkey or set the secret (positive); a consumed secret no longer satisfies it; an admin can still invite members.
+- **Further tests** (Identity §9), each passing:
+  - user verification: an assertion or registration without UV is refused
+  - the 410 guards on setup resume, invitation reopening and recovery-link reuse
+  - setup: claim expiry (one batch, never deleting an owner with a passkey or session) and the WebAuthn preflight
+  - magic links refused for owners, admins, unknown, disabled and promoted users, with an identical response
+  - auth routes refused on a non-canonical host
+  - fragment-token pages and their `Referrer-Policy: no-referrer` and `Cache-Control: no-store` headers
+  - CSRF denial on our routes and better-auth's
+  - rate limits, including no extension of a flooded email's window
+  - the repair job: setup completion, and never releasing an invitation whose attempt ID is on a user (deleted included) or handle
+  - the domain move: step-up, commit only by registration on the new origin, expiry, the old-host redirect, token revocation
+  - step-up: `reauth_required` for each sensitive action without a fresh passkey assertion
+  - banner acknowledgement only on a fresh passkey sign-in
 - No response body or log line contains a session token, and the route allowlist holds against path-normalisation tricks.
 - Every account-creation path without the setup or accept marker is refused (Identity §9).
 - The permission engine passes its M1 matrix test (workspace roles, groups, profiles).

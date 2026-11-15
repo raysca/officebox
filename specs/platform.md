@@ -1,7 +1,7 @@
 # Spec: Platform Rules
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for passwordless sign-in on better-auth (15 Nov 2026, [Identity](identity.md) §2): §2, §3, §5–§8, §10, §14, §16 and §17, then for the product owner's answers and the review of that change (same day)
+**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for passwordless sign-in on better-auth (15 Nov 2026, [Identity](identity.md) §2): §2, §3, §5–§8, §10, §14, §16 and §17, then for the product owner's answers and two reviews of that change (same day: step-up, the two-step domain move, the notice banner, setup and invitation repair, timers)
 **Feature name:** Platform Rules (cross-cutting; not a user-facing feature)
 **Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md)
 
@@ -35,7 +35,8 @@ The rules every feature follows, so features behave consistently and no data is 
 | External event invitations | **On by default**, capped at **50 external recipients per member per day**. Admins can turn them off. |
 | ICS-in subscriptions | **Personal only.** URLs encrypted and masked. |
 | Owners' sign-in | **Passkeys only** (passwordless, and no magic links: those are for members only). User verification is required. Owners are reminded to keep **two passkeys** and **can't invite anyone until they have a second passkey or a set `RECOVERY_TOKEN`**; they recover through another owner's recovery link or `RECOVERY_TOKEN` ([Identity](identity.md) §2, §4.6). Changed 15 Nov 2026 from "owners must keep a password". |
-| Canonical origin | Recorded in `installation` at the setup claim (canonical origin and allowed hosts). Auth routes answer only there; the passkey relying-party ID and **every emailed or copied link** come from it, never the request's `Host`. Changed only by an owner's explicit domain move ([Identity](identity.md) §2, §4.4). |
+| Canonical origin | Recorded in `installation` at the setup claim (canonical origin and allowed hosts). Auth routes answer only there; the passkey relying-party ID and **every emailed or copied link** come from it, never the request's `Host`. Changed only by an owner's **two-step domain move**, committed by a passkey registration on the new origin; the old host then redirects (302/307, never 301) ([Identity](identity.md) §2, §4.4). `allowed_hosts` entries come only from the setup claim and committed moves. |
+| Step-up | Sensitive actions (passkey add or remove, domain move, role changes and promotion, recovery links, email changes) need a passkey assertion within the last 10 minutes; otherwise `reauth_required` ([Identity](identity.md) §4.5) |
 | Admin self-access | Admins need an **owner** to add themselves to a group or grant themselves drive or folder access; audited ([Permissions](permissions.md) §6) |
 | Recovery links without email | Allowed for members, but **loudly flagged**: a notice on the member's sign-in page and a flag on the owners' member list |
 | Group or channel calendar purged | Each event **moves to its organiser's personal calendar**, so attendees keep it. Events whose organiser is deleted are deleted, and attendees get `event_cancel`. |
@@ -155,6 +156,9 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | `ws_tickets` | Deleted daily after expiry | No | — |
 | `auth_tokens` | Deleted 7 days after use or expiry | No | — |
 | `auth_verifications` (better-auth: magic-link tokens, WebAuthn challenges) | Deleted on use; expired rows deleted daily | No | — |
+| `magic_link_issues` | Deleted 7 days after use, revocation or expiry | No | — |
+| `user_devices` | Deleted after 400 days unused **(default)**, and with the user | No | — |
+| `recovery_token_uses` | Kept (so a used `RECOVERY_TOKEN` value never works again) | No | — |
 | `pending_emails` | Deleted when sent or cancelled | No | — |
 | **Assistant conversations and memory** (Assistant DO) | `assistant_memory_retention_days` (365 **(default)**), or shorter if the member chose; applied by the DO's daily `retention_sweep`, which keeps running while the assistant is off. **Incognito** conversations: deleted at End or 24 hours after last activity **(default)**. Content whose source the member lost access to: deleted after 7 days hidden **(default)**. Undecided pending items: 30 days **(default)**. Finished, cancelled and expired pending actions: 24 hours ([Assistant](assistant.md) §4, §5.1, §13). | No | — |
 | `assistant_interactions` (metadata) | `assistant_interaction_retention_days` (30, PRD §10.2) | No | — |
@@ -216,6 +220,7 @@ The single list of workspace settings. Feature specs reference this table instea
 |---|---|---|---|---|
 | `allowed_invite_domains` | off (any domain) | Admin | `settings.invite_domains` | Identity §4.2 |
 | `magic_link_enabled` | on when email is configured | Admin | `settings.magic_link` | Identity §4.11 |
+| Canonical origin (domain move) | the setup claim's origin | **Owner**, with step-up, in two steps (start, then commit by registering a passkey on the new origin); not a `PATCH /admin/settings` key | `domain.move_started`, `domain.move_committed`, `domain.move_cancelled`, `domain.move_expired` | Identity §4.4 |
 | `default_channels` | `#general` (**public channels only**) | Admin | `settings.default_channels` | Identity §4.3 |
 | `welcome_post_enabled` | on | Admin | `settings.welcome_post` | Identity §4.3 |
 | `general_read_only` | off | **Owner** | `settings.general_read_only` | Chat §3.1 |
@@ -402,6 +407,10 @@ Our tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.r
 | Room-registry sweep | Daily cron | §12 |
 | Purge, retention, reconciliation, version thinning, release check | Daily cron | TDD §7.8. The purge job also deletes expired `assistant_interactions`, `call_transcript_segments` past retention (and their vectors), `file_derived_text` for purged versions, and finished `personal_reminders` (Assistant §14.3). |
 | Scheduled-trigger refill | Hourly cron | Below |
+| Identity repair job | Hourly cron | Completes setup when the owner has a passkey but setup isn't complete; rolls forward or releases partial invitation accepts under the rules in [Identity](identity.md) §4.3; idempotent |
+| Setup claim expiry | Hourly cron, and the next setup request | One conditional batch, 24 hours after the claim ([Identity](identity.md) §4.1) |
+| Pending domain move expiry | Hourly cron | 24 hours after the start **(default)** |
+| Identity token sweeps | Daily cron | Deletes expired `auth_verifications`, `magic_link_issues` 7 days after use or expiry, `auth_tokens` 7 days after use or expiry, and `user_devices` unused for 400 days (§5) |
 
 **Offline unread email:**
 1. When a qualifying notification (mention, DM, thread reply, …) is created for an offline or inactive member, the consumer inserts a row into **`pending_emails`** with a uniqueness key `(user_id, conversation_id, window)`. `window` is the time bucket of the member's delay, so repeated events in one conversation share one row. Queues don't deduplicate, so this table does.
@@ -533,7 +542,12 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `sessions` | Add | `device_label`, `approx_location` (better-auth `additionalFields`). **Not created:** `refresh_token_hash`, `session_epoch`, `previous_refresh_hash`, `rotated_at`, `revoked_at` and the M1a draft's `retired_refresh_hashes` (15 Nov 2026: no refresh tokens) | Identity §4.5, §5 |
 | `users` | Add | `admin_reset_at`, `admin_reset_by`, `admin_reset_acknowledged_by` (no-email recovery flag) | Identity §4.6, §5 |
 | `auth_tokens.kind` | Values | `recovery`, `email_change`, **`passkey_enrol`** (enrolment tickets, bound to a registration challenge in `payload`); plus `payload` and `revoked_at` columns. `magic_link` moves to better-auth's `auth_verifications` plus our `magic_link_issues`; `password_reset` is removed (15 Nov 2026). | Identity §4.4, §4.11, §5 |
-| `installation` | Add columns | `canonical_origin`, `allowed_hosts` (JSON), written at the setup claim and by an owner's domain move; `setup_claimed_at` (incomplete claims expire after 24 hours); `recovery_token_consumed_hash` (owner recovery can't reuse a value) | Identity §4.1, §4.4, §4.6; TDD §2.1, §6.8 |
+| `installation` | Add columns | `canonical_origin`, `allowed_hosts` (JSON), written at the setup claim and by an owner's domain move; `setup_claimed_at` (incomplete claims expire 24 hours after the claim); `pending_origin`, `pending_origin_started_by`, `pending_origin_expires_at` (two-step domain move) | Identity §4.1, §4.4; TDD §2.1, §6.8 |
+| `recovery_token_uses` | New table | One row per `RECOVERY_TOKEN` value used (hash, owner, time), replacing a single consumed-hash column | Identity §4.6, §5 |
+| `sessions` | Add columns | `fresh_auth_at`, `fresh_auth_method` (step-up) | Identity §4.5, §5 |
+| `invitations` | Add columns | `email_normalised` with a **unique index on pending invitations**; `accepted_attempt_id` (repair job; `accepted_by` holds the accepted user) | Identity §4.2, §4.3, §5 |
+| `users`, `handles` | Add column | `created_attempt_id` (repair job) | Identity §4.3, §5 |
+| `users.pending_security_notice` | Shape | A JSON **list** of notices (kind, time, details), not a single notice | Identity §4.6a |
 | `users` | Add columns | `email_normalised` (trim, lowercase, NFKC) with a **unique index**; `first_signed_in_at` (gates setup resume and invitation reopening) | Identity §4.1, §4.3, §5 |
 | `passkeys` | Add column | `created_via` (`setup`, `invitation`, `recovery_link`, `owner_recovery`, `magic_link`, `signed_in`; Zod) | Identity §4.4, §5 |
 | `magic_link_issues`, `user_devices` | New tables | Our consumption and revocation record for magic links, and known devices for the new-device notice; excluded from export | Identity §4.4, §5 |
@@ -620,7 +634,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 | `DATA_ENCRYPTION_KEY` | Encrypts ICS-in URLs (and MFA secrets later) | Yes (from M5c) | Re-encrypt on rotation (migration job) |
 | `POLL_SECRET_KEY` | Derives per-poll secrets for anonymous voter keys (alternatively, per-poll secrets are generated and stored in the channel DO) **(default: derive)** | Yes (from M3b) | Never rotated for existing polls; rotating changes keys only for new polls |
 | `SETUP_TOKEN` | First-run setup | Optional (generated if absent) | Ignored after setup; delete it |
-| `RECOVERY_TOKEN` | Owner recovery: lets one owner register a new passkey, once ([Identity](identity.md) §4.6). **At least 32 characters**, compared in constant time, rate-limited per IP. Its hash is recorded as consumed after use, so the same value never works twice. Setting it also satisfies the owners' second-passkey gate before inviting. | Optional | Set a fresh value for each recovery, then delete |
+| `RECOVERY_TOKEN` | Owner recovery: lets one owner register a new passkey, once ([Identity](identity.md) §4.6). **At least 32 characters**, compared in constant time, rate-limited per IP. Its hash is recorded as consumed after use, so the same value never works twice. While **set and not yet consumed**, it also satisfies the owners' gate before inviting and promotion to owner. Used values are kept as rows in `recovery_token_uses`. | Optional | Set a fresh value for each recovery, then delete |
 | Email provider key(s), SMTP credentials | Outgoing email when not using the default Cloudflare Email Service binding, which needs no secret | Optional | Rotate at the provider |
 | `REALTIME_APP_ID`, `REALTIME_APP_SECRET` | Realtime SFU for calls | Optional (calls) | Rotate in the Cloudflare dashboard |
 | `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | TURN credentials | Optional | Rotate in the dashboard |
