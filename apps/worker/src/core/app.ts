@@ -68,11 +68,13 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) c.header(name, value);
     const isApi = path === "/api" || path.startsWith("/api/") || path === "/health";
     c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
-    // API responses carry user data: never cached, whichever helper built the response. A route may
-    // set its own private Cache-Control (for example `private, max-age=60`), but never a public one:
-    // anything containing `public`, or no header at all, becomes `no-store` (TDD §8.2).
+    // API responses carry user data: never stored by shared caches, whichever helper built the
+    // response. A route's own Cache-Control is kept only if it says `private`, `no-store` or
+    // `no-cache`; anything else (no header, `public`, a bare `max-age`, `s-maxage`) becomes
+    // `no-store` (TDD §8.2).
     const cacheControl = c.res.headers.get("Cache-Control");
-    if (isApi && (cacheControl === null || /\bpublic\b/i.test(cacheControl))) c.header("Cache-Control", "no-store");
+    const keep = cacheControl !== null && /\b(private|no-store|no-cache)\b/i.test(cacheControl);
+    if (isApi && !keep) c.header("Cache-Control", "no-store");
     // Assets fall-through and health probes are noisy and carry nothing worth keeping.
     if (path.startsWith("/api/") || path === "/api") {
       log.info("request", {

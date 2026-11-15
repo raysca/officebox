@@ -27,6 +27,10 @@ const sample = new Hono<AppEnv>()
   .get("/raw", (c) => c.json({ raw: true }))
   .get("/private-cache", (c) => c.json({ mine: true }, 200, { "Cache-Control": "private, max-age=60" }))
   .get("/public-cache", (c) => c.json({ public: true }, 200, { "Cache-Control": "public, max-age=60" }))
+  .get("/cc/:i", (c) => {
+    const values = ["max-age=60", "s-maxage=60", "max-age=60, immutable", "no-cache", "No-Store"];
+    return c.json({}, 200, { "Cache-Control": values[Number(c.req.param("i"))] ?? "" });
+  })
   .post("/items", async (c) => {
     const body = await readJson(c, bodySchema, 64);
     if (!body.ok) return respond(c, body);
@@ -199,6 +203,11 @@ describe("API caching", () => {
     const { call } = makeApp();
     expect((await call("/api/sample/private-cache")).headers.get("Cache-Control")).toBe("private, max-age=60");
     expect((await call("/api/sample/public-cache")).headers.get("Cache-Control")).toBe("no-store");
+    // Anything that doesn't say private, no-store or no-cache is replaced.
+    for (const i of [0, 1, 2])
+      expect((await call(`/api/sample/cc/${i}`)).headers.get("Cache-Control")).toBe("no-store");
+    expect((await call("/api/sample/cc/3")).headers.get("Cache-Control")).toBe("no-cache");
+    expect((await call("/api/sample/cc/4")).headers.get("Cache-Control")).toBe("No-Store");
   });
 });
 
