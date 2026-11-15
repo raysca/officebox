@@ -20,6 +20,9 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, ContentfulStatusCode>> = {
   validation_failed: 400,
   unauthenticated: 401,
   forbidden: 403,
+  // Step-up: signed in, but this session must confirm with a passkey first. 403 rather than 401 so
+  // clients never treat it as a lost session; they key on the code (default).
+  reauth_required: 403,
   not_found: 404,
   method_not_allowed: 405,
   conflict: 409,

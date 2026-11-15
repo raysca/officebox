@@ -1,4 +1,4 @@
-import { ERROR_CODES, healthResponseSchema } from "@officebox/shared";
+import { DENIAL_REASONS, ERROR_CODES, healthResponseSchema } from "@officebox/shared";
 import type { QueryClient } from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -191,6 +191,38 @@ describe("unwrap and describeApiError", () => {
       expect(text).toBe(messages.errors.byCode[code]);
       expect(text).not.toContain("internal detail");
     }
+  });
+
+  it("describes permission denials by reason, falling back to the code for unknown reasons", () => {
+    for (const reason of DENIAL_REASONS) {
+      const text = describeApiError({
+        kind: "api",
+        status: 403,
+        error: { code: "forbidden", message: "internal detail", reason },
+      });
+      expect(text).toBe(messages.errors.byDenial[reason]);
+    }
+    expect(
+      describeApiError({
+        kind: "api",
+        status: 403,
+        error: { code: "forbidden", message: "x", reason: "from_the_future" },
+      }),
+    ).toBe(messages.errors.byCode.forbidden);
+    // A reason never overrides the copy of an unrelated code, and inherited keys aren't reasons.
+    expect(
+      describeApiError({
+        kind: "api",
+        status: 409,
+        error: { code: "conflict", message: "x", reason: "owner_required" },
+      }),
+    ).toBe(messages.errors.byCode.conflict);
+    expect(
+      describeApiError({ kind: "api", status: 403, error: { code: "forbidden", message: "x", reason: "toString" } }),
+    ).toBe(messages.errors.byCode.forbidden);
+    expect(describeApiError({ kind: "api", status: 403, error: { code: "reauth_required", message: "x" } })).toBe(
+      messages.errors.byCode.reauth_required,
+    );
   });
 
   it("gives a safe message for every kind", () => {
