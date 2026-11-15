@@ -93,6 +93,13 @@ export const messages = {
     signedOut: "You've been signed out.",
     sessionEnded: "Your session has ended. Sign in again to continue.",
   },
+  notConfigured: {
+    title: "This workspace isn't fully configured yet",
+    description: "Signing in and setting up aren't available until the workspace is configured.",
+    ownerHint:
+      "If you run this workspace: some required Worker secrets aren't set. Follow “Secrets” in the README of your Officebox repository, then try again.",
+    retry: "Try again",
+  },
   devices: {
     title: "My devices",
     description: "Browsers and devices that are signed in to your account. Sign out any you don't recognise.",

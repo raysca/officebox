@@ -120,6 +120,39 @@ describe("routing by session state", () => {
     expect(await screen.findByText("Your session has ended. Sign in again to continue.")).toBeDefined();
   });
 
+  it("explains a workspace whose secrets aren't set, instead of the error page", async () => {
+    const user = userEvent.setup();
+    let configured = false;
+    const fetch = healthyFetch({
+      routes: [(url) => (url === "/api/me" && !configured ? apiError("unavailable", 503) : undefined)],
+    });
+    const { router } = await renderApp("/chat", { fetch });
+    expect(router.state.location.pathname).toBe("/not-configured");
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "This workspace isn't fully configured yet" }),
+    ).toBeDefined();
+    expect(screen.getByText(/Follow “Secrets” in the README of your Officebox repository/)).toBeDefined();
+    expect(screen.queryByText("Something went wrong")).toBeNull();
+    await expectNoViolations();
+
+    configured = true;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Home" })).toBeDefined();
+  });
+
+  it("goes to the same explanation when sign-in answers unavailable", async () => {
+    const user = userEvent.setup();
+    const fetch = healthyFetch({
+      me: null,
+      routes: [(url) => (url === "/api/auth/password" ? apiError("unavailable", 503) : undefined)],
+    });
+    const { router } = await renderApp("/sign-in", { fetch });
+    await user.type(await screen.findByLabelText("Email"), "sam@example.com");
+    await user.type(screen.getByLabelText("Password"), "a long password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/not-configured"));
+  });
+
   it("shows Admin in the navigation to owners and admins only", async () => {
     await renderApp("/", { fetch: healthyFetch({ me: { ...TEST_ME, user: { ...TEST_ME.user, role: "member" } } }) });
     const nav = screen.getByRole("navigation", { name: "Main" });
@@ -164,12 +197,24 @@ describe("sign-in page", () => {
   });
 
   it("only follows same-origin redirects", () => {
-    expect(safeRedirect("/chat?x=1")).toBe("/chat?x=1");
-    expect(safeRedirect("//evil.example")).toBe("/");
-    expect(safeRedirect("https://evil.example")).toBe("/");
-    expect(safeRedirect("/\\evil.example")).toBe("/");
-    expect(safeRedirect("/sign-in")).toBe("/");
-    expect(safeRedirect(undefined)).toBe("/");
+    const origin = "https://work.example.com";
+    expect(safeRedirect("/chat?x=1#top", origin)).toBe("/chat?x=1#top");
+    expect(safeRedirect("/settings/devices", origin)).toBe("/settings/devices");
+    for (const hostile of [
+      "//evil.example",
+      "/\t/evil.example",
+      "/\\evil.example",
+      "/\\/evil.example",
+      "javascript:alert(1)",
+      "https://evil.example",
+      "/\n/evil.example",
+      "/sign-in",
+      "/setup",
+      "",
+    ]) {
+      expect(safeRedirect(hostile, origin), hostile).toBe("/");
+    }
+    expect(safeRedirect(undefined, origin)).toBe("/");
   });
 });
 

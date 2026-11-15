@@ -17,10 +17,28 @@ const copy = messages.signIn;
  * Where to go after signing in. Only a same-origin path is accepted (`/x`, never `//host` or a URL),
  * so the parameter can't be used as an open redirect.
  */
-export function safeRedirect(value: string | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return "/";
-  if (value.startsWith("/sign-in") || value.startsWith("/setup")) return "/";
-  return value;
+function hasUnsafeCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f || code === 0x5c /* backslash */) return true;
+  }
+  return false;
+}
+
+export function safeRedirect(value: string | undefined, origin: string = window.location.origin): string {
+  // Control characters and backslashes never belong in our paths, and URL parsers treat them in ways
+  // that can turn "/…" into another host ("/\t/evil.example" and "/\\evil.example" both become "//evil.example").
+  if (!value || !value.startsWith("/") || hasUnsafeCharacter(value)) return "/";
+  let url: URL;
+  try {
+    url = new URL(value, origin);
+  } catch {
+    return "/";
+  }
+  if (url.origin !== origin) return "/";
+  const path = `${url.pathname}${url.search}${url.hash}`;
+  if (url.pathname === "/sign-in" || url.pathname === "/setup" || url.pathname === "/not-configured") return "/";
+  return path;
 }
 
 export const signInSearchSchema = z.object({
@@ -54,6 +72,10 @@ export function SignInPage({ search }: { search: SignInSearch }) {
       const code = errorCodeOf(error);
       if (code === "setup_required") {
         await navigate({ to: "/setup" });
+        return;
+      }
+      if (code === "unavailable") {
+        await navigate({ to: "/not-configured" });
         return;
       }
       setPassword("");

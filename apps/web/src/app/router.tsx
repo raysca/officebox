@@ -15,6 +15,7 @@ import { AppShell } from "./layout/AppShell";
 import { PublicLayout } from "./layout/PublicLayout";
 import { DevicesPage } from "./routes/devices";
 import { AdminPage, CalendarPage, ChatPage, DocumentsPage, HomePage, NotFoundPage } from "./routes/pages";
+import { NotConfiguredPage } from "./routes/not-configured";
 import { SetupPage } from "./routes/setup";
 import { SignInPage, signInSearchSchema } from "./routes/sign-in";
 
@@ -26,8 +27,8 @@ import { SignInPage, signInSearchSchema } from "./routes/sign-in";
  * Two layouts sit under the root:
  * - **public** (`/setup`, `/sign-in`): no shell, no session needed.
  * - **app** (everything else): the shell. Its `beforeLoad` loads `GET /api/me` and redirects to
- *   `/setup` before first-run setup (TDD §6.8) or to `/sign-in` without a session, remembering where
- *   the person was going.
+ *   `/setup` before first-run setup (TDD §6.8), to `/sign-in` without a session (remembering where the
+ *   person was going), or to `/not-configured` when the Worker's secrets aren't set.
  */
 
 export interface RouterContext {
@@ -52,6 +53,12 @@ const publicRoute = createRoute({ getParentRoute: () => rootRoute, id: "public",
 
 const setupRoute = createRoute({ getParentRoute: () => publicRoute, path: "/setup", component: SetupPage });
 
+const notConfiguredRoute = createRoute({
+  getParentRoute: () => publicRoute,
+  path: "/not-configured",
+  component: NotConfiguredPage,
+});
+
 const signInRoute = createRoute({
   getParentRoute: () => publicRoute,
   path: "/sign-in",
@@ -74,6 +81,9 @@ const appRoute = createRoute({
       // TanStack Router's redirects are thrown values by design, not Errors.
       // eslint-disable-next-line @typescript-eslint/only-throw-error
       if (code === "setup_required") throw redirect({ to: "/setup" });
+      // The Worker's identity secrets aren't set: explain, rather than show the generic error page.
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      if (code === "unavailable") throw redirect({ to: "/not-configured" });
       if (code === "unauthenticated" || (error instanceof ApiRequestError && error.status === 401)) {
         context.queryClient.removeQueries({ queryKey: meQueryKey });
         // eslint-disable-next-line @typescript-eslint/only-throw-error
@@ -95,7 +105,7 @@ const devicesRoute = createRoute({ getParentRoute: () => appRoute, path: "/setti
 const notFoundRoute = createRoute({ getParentRoute: () => appRoute, path: "$", component: NotFoundPage });
 
 export const routeTree = rootRoute.addChildren([
-  publicRoute.addChildren([setupRoute, signInRoute]),
+  publicRoute.addChildren([setupRoute, signInRoute, notConfiguredRoute]),
   appRoute.addChildren([homeRoute, chatRoute, calendarRoute, documentsRoute, adminRoute, devicesRoute, notFoundRoute]),
 ]);
 

@@ -91,10 +91,14 @@ function SetupForm({ tokenSource }: { tokenSource: "secret" | "generated" }) {
       toastStore.show(copy.done, "info");
       await navigate({ to: "/sign-in", search: { email: result.ownerEmail } });
     },
-    onError: (error) => {
+    onError: async (error) => {
       const code = errorCodeOf(error);
       if (code === "not_found") {
         setFormError(copy.alreadyDone);
+        return;
+      }
+      if (code === "unavailable") {
+        await navigate({ to: "/not-configured" });
         return;
       }
       if (code === "forbidden") {
