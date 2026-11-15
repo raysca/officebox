@@ -160,13 +160,17 @@ const CORE_MIGRATIONS: readonly DoMigration[] = [
   },
   {
     version: 3,
-    description: "outbox first failure time",
+    description: "outbox strikes",
     up(sql) {
-      // Expand only: a nullable column older code ignores.
-      const columns = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('core_outbox')").toArray();
-      if (!columns.some((c) => c.name === "first_failed_at")) {
-        sql.exec("ALTER TABLE core_outbox ADD COLUMN first_failed_at INTEGER");
-      }
+      // Expand only, and safe to re-run: columns older code ignores, added only if missing.
+      const columns = new Set(
+        sql
+          .exec<{ name: string }>("SELECT name FROM pragma_table_info('core_outbox')")
+          .toArray()
+          .map((c) => c.name),
+      );
+      if (!columns.has("strikes")) sql.exec("ALTER TABLE core_outbox ADD COLUMN strikes INTEGER NOT NULL DEFAULT 0");
+      if (!columns.has("strike_seq")) sql.exec("ALTER TABLE core_outbox ADD COLUMN strike_seq INTEGER");
     },
   },
 ];

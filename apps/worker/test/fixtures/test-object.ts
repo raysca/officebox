@@ -232,9 +232,11 @@ export class TestObject extends CoreDurableObject {
     streamBackoff: number;
     lastSuccessAt: number | null;
     oldestPendingAgeMs: number | null;
+    successSeq: number;
+    maxStrikes: number;
   } {
-    const { pending, dead, maxAttempts, streamBackoff, lastSuccessAt, oldestPendingAgeMs } = this.outbox.stats();
-    return { pending, dead, maxAttempts, sendCalls: this.sendCalls, streamBackoff, lastSuccessAt, oldestPendingAgeMs };
+    const stats = this.outbox.stats();
+    return { ...stats, sendCalls: this.sendCalls };
   }
 
   lastDrain(): { sends: number; sentRows: number; failedRows: number; deadRows: number; stoppedEarly: boolean } | null {
@@ -242,17 +244,24 @@ export class TestObject extends CoreDurableObject {
   }
 
   /** Every pending row's id, attempts and retry time. */
-  outboxRows(): Array<{ id: string; attempts: number; next_attempt_at: number; first_failed_at: number | null }> {
+  outboxRows(): Array<{
+    id: string;
+    attempts: number;
+    next_attempt_at: number;
+    strikes: number;
+    strike_seq: number | null;
+  }> {
     return this.sql
-      .exec<{ body: string; attempts: number; next_attempt_at: number; first_failed_at: number | null }>(
-        "SELECT body, attempts, next_attempt_at, first_failed_at FROM core_outbox ORDER BY id",
+      .exec<{ body: string; attempts: number; next_attempt_at: number; strikes: number; strike_seq: number | null }>(
+        "SELECT body, attempts, next_attempt_at, strikes, strike_seq FROM core_outbox ORDER BY id",
       )
       .toArray()
       .map((r) => ({
         id: (JSON.parse(r.body) as { id: string }).id,
         attempts: r.attempts,
         next_attempt_at: r.next_attempt_at,
-        first_failed_at: r.first_failed_at,
+        strikes: r.strikes,
+        strike_seq: r.strike_seq,
       }));
   }
 

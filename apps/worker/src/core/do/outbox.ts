@@ -15,24 +15,29 @@ import { backoffMs } from "./backoff";
  * - **Rows are deleted only after their chunk is sent.** A failing chunk is split in halves and retried,
  *   down to single rows, so a bad row ("poison") can't hold back the others in the same drain.
  *
- * **Failures are per row.** A row that failed when sent **on its own** counts one attempt per drain:
- * `attempts + 1`, `first_failed_at` set on its first failure, and `next_attempt_at = MAX(existing, now
- * + backoff(attempts))` with up to 20 % jitter (2 s, 4 s, … capped at 5 minutes). A row that was only
- * in failed multi-row sends (the drain's budget ran out before bisection reached it) is pushed back
- * the same way but counts no attempt, so a good row that keeps sharing batches with bad ones is never
- * blamed for them. Either way, failed rows move behind the rows not yet tried, so the next drain starts
- * from different rows: good rows always make progress, whatever mix of bad rows is in front of them.
- * A successful send deletes the row.
+ * **Failures are per row.** Every row that was in a failed send during a drain, and wasn't sent later
+ * in it, counts one attempt (`attempts + 1`) and backs off on its own: `next_attempt_at = MAX(existing,
+ * now + backoff(attempts))` with up to 20 % jitter (2 s, 4 s, … capped at 5 minutes). Drains take due
+ * rows in order of `attempts, id`, so rows that have never failed go first and good rows aren't stuck
+ * behind a long run of bad ones. A successful send deletes the row. `attempts` only drives backoff
+ * and ordering; it never decides dead-lettering. Only a failure **on its own** (after bisection) can
+ * add a strike, so a good row that keeps sharing batches with bad ones is never blamed for them.
  *
- * **Dead-letter rule.** A row moves to `core_outbox_dead` when it fails on its own with `attempts >= 10`
- * **(default)** *and* the stream has sent something successfully since that row's `first_failed_at`
- * (`outbox_last_success_at:<stream>` in `meta`). So:
- * - a queue outage never kills rows, however long it lasts, because nothing succeeds meanwhile;
- * - a lone bad row waits until any other row (for example the next one enqueued) is sent, then is
- *   dead-lettered at its next failure;
- * - a queue that flaps (fails, recovers, fails) can dead-letter a good row that happened to fail on
- *   each attempt while a success came in between. With 10 attempts spread over backoffs adding up to
- *   about 25 minutes, this needs a long, unlucky run, and is accepted.
+ * **Dead-letter rule: strikes separated by proven success.** The stream keeps a success sequence,
+ * `outbox_success_seq:<stream>`, incremented the moment each successful send resolves (so it is
+ * ordered against failures in the same drain). When a row fails on its own:
+ * - with no strike yet (`strike_seq` NULL): `strikes = 1`, `strike_seq` = the current sequence;
+ * - if a send has succeeded since its last strike (sequence > `strike_seq`): `strikes + 1`, and
+ *   `strike_seq` moves to the current sequence;
+ * - otherwise (no success in between) nothing changes.
+ * A row is moved to `core_outbox_dead` when it reaches 10 strikes **(default)**. So:
+ * - a queue outage of any length, including one that starts part-way through a drain, adds at most
+ *   one strike per row, because nothing succeeds in between;
+ * - a lone bad row is dead-lettered only after ten failures each separated by another row being sent
+ *   (real traffic); with no other traffic it stays, retrying with backoff;
+ * - a queue that flaps adds one strike per proven success between failures, so a good row is only
+ *   dead-lettered after ten failures each separated by a success. That needs a long, unlucky run, and
+ *   is accepted. Rows written before strikes existed start at 0 strikes.
  * Dead rows are logged at error level and counted in `stats()`. Nothing reads or re-drives them
  * until M7.
  *
@@ -42,17 +47,19 @@ import { backoffMs } from "./backoff";
  * hit the drain stops and untried rows keep their retry time. If a drain sent nothing at all, the
  * untried due rows are pushed back by a stream backoff (`outbox_failed_drains:<stream>`, the count of
  * consecutive drains that sent nothing), without counting attempts, so a down queue isn't re-drained
- * in a tight loop; the count resets on the next success, and from 10 it logs at error level.
+ * in a tight loop; the count resets on the next success, and from 10 it logs at error level (the
+ * queue is down, or every row tried is failing).
  *
  * **One drain at a time.** A drain that starts while another is still running does nothing and asks
  * to be run again shortly.
  *
- * **Guarantees.** Delivery is at least once. Order is by row ID within a drain; after failures, newer
- * rows overtake older ones being retried. Consumers must be idempotent and order-tolerant (TDD §3.3:
+ * **Guarantees.** Delivery is at least once. Rows that never failed go out in row-ID order; after
+ * failures, newer rows overtake older ones being retried. Consumers must be idempotent and order-tolerant (TDD §3.3:
  * full state plus a version guard).
  *
- * `meta` keys used: `outbox_last_success_at:<stream>` (epoch ms of the last successful send) and
- * `outbox_failed_drains:<stream>` (consecutive drains that sent nothing; absent after a success).
+ * `meta` keys used: `outbox_success_seq:<stream>` (successful sends so far), `outbox_last_success_at:
+ * <stream>` (epoch ms of the last one, for `stats()` only) and `outbox_failed_drains:<stream>`
+ * (consecutive drains that sent nothing; absent after a success).
  */
 
 /** Queues limit 128 KiB per message; keep a margin for the envelope. */
@@ -62,8 +69,8 @@ export const MAX_OUTBOX_BATCH_BYTES = 240_000;
 /** Queues limit 100 messages per `sendBatch`. This also keeps the `DELETE … IN (…)` under 100 parameters. */
 export const MAX_OUTBOX_BATCH_MESSAGES = 100;
 export const DEFAULT_OUTBOX_DELAY_MS = 250;
-/** Failed attempts before a row may be dead-lettered (and only after a later success on the stream). */
-export const MAX_OUTBOX_ATTEMPTS = 10;
+/** Strikes (failures separated by a successful send on the stream) before a row is dead-lettered. */
+export const MAX_OUTBOX_STRIKES = 10;
 /** Sends per drain, including bisection. */
 export const DEFAULT_MAX_SENDS_PER_DRAIN = 32;
 /** Wall-clock limit per drain; under the 5-minute outbox timer timeout. */
@@ -116,7 +123,8 @@ type Row = {
   body: string;
   bytes: number;
   attempts: number;
-  first_failed_at: number | null;
+  strikes: number;
+  strike_seq: number | null;
 };
 
 export interface OutboxStats {
@@ -128,6 +136,9 @@ export interface OutboxStats {
   maxAttempts: number;
   /** Last successful send (epoch ms), or null. */
   lastSuccessAt: number | null;
+  /** Successful sends so far (the strike sequence). */
+  successSeq: number;
+  maxStrikes: number;
   /** Consecutive drains that sent nothing (the stream backoff exponent); 0 after a success. */
   streamBackoff: number;
 }
@@ -151,8 +162,10 @@ interface DrainState {
   sentRows: number;
   /** Rows of this drain not yet sent, in id order. */
   unsent: Map<number, Row>;
-  /** Rows that failed when sent on their own. */
-  failedAlone: Set<number>;
+  /** Success sequence, kept in step with `meta` as sends succeed. */
+  seq: number;
+  /** Rows that failed when sent on their own, with the success sequence at that moment. */
+  failedAlone: Map<number, number>;
   /** Rows that were in at least one failed send. */
   tried: Set<number>;
 }
@@ -210,6 +223,10 @@ export class Outbox {
     return `outbox_last_success_at:${this.stream}`;
   }
 
+  private get successSeqKey(): string {
+    return `outbox_success_seq:${this.stream}`;
+  }
+
   private get failedDrainsKey(): string {
     return `outbox_failed_drains:${this.stream}`;
   }
@@ -233,8 +250,10 @@ export class Outbox {
         pending: number;
         oldest: number | null;
         attempts: number | null;
+        strikes: number | null;
       }>(
-        "SELECT COUNT(*) AS pending, MIN(created_at) AS oldest, MAX(attempts) AS attempts FROM core_outbox WHERE stream = ?",
+        `SELECT COUNT(*) AS pending, MIN(created_at) AS oldest, MAX(attempts) AS attempts, MAX(strikes) AS strikes
+         FROM core_outbox WHERE stream = ?`,
         this.stream,
       )
       .toArray()[0];
@@ -249,6 +268,8 @@ export class Outbox {
       oldestPendingAgeMs: row?.oldest == null ? null : Math.max(0, Date.now() - row.oldest),
       maxAttempts: row?.attempts ?? 0,
       lastSuccessAt: lastSuccess === null ? null : Number(lastSuccess),
+      successSeq: Number(this.getMeta(this.successSeqKey) ?? "0"),
+      maxStrikes: row?.strikes ?? 0,
       streamBackoff: Number(this.getMeta(this.failedDrainsKey) ?? "0"),
     };
   }
@@ -274,8 +295,8 @@ export class Outbox {
     const startedAt = Date.now();
     const rows = this.sql
       .exec<Row>(
-        `SELECT id, body, bytes, attempts, first_failed_at FROM core_outbox
-         WHERE stream = ? AND next_attempt_at <= ? ORDER BY id LIMIT ?`,
+        `SELECT id, body, bytes, attempts, strikes, strike_seq FROM core_outbox
+         WHERE stream = ? AND next_attempt_at <= ? ORDER BY attempts, id LIMIT ?`,
         this.stream,
         startedAt,
         DRAIN_ROWS,
@@ -289,7 +310,8 @@ export class Outbox {
       stopped: false,
       sentRows: 0,
       unsent: new Map(rows.map((row) => [row.id, row])),
-      failedAlone: new Set(),
+      seq: Number(this.getMeta(this.successSeqKey) ?? "0"),
+      failedAlone: new Map(),
       tried: new Set(),
     };
     for (const chunk of chunkRows(rows)) {
@@ -300,28 +322,35 @@ export class Outbox {
     const now = Date.now();
     let deadRows = 0;
     let failedRows = 0;
-    if (state.sentRows > 0) {
-      this.setMeta(this.lastSuccessKey, String(now));
-      this.sql.exec("DELETE FROM meta WHERE key = ?", this.failedDrainsKey);
-    }
-    const lastSuccess = Number(this.getMeta(this.lastSuccessKey) ?? "-1");
+    if (state.sentRows > 0) this.sql.exec("DELETE FROM meta WHERE key = ?", this.failedDrainsKey);
 
     for (const id of state.tried) {
       const row = state.unsent.get(id);
       if (!row) continue; // sent later in this drain
       failedRows += 1;
+      const attempts = row.attempts + 1;
       if (!state.failedAlone.has(id)) {
-        // Only ever in failed batches: push it back behind the untried rows, without blame.
+        // Only ever in failed batches: an attempt (for backoff and ordering) but no strike, since the
+        // failure may have been another row's.
         this.sql.exec(
-          "UPDATE core_outbox SET next_attempt_at = MAX(next_attempt_at, ?) WHERE id = ?",
-          now + this.jittered(backoffMs(row.attempts + 1)),
+          "UPDATE core_outbox SET attempts = ?, next_attempt_at = MAX(next_attempt_at, ?) WHERE id = ?",
+          attempts,
+          now + this.jittered(backoffMs(attempts)),
           row.id,
         );
         continue;
       }
-      const attempts = row.attempts + 1;
-      const firstFailedAt = row.first_failed_at ?? now;
-      if (attempts >= MAX_OUTBOX_ATTEMPTS && lastSuccess >= firstFailedAt) {
+      const seqAtFailure = state.failedAlone.get(id) ?? state.seq;
+      let strikes = row.strikes;
+      let strikeSeq = row.strike_seq;
+      if (strikeSeq === null) {
+        strikes = 1;
+        strikeSeq = seqAtFailure;
+      } else if (seqAtFailure > strikeSeq) {
+        strikes += 1;
+        strikeSeq = seqAtFailure;
+      }
+      if (strikes >= MAX_OUTBOX_STRIKES) {
         this.sql.exec(
           `INSERT INTO core_outbox_dead (id, stream, body, bytes, attempts, created_at, dead_at)
            SELECT id, stream, body, bytes, ?, created_at, ? FROM core_outbox WHERE id = ?`,
@@ -335,14 +364,16 @@ export class Outbox {
           stream: this.stream,
           row: row.id,
           attempts,
+          strikes,
         });
         continue;
       }
       this.sql.exec(
-        `UPDATE core_outbox SET attempts = ?, first_failed_at = ?, next_attempt_at = MAX(next_attempt_at, ?)
+        `UPDATE core_outbox SET attempts = ?, strikes = ?, strike_seq = ?, next_attempt_at = MAX(next_attempt_at, ?)
          WHERE id = ?`,
         attempts,
-        firstFailedAt,
+        strikes,
+        strikeSeq,
         now + this.jittered(backoffMs(attempts)),
         row.id,
       );
@@ -359,8 +390,9 @@ export class Outbox {
         this.sql.exec("UPDATE core_outbox SET next_attempt_at = MAX(next_attempt_at, ?) WHERE id = ?", retryAt, id);
       }
       const fields = { stream: this.stream, failedDrains, failedRows, sends: state.sends };
-      if (failedDrains >= FAILED_DRAINS_ERROR_THRESHOLD) log.error("outbox drains keep sending nothing", fields);
-      else log.warn("outbox drain sent nothing; backing off", fields);
+      if (failedDrains >= FAILED_DRAINS_ERROR_THRESHOLD) {
+        log.error(`no send succeeded in ${failedDrains} drains: queue outage or all rows failing`, fields);
+      } else log.warn("outbox drain sent nothing; backing off", fields);
     } else if (failedRows > 0) {
       log.warn("outbox rows failed; will retry", { stream: this.stream, failedRows, deadRows });
     }
@@ -392,11 +424,15 @@ export class Outbox {
     if (await this.trySend(rows)) {
       for (const row of rows) state.unsent.delete(row.id);
       state.sentRows += rows.length;
+      // Advance the success sequence now, so failures later in this drain are ordered after it.
+      state.seq += 1;
+      this.setMeta(this.successSeqKey, String(state.seq));
+      this.setMeta(this.lastSuccessKey, String(Date.now()));
       return;
     }
     for (const row of rows) state.tried.add(row.id);
-    if (rows.length === 1) {
-      state.failedAlone.add(rows[0]?.id ?? -1);
+    if (rows.length === 1 && rows[0]) {
+      state.failedAlone.set(rows[0].id, state.seq);
       return;
     }
     const middle = Math.ceil(rows.length / 2);
