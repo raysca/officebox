@@ -1633,7 +1633,7 @@ Per-member exports are limited to one running per subject and 10 per actor per d
   - **passkeys** (bound to the domain; members re-register after a restore to a new domain)
   - ICS feed tokens, and ICS-in subscription URLs (subscriptions are exported without URLs and must be re-entered)
   - `poll_secret`
-  - **assistant conversations and memory** (they live only in Assistant DOs, which admins can't read). Nobody can export them; members see their memory in "What Butler remembers" (Admin §2, Assistant §13). There is no member self-export.
+  - **assistant conversations, including the assistant DM, and memory** (they live only in Assistant DOs, which admins can't read). Nobody can export them; members see their memory in "What Butler remembers" (Admin §2, Assistant §13). There is no member self-export.
   - `file_derived_text`, rebuilt like `search_index`
   - the operational tables listed above.
 
@@ -1771,6 +1771,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - Refresh-token rotation with reuse detection: presenting an old refresh token revokes the session, **except within a 30-second grace window** after rotation, when the previous token returns the same successor (two tabs refreshing at once).
   - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets.
   - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
+  - **Step-up re-authentication** ([Admin](specs/admin.md) §11.3): `sessions.authenticated_at` records the last password, passkey or magic-link sign-in, invitation acceptance, recovery link or step-up; a refresh doesn't update it. Sensitive downloads (export archives, member and audit CSVs) need it within the last 10 minutes, otherwise they return `reauth_required` and the client calls `POST /auth/reauth`. That endpoint is limited to 5 attempts per 10 minutes per session, and failures also count toward the per-account sign-in limit below.
 - **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
 - **Rate limiting** (mechanisms per platform §8):
   - The Workers Rate Limiting binding supports periods of exactly 10 or 60 seconds, counts per Cloudflare location, and is approximate. The wrapper treats it as advisory and returns `rate_limited` with retry-after equal to the period. Longer windows and exact quotas use D1 or Durable Object counters.
