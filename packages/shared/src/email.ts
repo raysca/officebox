@@ -32,6 +32,11 @@ const hostnameSchema = z
   .max(253)
   .regex(/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/, {
     message: "A hostname such as smtp.example.com.",
+  })
+  // A name, never an IP literal (Platform §9 outbound rules): the last label must not be a number
+  // (decimal, or 0x hex), so dotted IPv4 forms are refused; IPv6 literals never match the pattern above.
+  .refine((host) => !/^(\d+|0x[0-9a-f]*)$/.test(host.slice(host.lastIndexOf(".") + 1)), {
+    message: "A hostname such as smtp.example.com, not an IP address.",
   });
 
 /** An AWS region name such as `eu-west-1`. */
@@ -111,7 +116,12 @@ export type EmailDeliveryState = (typeof EMAIL_DELIVERY_STATES)[number];
 export const emailSendMessage = defineMessage("email.send", {
   jobId: z.string().min(1).max(64),
   kind: emailKindSchema,
-  to: z.string().min(3).max(254),
+  to: z.email().max(254),
+  /**
+   * When the email's link stops working (a magic link after 15 minutes, an invitation after 7 days).
+   * The consumer never sends, retries or dead-letters the job after it: the job fails as `expired`.
+   */
+  expiresAt: z.number().int().positive().optional(),
   subject: z.string().min(1).max(300),
   text: z.string().max(64 * 1024),
   html: z.string().max(64 * 1024),

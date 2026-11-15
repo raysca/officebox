@@ -17,6 +17,7 @@ import { authOf, coreContext, type AppContext, type AppEnv } from "../../core/co
 import { Database, expectOk } from "../../core/db";
 import { readJson, respond } from "../../core/errors";
 import { authorize } from "../../core/permissions";
+import { checkLimit, defineLimit } from "../../core/rate-limit";
 import { SETTINGS, SettingsStore } from "../../core/settings";
 import { loadEmailStatus } from "../email/config";
 import { enqueueEmail } from "../email/delivery";
@@ -49,6 +50,14 @@ import { identityServices, requireAuth } from "../identity/middleware";
  */
 
 const SMALL_BODY = 16 * 1024;
+
+/** Send test email: 5 per hour per actor (default), so it can't be used to flood the actor's inbox or quota. */
+export const TEST_EMAIL_LIMIT = defineLimit({
+  mechanism: "d1",
+  name: "email_test",
+  limit: 5,
+  window: { kind: "fixed", seconds: 3600 },
+});
 const NOT_FOUND: ApiError = apiError("not_found", "No such invitation.");
 
 async function services(c: AppContext) {
@@ -114,6 +123,8 @@ const adminRoutes = new Hono<AppEnv>()
     const body = await readJson(c, sendTestEmailBodySchema, SMALL_BODY);
     if (!body.ok) return respond(c, body);
     const ctx = coreContext(c);
+    const limited = await checkLimit(ctx, TEST_EMAIL_LIMIT, me.userId);
+    if (!limited.ok) return respond(c, limited);
     const { status } = await loadEmailStatus(ctx);
     if (!status.configured) {
       return respond(

@@ -296,9 +296,15 @@ export type CreateInvitationBody = z.infer<typeof createInvitationBodySchema>;
 
 /**
  * What happened to the email part of an invitation (the copy link always works). `limited`: the
- * workspace reached today's invitation-email limit (Platform §8, 200 per UTC day); copy the link.
+ * workspace reached today's invitation-email limit (Platform §8, 200 per UTC day); copy the link. `email_unavailable`: the email couldn't be queued right now; the link still works.
  */
-export const invitationEmailOutcomeSchema = z.enum(["queued", "not_requested", "not_configured", "limited"]);
+export const invitationEmailOutcomeSchema = z.enum([
+  "queued",
+  "not_requested",
+  "not_configured",
+  "limited",
+  "email_unavailable",
+]);
 export type InvitationEmailOutcome = z.infer<typeof invitationEmailOutcomeSchema>;
 
 /** `expired` is shown until it's revoked; `accepting` means accepted but the account isn't finished. */

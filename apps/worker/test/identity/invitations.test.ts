@@ -486,6 +486,26 @@ describe("reopening an accepted invitation (Identity §4.3: the 410 guard)", () 
   });
 });
 
+/**
+ * Every accept that answered 201 holds a ticket for an account that exists and has claimed its handle:
+ * a ticket for an account that's later compensated would vanish with it (cascade), so check each one.
+ */
+async function expectTicketsForLiveAccounts(results: Awaited<ReturnType<typeof acceptInvite>>[]) {
+  const { tokenHash } = await import("../../src/features/identity/crypto");
+  for (const r of results.filter((x) => x.accept.status === 201)) {
+    const raw = r.browser.cookies.get("__Host-officebox-enrol");
+    expect(raw).toBeDefined();
+    const live = await count(
+      `SELECT count(*) AS n FROM auth_tokens t JOIN users u ON u.id = t.user_id
+         JOIN handles h ON h.owner_id = u.id AND h.owner_type = 'user'
+        WHERE t.token_hash = ?`,
+      await tokenHash(env.TOKEN_HASH_KEY!, raw!),
+    );
+    // (It may have been superseded by the other request's ticket for the same account: still that account.)
+    expect(live).toBe(1);
+  }
+}
+
 describe("concurrency (PLAN M1 exit criteria: concurrent tokens)", () => {
   it("two concurrent accepts of one invitation create exactly one account", async () => {
     const email = uniqueEmail("race");
@@ -503,6 +523,73 @@ describe("concurrency (PLAN M1 exit criteria: concurrent tokens)", () => {
     expect(
       await count("SELECT count(*) AS n FROM handles WHERE owner_id = (SELECT id FROM users WHERE email = ?)", email),
     ).toBe(1);
+    await expectTicketsForLiveAccounts(results);
+  });
+
+  it("a race where both requests pick the same new handle: the loser is compensated and gets no ticket", async () => {
+    const email = uniqueEmail("race2");
+    const created = await invite(ws.browser, email);
+    const token = fragmentToken(created.body.link)!;
+    const handle = uniqueHandle("same");
+    const results = await Promise.all([acceptInvite(token, "A One", handle), acceptInvite(token, "B Two", handle)]);
+    for (const r of results) expect([201, 409, 410]).toContain(r.accept.status);
+    expect(await count("SELECT count(*) AS n FROM users WHERE email = ?", email)).toBeLessThanOrEqual(1);
+    await expectTicketsForLiveAccounts(results);
+  });
+
+  it("reopening while the first accept hasn't claimed its handle answers 409 and issues no ticket (review M3)", async () => {
+    const email = uniqueEmail("inflight");
+    const created = await invite(ws.browser, email);
+    const token = fragmentToken(created.body.link)!;
+    // The state between "user created" and "handle claimed": consumed, user written, no handle yet.
+    const attempt = ulid();
+    const userId = ulid();
+    await env.DB.prepare("UPDATE invitations SET accepted_attempt_id = ? WHERE id = ?")
+      .bind(attempt, created.body.invitation.id)
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, email_normalised, display_name, role, status, handle, created_attempt_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'In Flight', 'member', 'active', ?, ?, ?, ?)`,
+    )
+      .bind(userId, email, email, uniqueHandle("fl"), attempt, Date.now(), Date.now())
+      .run();
+    const lookup = await new Browser().json("/api/invitations/lookup", { body: { token } });
+    expect(lookup.status).toBe(409);
+    expect(lookup.body).toMatchObject({ error: { reason: "invitation_in_progress" } });
+    const reopen = await acceptInvite(token);
+    expect(reopen.accept.status).toBe(409);
+    expect(await count("SELECT count(*) AS n FROM auth_tokens WHERE user_id = ?", userId)).toBe(0);
+    // Once the handle is claimed, the same reopen works.
+    await env.DB.prepare(
+      "INSERT INTO handles (handle, owner_type, owner_id, created_attempt_id) VALUES (?, 'user', ?, ?)",
+    )
+      .bind(uniqueHandle("fl2"), userId, attempt)
+      .run();
+    expect((await acceptInvite(token)).accept.status).toBe(201);
+  });
+});
+
+describe("invitation email that can't be queued (review L6)", () => {
+  it("still creates the invitation, says the email is unavailable, and gives the day's quota back", async () => {
+    await configureEmail();
+    try {
+      const failingQueue = { send: () => Promise.reject(new Error("queue down")) } as unknown as Queue;
+      const before = await count(
+        "SELECT coalesce(sum(count), 0) AS n FROM rate_counters WHERE scope = 'invitation_send'",
+      );
+      const created = await ws.browser.json<{ email: string; link: string }>("/api/admin/invitations", {
+        body: { email: uniqueEmail("qdown"), role: "member", sendEmail: true },
+        env: { EMAIL_QUEUE: failingQueue },
+      });
+      expect(created.status).toBe(201);
+      expect(created.body.email).toBe("email_unavailable");
+      expect(fragmentToken(created.body.link)).not.toBeNull();
+      expect(
+        await count("SELECT coalesce(sum(count), 0) AS n FROM rate_counters WHERE scope = 'invitation_send'"),
+      ).toBe(before);
+    } finally {
+      await configureEmail({ driver: "none" });
+    }
   });
 });
 

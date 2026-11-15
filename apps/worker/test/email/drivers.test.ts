@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 import { cloudflareDriver, cloudflareOutcome } from "../../src/features/email/drivers/cloudflare";
 import { postmarkDriver, resendDriver, sesDriver } from "../../src/features/email/drivers/http";
 import { signingKey, toHex } from "../../src/features/email/drivers/sigv4";
-import { buildMime, sendSmtp, type SmtpConnect, type SmtpSocket } from "../../src/features/email/drivers/smtp";
+import { emailProviderSchema, emailSendMessage } from "@officebox/shared";
+import {
+  buildMime,
+  encodedWord,
+  sendSmtp,
+  type SmtpConnect,
+  type SmtpSocket,
+} from "../../src/features/email/drivers/smtp";
 import { sinkAllowed } from "../../src/features/email/drivers/sink";
 import type { Fetch, OutgoingEmail } from "../../src/features/email/drivers/types";
 import { escapeHtml, invitationEmail } from "../../src/features/email/templates";
@@ -306,6 +313,48 @@ describe("SMTP over STARTTLS or implicit TLS", () => {
     expect(mime).toContain(`Message-ID: <${EMAIL.id}@example.com>`);
     expect(() => buildMime({ ...EMAIL, subject: "Hi\r\nBcc: victim@example.com" }, 0)).toThrow();
     expect(() => buildMime({ ...EMAIL, to: "a@example.com\r\nRCPT TO:<b@example.com>" }, 0)).toThrow();
+  });
+
+  it("long non-ASCII subjects are split into encoded words of at most 75 characters (review L3)", () => {
+    const words = encodedWord("Привет! Это очень длинная тема письма с кириллицей и эмодзи ☕☕☕").split("\r\n ");
+    expect(words.length).toBeGreaterThan(1);
+    for (const word of words) {
+      expect(word).toMatch(/^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/);
+      expect(word.length).toBeLessThanOrEqual(75);
+    }
+    expect(encodedWord("Plain subject")).toBe("Plain subject");
+  });
+
+  it("envelope addresses with brackets or whitespace are refused permanently, before anything is sent (review L3)", async () => {
+    for (const to of ["a@example.com> RCPT TO:<b@example.com", "a b@example.com", "<a@example.com>"]) {
+      const server = scriptedSmtp(GOOD_REPLIES);
+      const outcome = await sendSmtp(server.connect, SETTINGS, { ...EMAIL, to }, Date.now());
+      expect(outcome).toEqual({ kind: "permanent", code: "smtp:unsafe envelope address" });
+      expect(server.written.some((l) => l.startsWith("MAIL") || l.startsWith("RCPT"))).toBe(false);
+    }
+  });
+
+  it("the SMTP host setting refuses IP literals (review L4)", () => {
+    const smtp = (host: string) =>
+      emailProviderSchema.safeParse({
+        driver: "smtp",
+        from: "no-reply@example.com",
+        host,
+        port: 587,
+        security: "starttls",
+        username: "u",
+      }).success;
+    expect(smtp("smtp.example.com")).toBe(true);
+    for (const host of ["192.168.1.10", "127.0.0.1", "10.0.0.1", "1.0x7f", "[::1]", "::1", "localhost"]) {
+      expect(smtp(host), host).toBe(false);
+    }
+  });
+
+  it("the queue message's recipient must be an email address (review L3)", () => {
+    const base = { type: "email.send", jobId: "j", kind: "test", subject: "s", text: "t", html: "h" };
+    expect(emailSendMessage.safeParse({ ...base, to: "ana@example.com" }).success).toBe(true);
+    expect(emailSendMessage.safeParse({ ...base, to: "a<b>@example.com" }).success).toBe(false);
+    expect(emailSendMessage.safeParse({ ...base, to: "abc" }).success).toBe(false);
   });
 });
 

@@ -106,9 +106,23 @@ function wrap76(value: string): string {
   return value.replace(/.{1,76}/g, "$&\r\n").replace(/\r\n$/, "");
 }
 
-/** RFC 2047 encoded word for a header holding non-ASCII text. */
-function encodedWord(text: string): string {
-  return /^[\x20-\x7e]*$/.test(text) ? text : `=?UTF-8?B?${base64(text)}?=`;
+/**
+ * RFC 2047 encoded words for a header holding non-ASCII text: each word at most 75 characters (45 bytes
+ * of UTF-8 per word, never splitting a character), folded onto continuation lines.
+ */
+export function encodedWord(text: string): string {
+  if (/^[\x20-\x7e]*$/.test(text)) return text;
+  const words: string[] = [];
+  let chunk = "";
+  for (const char of text) {
+    if (encoder.encode(chunk + char).byteLength > 45) {
+      words.push(chunk);
+      chunk = "";
+    }
+    chunk += char;
+  }
+  if (chunk !== "") words.push(chunk);
+  return words.map((word) => `=?UTF-8?B?${base64(word)}?=`).join("\r\n ");
 }
 
 function assertHeaderSafe(...values: string[]): void {
@@ -117,9 +131,19 @@ function assertHeaderSafe(...values: string[]): void {
   }
 }
 
+/** Envelope addresses go inside `<…>` on MAIL FROM and RCPT TO: no brackets, whitespace or controls. */
+function assertAddressSafe(...addresses: string[]): void {
+  for (const address of addresses) {
+    if (!/^[^\s<>\p{Cc}]+@[^\s<>\p{Cc}]+$/u.test(address)) {
+      throw new SmtpProtocolError("unsafe envelope address");
+    }
+  }
+}
+
 /** The message as sent after DATA, dot-stuffed and CRLF-terminated (without the final `.`). */
 export function buildMime(email: OutgoingEmail, now: number): string {
   assertHeaderSafe(email.to, email.from.email, email.from.name ?? "", email.subject, email.id);
+  assertAddressSafe(email.to, email.from.email);
   const boundary = `officebox-${email.id}`;
   const domain = email.from.email.split("@")[1] ?? "localhost";
   const from = email.from.name
@@ -219,7 +243,7 @@ export async function sendSmtp(
       return permanent("auth_unsupported");
     }
 
-    assertHeaderSafe(email.from.email, email.to);
+    assertAddressSafe(email.from.email, email.to);
     await write(`MAIL FROM:<${email.from.email}>`);
     await expect("mail", 250);
     await write(`RCPT TO:<${email.to}>`);
@@ -236,7 +260,11 @@ export async function sendSmtp(
       const code = `smtp_${error.code}:${error.step}`;
       return error.code >= 500 ? permanent(code) : transient(code);
     }
-    if (error instanceof SmtpProtocolError) return transient(`smtp:${error.message}`);
+    if (error instanceof SmtpProtocolError) {
+      // An address or header we refuse to write never becomes sendable by retrying.
+      if (/^(unsafe|line break)/.test(error.message)) return permanent(`smtp:${error.message}`);
+      return transient(`smtp:${error.message}`);
+    }
     return transient("network");
   } finally {
     await socket.close().catch(() => {});

@@ -166,7 +166,7 @@ export async function issueMagicLink(
   afterResponse(async () => {
     if (!sends) return;
     const ctx: CoreContext = { env, log: log ?? rootLogger, now: Date.now };
-    const queued = await enqueueEmail(ctx, { kind: "magic_link", to, ...rendered });
+    const queued = await enqueueEmail(ctx, { kind: "magic_link", to, ...rendered, expiresAt: now + TTL_MS });
     if (!queued.ok) ctx.log.warn("magic link email not queued");
   });
 }
@@ -240,9 +240,17 @@ export async function confirmMagicLink(
     const response = result.response as { user?: { id?: unknown } } | null;
     userId = typeof response?.user?.id === "string" ? response.user.id : null;
   } catch (error) {
-    if (!(error instanceof APIError)) throw error;
-    ctx.log.warn("magic link verify refused after our consume", { status: error.status });
-    return err(INVALID_LINK);
+    if (error instanceof APIError) {
+      ctx.log.warn("magic link verify refused after our consume", { status: error.status });
+      return err(INVALID_LINK);
+    }
+    // A real failure after our consume used the link up: a typed answer that says what to do next.
+    ctx.log.error("magic link verify failed after our consume", { error });
+    return err(
+      apiError("unavailable", "Signing in with this link failed. Ask for a new sign-in link.", {
+        reason: "magic_link_failed",
+      }),
+    );
   }
   const sessionCookies = headers?.getSetCookie() ?? [];
   if (userId !== row.user_id || sessionCookies.length === 0) {
@@ -253,18 +261,27 @@ export async function confirmMagicLink(
   }
 
   // Known devices: a sign-in from a browser this member hasn't used raises a security notice (§4.4).
-  const device = await recordSignInDevice(ctx.env.DB, secrets.tokenHashKey, userId, request.headers, now);
-  if (device.isNew) {
-    const details = {
-      deviceLabel: deviceLabel(request.headers.get("User-Agent")),
-      approxLocation: approxLocation(request.cf as { city?: unknown; country?: unknown } | undefined),
-    };
-    const database = new Database(ctx.env.DB);
-    expectOk(await database.batchRun([noticeStatement(database, userId, "magic_link_new_device", details, now)]));
-    await emailSecurityNotices(ctx, [{ userId, kind: "magic_link_new_device", details, at: now }]);
+  // The session exists now, so a failure here is logged and never costs the person their sign-in.
+  const setCookies = [...sessionCookies];
+  let newDevice = false;
+  try {
+    const device = await recordSignInDevice(ctx.env.DB, secrets.tokenHashKey, userId, request.headers, now);
+    setCookies.push(device.setCookie);
+    newDevice = device.isNew;
+    if (device.isNew) {
+      const details = {
+        deviceLabel: deviceLabel(request.headers.get("User-Agent")),
+        approxLocation: approxLocation(request.cf as { city?: unknown; country?: unknown } | undefined),
+      };
+      const database = new Database(ctx.env.DB);
+      expectOk(await database.batchRun([noticeStatement(database, userId, "magic_link_new_device", details, now)]));
+      await emailSecurityNotices(ctx, [{ userId, kind: "magic_link_new_device", details, at: now }]);
+    }
+  } catch (error) {
+    ctx.log.error("known-device check or new-device notice failed after a magic-link sign-in", { userId, error });
   }
-  ctx.log.info("signed in with a magic link", { userId, newDevice: device.isNew });
-  return ok({ userId, setCookies: [...sessionCookies, device.setCookie] });
+  ctx.log.info("signed in with a magic link", { userId, newDevice });
+  return ok({ userId, setCookies });
 }
 
 /** `name=value` pairs from Set-Cookie headers, as a Cookie header. */

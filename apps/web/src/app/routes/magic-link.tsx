@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { ApiRequestError, describeApiError, errorCodeOf } from "../../lib/api/client";
+import { ApiRequestError, describeApiError, errorCodeOf, errorReasonOf } from "../../lib/api/client";
 import { meQuery, meQueryKey } from "../../lib/api/identity";
 import { confirmMagicLink, lookupMagicLink } from "../../lib/api/onboarding";
 import { Alert } from "../../lib/ui/Alert";
@@ -48,6 +48,7 @@ export function MagicLinkPage() {
     },
     onError: (failure) => {
       if (errorCodeOf(failure) === "gone") setError(copy.invalid);
+      else if (errorReasonOf(failure) === "magic_link_failed") setError(copy.failed);
       else
         setError(
           failure instanceof ApiRequestError ? describeApiError(failure.detail, "mutation") : messages.errors.generic,

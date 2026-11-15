@@ -233,3 +233,33 @@ test("a member signs in with a magic link through the confirmation page; owners 
   await second.close();
   await context.close();
 });
+
+test("axe in the dark theme: the new admin pages and the fragment-token pages", async ({ browser }) => {
+  await owner.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  for (const [path, heading] of [
+    ["/admin/invitations", "Invitations"],
+    ["/admin/settings", "Settings"],
+  ] as const) {
+    await owner.goto(path);
+    await expect(owner.getByRole("heading", { level: 1, name: heading })).toBeVisible();
+    await expectNoAxeViolations(owner);
+  }
+  await owner.goto("/admin/invitations");
+  await owner.getByRole("button", { name: "Invite someone" }).click();
+  await expect(owner.getByRole("dialog", { name: "Invite someone" })).toBeVisible();
+  await expectNoAxeViolations(owner);
+  await owner.keyboard.press("Escape");
+  await owner.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+
+  const context = await browser.newContext({ colorScheme: "dark", reducedMotion: "reduce" });
+  const page = await context.newPage();
+  await page.goto("/sign-in");
+  await expect(page.getByRole("region", { name: "Email me a sign-in link" })).toBeVisible();
+  await expectNoAxeViolations(page);
+  const dead = `#t=${"A".repeat(43)}`;
+  await limitedStep(page, () => page.goto(`/sign-in/link${dead}`), page.getByText(/isn't valid any more/));
+  await expectNoAxeViolations(page);
+  await limitedStep(page, () => page.goto(`/invitations/accept${dead}`), page.getByText(/isn't valid any more/));
+  await expectNoAxeViolations(page);
+  await context.close();
+});

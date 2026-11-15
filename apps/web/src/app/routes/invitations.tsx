@@ -46,6 +46,7 @@ function emailOutcomeMessage(outcome: InvitationEmailOutcome, email: string): st
   if (outcome === "queued") return copy.emailQueued(email);
   if (outcome === "not_configured") return copy.emailNotConfigured;
   if (outcome === "limited") return copy.emailLimited;
+  if (outcome === "email_unavailable") return copy.emailUnavailable;
   return null;
 }
 

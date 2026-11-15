@@ -44,6 +44,8 @@ export function emailRetryDelaySeconds(attempts: number): number {
 export interface EnqueueInput extends RenderedEmail {
   kind: EmailKind;
   to: string;
+  /** When the email's link stops working; the job is never sent or retried after it. */
+  expiresAt?: number;
 }
 
 /** Queues one email. Returns the job ID, or `unavailable` when the queue refused it. */
@@ -58,6 +60,7 @@ export async function enqueueEmail(ctx: CoreContext, input: EnqueueInput): Promi
     subject: input.subject,
     text: input.text,
     html: input.html,
+    ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
   };
   const parsed = emailSendMessage.safeParse(message);
   if (!parsed.success) {
@@ -164,6 +167,12 @@ export function emailQueueHandler(options: EmailHandlerOptions = {}) {
         log.info("email job already settled; not sending again", { state: existing.state });
         return ACK;
       }
+      // A link that no longer works isn't worth sending (a magic link after 15 minutes).
+      if (message.expiresAt !== undefined && ctx.now() >= message.expiresAt) {
+        log.warn("email's link expired before it could be sent; the job failed");
+        await record(ctx, message.jobId, message.kind, "failed", { attempts: ctx.attempts, error: "expired" });
+        return ACK;
+      }
       const provider = await loadEmailProvider(ctx);
       const installation = await loadInstallation(ctx.env.DB);
       const driver = resolveDriver(ctx.env, provider, deps(installation?.canonicalOrigin ?? null));
@@ -181,11 +190,16 @@ export function emailQueueHandler(options: EmailHandlerOptions = {}) {
         html: message.html,
       });
       if (outcome.kind === "sent") {
-        await record(ctx, message.jobId, message.kind, "sent", {
-          attempts: ctx.attempts,
-          driver: driver.kind,
-          messageId: outcome.messageId,
-        });
+        // Sent is sent: failing to record it must not make the queue deliver (and send) it again.
+        try {
+          await record(ctx, message.jobId, message.kind, "sent", {
+            attempts: ctx.attempts,
+            driver: driver.kind,
+            messageId: outcome.messageId,
+          });
+        } catch (error) {
+          log.error("email sent but its delivery record wasn't updated", { driver: driver.kind, error });
+        }
         log.info("email sent", { driver: driver.kind });
         return ACK;
       }
@@ -196,6 +210,20 @@ export function emailQueueHandler(options: EmailHandlerOptions = {}) {
           error: outcome.code,
         });
         log.warn("email refused permanently", { driver: driver.kind, code: outcome.code });
+        return ACK;
+      }
+      const delaySeconds = emailRetryDelaySeconds(ctx.attempts);
+      // Retrying past the link's lifetime would deliver a dead link (or dead-letter a live one): stop.
+      if (message.expiresAt !== undefined && ctx.now() + delaySeconds * 1000 >= message.expiresAt) {
+        await record(ctx, message.jobId, message.kind, "failed", {
+          attempts: ctx.attempts,
+          driver: driver.kind,
+          error: `expired:${outcome.code}`.slice(0, 120),
+        });
+        log.warn("email failed for now and its link expires before a retry; the job failed", {
+          driver: driver.kind,
+          code: outcome.code,
+        });
         return ACK;
       }
       if (ctx.attempts >= MAX_EMAIL_TRIES) {
@@ -215,7 +243,6 @@ export function emailQueueHandler(options: EmailHandlerOptions = {}) {
         driver: driver.kind,
         error: outcome.code,
       });
-      const delaySeconds = emailRetryDelaySeconds(ctx.attempts);
       log.info("email failed for now; will retry", { driver: driver.kind, code: outcome.code, delaySeconds });
       return { kind: "retry", delaySeconds };
     },

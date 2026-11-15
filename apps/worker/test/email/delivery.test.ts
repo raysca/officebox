@@ -254,6 +254,104 @@ describe("the email queue consumer (TDD §7.6)", () => {
   });
 });
 
+describe("links that expire (review M1): no sending, retrying or dead-lettering after the link's lifetime", () => {
+  it("a job whose link has expired fails as expired without sending", async () => {
+    await configureEmail();
+    const message = { ...(await queuedJob("magic_link")), expiresAt: Date.now() - 1 };
+    const { driver, sent } = fakeDriver([]);
+    expect(await run(message, driver)).toEqual({ kind: "ack" });
+    expect(sent).toHaveLength(0);
+    expect(await state(message.jobId)).toMatchObject({ state: "failed", last_error: "expired" });
+  });
+
+  it("a transient failure whose retry would land after the link expires fails instead of retrying", async () => {
+    await configureEmail();
+    // About 7 minutes of a magic link left: a 1-minute retry is fine; an 8-minute one would land after it.
+    const base = await queuedJob("magic_link");
+    const message = { ...base, expiresAt: Date.now() + 7 * 60 * 1000 };
+    const first = fakeDriver([{ kind: "transient", code: "http_503" }]);
+    expect(await run(message, first.driver, 1)).toEqual({ kind: "retry", delaySeconds: 60 });
+    const fourth = fakeDriver([{ kind: "transient", code: "http_503" }]);
+    expect(await run(message, fourth.driver, 4)).toEqual({ kind: "ack" });
+    expect(await state(message.jobId)).toMatchObject({ state: "failed", last_error: "expired:http_503" });
+  });
+
+  it("an expired link is never dead-lettered, even on the 8th try", async () => {
+    await configureEmail();
+    const message = { ...(await queuedJob("invitation")), expiresAt: Date.now() + 60_000 };
+    const { driver } = fakeDriver([{ kind: "transient", code: "network" }]);
+    expect(await run(message, driver, MAX_EMAIL_TRIES)).toEqual({ kind: "ack" });
+    expect(await state(message.jobId)).toMatchObject({ state: "failed" });
+  });
+
+  it("magic-link and invitation emails carry their link's expiry", async () => {
+    const { enqueueEmail: enqueue } = await import("../../src/features/email/delivery");
+    const expiresAt = Date.now() + 900_000;
+    await enqueue(
+      { env: { ...env, EMAIL_QUEUE: outbox as unknown as Queue }, log: quiet, now: Date.now },
+      { kind: "magic_link", to: "ana@example.com", subject: "s", text: "t", html: "h", expiresAt },
+    );
+    expect(outbox.messages.at(-1)).toMatchObject({ kind: "magic_link", expiresAt });
+  });
+});
+
+describe("a sent email whose record can't be written is still acked (review L1)", () => {
+  it("doesn't redeliver (and so resend) an email the provider accepted", async () => {
+    await configureEmail();
+    const message = await queuedJob();
+    const failingDb = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("ON CONFLICT (id) DO UPDATE SET state")) throw new Error("D1 unavailable");
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const { driver, sent } = fakeDriver([{ kind: "sent", messageId: "x" }]);
+    const handler = emailQueueHandler({ driverFor: () => driver });
+    const outcome = await handler.handle(message, {
+      env: { ...env, DB: failingDb },
+      log: quiet,
+      now: Date.now,
+      attempts: 1,
+      messageId: ulid(),
+    });
+    expect(outcome).toEqual({ kind: "ack" });
+    expect(sent).toHaveLength(1);
+  });
+});
+
+describe("the test email sink is inert on a non-loopback origin (review test gap)", () => {
+  it("the Worker's own queue consumer sends through the configured driver, and creates no sink table", async () => {
+    await configureEmail();
+    const message = await queuedJob();
+    const sentThroughBinding: unknown[] = [];
+    const binding = {
+      send: (m: unknown) => {
+        sentThroughBinding.push(m);
+        return Promise.resolve({ messageId: "cf-1" });
+      },
+    } as unknown as SendEmail;
+    const { createExecutionContext, createMessageBatch, getQueueResult } = await import("cloudflare:test");
+    const worker = (await import("../../src/index")).default;
+    const batch = createMessageBatch("officebox-email", [
+      { id: "m-sink", timestamp: new Date(), attempts: 1, body: message },
+    ]);
+    const ctx = createExecutionContext();
+    await worker.queue(batch, { ...env, EMAIL_TEST_SINK: "1", EMAIL: binding }, ctx);
+    const result = await getQueueResult(batch, ctx);
+    expect(result.explicitAcks).toEqual(["m-sink"]);
+    expect(sentThroughBinding).toHaveLength(1);
+    const table = await env.DB.prepare("SELECT name FROM sqlite_master WHERE name = 'email_test_sink'").first();
+    expect(table).toBeNull();
+    expect(await state(message.jobId)).toMatchObject({ state: "sent", driver: "cloudflare" });
+  });
+});
+
 describe("email settings (Platform §7: email_provider is owner-only; no default domain)", () => {
   it("lists settings with who may change each, and the email status (secret names only)", async () => {
     await configureEmail({ driver: "none" });
@@ -369,6 +467,14 @@ describe("Send test email (TDD §7.6): admin-only, to the actor's own address, a
     expect(audit!.actor_id).toBe(ws.ownerId);
     // No recipient can be chosen.
     expect((await ws.browser.json("/api/admin/email/test", { body: { to: "someone@example.com" } })).status).toBe(400);
+  });
+
+  it("is limited to 5 an hour per actor (review L5)", async () => {
+    await configureEmail();
+    const admin = await addMember("admin");
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) statuses.push((await admin.browser.json("/api/admin/email/test", { body: {} })).status);
+    expect(statuses).toEqual([202, 202, 202, 202, 202, 429]);
   });
 
   it("admins may send one (to themselves); members may not", async () => {

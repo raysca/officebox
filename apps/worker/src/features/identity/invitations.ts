@@ -21,7 +21,7 @@ import { auditStatement } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
 import { ulid, ulidTime } from "../../core/ids";
-import { checkLimit, defineLimit } from "../../core/rate-limit";
+import { checkLimit, defineLimit, windowFor } from "../../core/rate-limit";
 import { SETTINGS, SettingsStore } from "../../core/settings";
 import { isEmailConfigured } from "../email/config";
 import { enqueueEmail } from "../email/delivery";
@@ -180,8 +180,18 @@ async function sendInvitationEmail(
     link,
     expiresAt: row.expires_at,
   });
-  const queued = await enqueueEmail(ctx, { kind: "invitation", to: row.email, ...rendered });
-  if (!queued.ok) return "not_configured";
+  const queued = await enqueueEmail(ctx, { kind: "invitation", to: row.email, ...rendered, expiresAt: row.expires_at });
+  if (!queued.ok) {
+    // The queue refused it: give the day's quota back (best effort), and say so; the link still works.
+    const { start } = windowFor(INVITATION_SEND_LIMIT.window, ctx.now());
+    await new Database(ctx.env.DB).run(
+      `UPDATE rate_counters SET count = count - 1
+        WHERE scope = ? AND key = 'workspace' AND window_start = ? AND count > 0`,
+      INVITATION_SEND_LIMIT.name,
+      start,
+    );
+    return "email_unavailable";
+  }
   expectOk(
     await new Database(ctx.env.DB).run("UPDATE invitations SET last_sent_at = ? WHERE id = ?", ctx.now(), row.id),
   );
@@ -389,6 +399,17 @@ async function attemptUser(db: D1Database, attemptId: string): Promise<AttemptUs
 type ConsumedState = { kind: "resume"; user: AttemptUser } | { kind: "error"; error: ApiError };
 
 /** What a consumed invitation allows: reopening only while the account has no passkey or session. */
+async function attemptClaimedHandle(db: D1Database, attemptId: string, userId: string): Promise<boolean> {
+  const row = expectOk(
+    await new Database(db).first<{ one: number }>(
+      "SELECT 1 AS one FROM handles WHERE created_attempt_id = ? AND owner_type = 'user' AND owner_id = ?",
+      attemptId,
+      userId,
+    ),
+  );
+  return row !== null;
+}
+
 async function consumedState(ctx: CoreContext, row: InvitationRow): Promise<ConsumedState> {
   const attempt = row.accepted_attempt_id;
   if (attempt === null) return { kind: "error", error: GONE };
@@ -402,6 +423,11 @@ async function consumedState(ctx: CoreContext, row: InvitationRow): Promise<Cons
   if (row.expires_at <= ctx.now()) return { kind: "error", error: GONE };
   if (user.status !== "active" || user.passkeys > 0 || user.first_signed_in_at !== null || !user.email) {
     return { kind: "error", error: GONE };
+  }
+  // The account counts only once its accept has claimed the handle: until then the accept that made it
+  // may still lose the handle race and delete it, so no ticket is issued for it (in progress).
+  if (row.accepted_at === null && !(await attemptClaimedHandle(ctx.env.DB, attempt, user.id))) {
+    return { kind: "error", error: IN_PROGRESS };
   }
   return { kind: "resume", user };
 }
