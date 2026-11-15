@@ -1,0 +1,7 @@
+# Worker secrets. Copy to .dev.vars for local development (`npm run dev`); never commit .dev.vars.
+# The Deploy to Cloudflare button reads this file to prompt for secrets at deploy time.
+# Full inventory, purpose and rotation: specs/platform.md §16.
+
+# First-run setup token (TDD §6.8). Optional: if left blank, a one-time token is generated and
+# written to Workers Logs on the first visit. Used from M1.
+SETUP_TOKEN=
