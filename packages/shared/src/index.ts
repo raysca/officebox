@@ -27,3 +27,6 @@ export * from "./ids";
 export * from "./envelope";
 export * from "./health";
 export * from "./security";
+export * from "./permissions";
+export * from "./identity";
+export * from "./common-passwords";

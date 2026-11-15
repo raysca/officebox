@@ -10,6 +10,9 @@ export const ERROR_CODES = [
   "validation_failed", // the request body or message failed its Zod schema, or wasn't valid JSON
   "unauthenticated", // no valid session
   "forbidden", // signed in, but the permission engine denied the action
+  "invalid_credentials", // sign-in: the email or password is wrong (never says which; Identity §4.4)
+  "csrf_failed", // a state-changing request without the X-Officebox-Request header or a matching Origin (TDD §8.2)
+  "setup_required", // first-run setup hasn't run yet: the web app goes to /setup (TDD §6.8)
   "not_found",
   "method_not_allowed", // the path exists but not with this HTTP method
   "conflict", // a concurrent change or a uniqueness rule
