@@ -1,0 +1,2 @@
+# Only needed for GET /bench/pepper under `npm run dev`. Any long random string.
+PEPPER_1=change-me-to-a-long-random-string

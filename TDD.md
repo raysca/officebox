@@ -1676,15 +1676,15 @@ Decided in v1.3 (from the review):
 
 To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
 
-**M0 foundation spike** (before M1):
-- **PBKDF2 production cap:** confirm whether deployed Workers allow 600,000 PBKDF2 iterations (local workerd does); otherwise use the §8.1 fallback.
-- **WebAuthn library:** confirm a maintained library runs in Workers, or implement verification with WebCrypto.
-- **Rate Limiting binding:** confirm the supported periods (10 and 60 seconds) and per-location behaviour; longer windows use D1 counters (Platform §8).
-- **Queue `delaySeconds` maximum** (12 hours): confirm, and test the `email_release` path for longer holds.
-- **PDF preview under `Content-Security-Policy: sandbox`** in Chrome's built-in viewer (§8.3).
+**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md):
+- **PBKDF2 production cap:** almost certainly 100,000. workerd's default limit enforcer caps it there; the standalone server used by `wrangler dev` removes the cap, which is why 600k works locally (74 ms vs 12 ms for 100k). workerd issue #1346 is still open. Recommendation: M1 uses the §8.1 fallback **PBKDF2 100k + HMAC pepper**; switch to 600k if the production probe accepts it. Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works only with precompiled modules (~45 ms, +25 KiB). *Needs production run.*
+- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, and `sign_count` clone detection. *Verified locally.*
+- **Rate Limiting binding:** periods are 10 or 60 s only; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. Binding only for abuse throttles (sign-in per IP, setup/recovery/invites, link previews, general API); the other platform §8 rows stay DO or D1. *Production semantics need a production run.*
+- **Queue `delaySeconds` maximum:** **24 hours** (86,400 s) for send, sendBatch and retries per current docs, not 12 hours; Miniflare rejects 86,401. `email_release` is still needed for holds over 24 h. *Documented, local verified.*
+- **PDF preview under `Content-Security-Policy: sandbox`:** Chromium's viewer renders it, directly and in an `<iframe>`. An `<iframe sandbox>` attribute blocks it, so previews use a plain iframe and rely on the response CSP (§8.3). The headless shell has no PDF viewer. *Verified locally (Chromium 153); Firefox and Safari untested.*
 
 **New in v1.4:**
-- **WebAuthn library spike before M1:** confirm a maintained library (for example SimpleWebAuthn) runs in Workers, or implement verification with WebCrypto.
+- **WebAuthn library spike before M1:** done. SimpleWebAuthn runs in Workers (see the M0 foundation spike above).
 - **Holiday dataset before M5:** licence compatible with AGPL, plus the bundle size against the Worker limit.
 - **Size version compare before M6b:** a custom diff of two document states (§4.3); it may move to Later.
 - **ReminderScheduler load:** confirm a single instance handles a 100-member workspace's 48-hour trigger window, or shard it.

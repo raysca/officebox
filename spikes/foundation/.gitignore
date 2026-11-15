@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+pdf-shots/
+probe/.probe.json
+probe/probe-report*.json
