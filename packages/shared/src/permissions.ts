@@ -576,11 +576,21 @@ function stepUp(actor: Actor, check: PermissionCheck, now: number): Decision {
 }
 
 /**
+ * Step 1 on its own: why this actor can't act at all, or null when they're active. The Worker calls it
+ * before loading any facts, so a disabled account costs no queries.
+ */
+export function actorDenial(actor: Pick<Actor, "status">): DenialReason | null {
+  if (actor.status === "system") return "system_actor";
+  if (actor.status !== "active") return "inactive";
+  return null;
+}
+
+/**
  * Decides one check at time `now` (epoch ms). Pure: the caller supplies every fact.
  */
 export function decide(actor: Actor, check: PermissionCheck, now: number): Decision {
-  if (actor.status === "system") return deny("system_actor");
-  if (actor.status !== "active") return deny("inactive");
+  const refused = actorDenial(actor);
+  if (refused) return deny(refused);
   const decision = rule(actor, check);
   if (!decision.ok) return decision;
   return stepUp(actor, check, now);
