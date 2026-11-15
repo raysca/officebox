@@ -46,6 +46,7 @@ export function shouldRetry(failureCount: number, error: unknown): boolean {
 export function retryDelay(failureCount: number, error: unknown): number {
   if (error instanceof ApiRequestError && "retryAfterSeconds" in error.detail) {
     const seconds = error.detail.retryAfterSeconds;
+    // shouldRetry already refuses waits over the cap; the min is a guard for direct callers.
     if (seconds !== undefined) return Math.min(seconds * 1000, MAX_RETRY_DELAY_MS);
   }
   return Math.min(1000 * 2 ** failureCount, 10_000);

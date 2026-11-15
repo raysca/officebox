@@ -12,6 +12,7 @@ import {
   apiRequest,
   CSRF_HEADER,
   describeApiError,
+  parseHttpDate,
   parseRetryAfter,
   unwrap,
   type ApiClientError,
@@ -145,6 +146,13 @@ describe("Retry-After", () => {
     const now = Date.parse("2026-11-15T10:00:00Z");
     expect(parseRetryAfter("Sun, 15 Nov 2026 10:00:30 GMT", now)).toBe(30);
     expect(parseRetryAfter("Sun, 15 Nov 2026 09:00:00 GMT", now)).toBe(0);
+    // The obsolete forms recipients must still accept (RFC 9110 §5.6.7), read as UTC.
+    expect(parseRetryAfter("Sunday, 15-Nov-26 10:00:30 GMT", now)).toBe(30);
+    expect(parseRetryAfter("Sun Nov 15 10:00:30 2026", now)).toBe(30);
+    expect(parseHttpDate("Sun Nov  6 08:49:37 1994")).toBe(Date.UTC(1994, 10, 6, 8, 49, 37));
+    // A two-digit year more than 50 years ahead is the previous century.
+    expect(parseHttpDate("Sunday, 06-Nov-94 08:49:37 GMT", now)).toBe(Date.UTC(1994, 10, 6, 8, 49, 37));
+    expect(parseHttpDate("Sun, 32 Nov 2026 10:00:00 GMT")).toBeUndefined();
   });
 
   it("is carried on http and api errors, the body's value winning", async () => {

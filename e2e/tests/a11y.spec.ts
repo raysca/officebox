@@ -51,10 +51,10 @@ for (const colorScheme of ["light", "dark"] as const) {
  * CSS viewport a 1280 px window has at 200% browser zoom, where media queries do respond.
  */
 const FOCUS_LAYOUTS = [
-  { name: "1280 px", width: 1280, height: 600, textScale: 1 },
-  { name: "640 px (200% zoom)", width: 640, height: 400, textScale: 1 },
-  { name: "320 px", width: 320, height: 640, textScale: 1 },
-  { name: "320 px with 200% text", width: 320, height: 640, textScale: 2 },
+  { name: "a 1280 px viewport", width: 1280, height: 600, textScale: 1 },
+  { name: "a 640 px viewport (layout equivalent of 200% zoom)", width: 640, height: 400, textScale: 1 },
+  { name: "a 320 px viewport", width: 320, height: 640, textScale: 1 },
+  { name: "a 320 px viewport with 200% text", width: 320, height: 640, textScale: 2 },
 ] as const;
 
 for (const layout of FOCUS_LAYOUTS) {
@@ -125,7 +125,9 @@ test.describe("reflow at 320 CSS px (WCAG 1.4.10)", () => {
   });
 });
 
-test("at 200% browser zoom the shell reflows without horizontal scrolling (WCAG 1.4.4)", async ({ page }) => {
+test("a 640 px viewport (layout equivalent of 200% zoom) reflows without horizontal scrolling (WCAG 1.4.4)", async ({
+  page,
+}) => {
   // A 1280 px window at 200% zoom has a 640 CSS px viewport, and media queries respond to it.
   await page.setViewportSize({ width: 640, height: 400 });
   await page.goto("/");

@@ -91,9 +91,29 @@ describe("theme toggle", () => {
       first.unmount();
       await renderApp("/");
       expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Theme" }).value).toBe("dark");
-      await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "system");
     } finally {
       blocked.mockRestore();
+      // Clear the in-memory choice for later tests (storage works again, so it's stored instead).
+      await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "system");
+    }
+  });
+
+  it("remembers the choice for this page when storage can be read but not written", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(THEME_STORAGE_KEY, "light");
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+    try {
+      const first = await renderApp("/");
+      await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "dark");
+      first.unmount();
+      await renderApp("/");
+      expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Theme" }).value).toBe("dark");
+    } finally {
+      setItem.mockRestore();
+      // Clear the in-memory choice for later tests.
+      await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "system");
     }
   });
 

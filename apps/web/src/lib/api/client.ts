@@ -117,21 +117,72 @@ export async function apiRequest<S extends z.ZodType>(
   }
 }
 
-/** RFC 9110 IMF-fixdate, the only HTTP-date form senders may generate: "Sun, 06 Nov 1994 08:49:37 GMT". */
-const IMF_FIXDATE =
-  /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH = `(${MONTHS.join("|")})`;
+const TIME = "(\\d{2}):(\\d{2}):(\\d{2})";
+
+/** The three HTTP-date forms recipients must accept (RFC 9110 §5.6.7). */
+const HTTP_DATE_FORMS: { pattern: RegExp; fields: (m: RegExpExecArray) => [string, string, string] }[] = [
+  // IMF-fixdate, the preferred form: "Sun, 06 Nov 1994 08:49:37 GMT"
+  {
+    pattern: new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{2}) ${MONTH} (\\d{4}) ${TIME} GMT$`),
+    fields: (m) => [m[3]!, m[2]!, m[1]!],
+  },
+  // RFC 850 (obsolete): "Sunday, 06-Nov-94 08:49:37 GMT"
+  {
+    pattern: new RegExp(
+      `^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\\d{2})-${MONTH}-(\\d{2}) ${TIME} GMT$`,
+    ),
+    fields: (m) => [m[3]!, m[2]!, m[1]!],
+  },
+  // asctime (obsolete): "Sun Nov  6 08:49:37 1994"
+  {
+    pattern: new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ${MONTH} ( \\d|\\d{2}) ${TIME} (\\d{4})$`),
+    fields: (m) => [m[6]!, m[1]!, m[2]!.trim()],
+  },
+];
 
 /**
- * Seconds from a Retry-After header: delay-seconds (digits only) or an HTTP date. Anything else
- * ("-5", "1.5", "1e3", which Date.parse would happily read as a date) is undefined, so the normal
- * backoff applies.
+ * Parses an HTTP-date as UTC, by hand: Date.parse reads asctime as local time, accepts many
+ * non-HTTP formats, and treats two-digit years its own way.
+ */
+export function parseHttpDate(value: string, now = Date.now()): number | undefined {
+  for (const { pattern, fields } of HTTP_DATE_FORMS) {
+    const match = pattern.exec(value);
+    if (!match) continue;
+    const [yearText, monthName, dayText] = fields(match);
+    const timeMatch = new RegExp(TIME).exec(value);
+    if (!timeMatch) return undefined;
+    let year = Number(yearText);
+    if (yearText.length === 2) {
+      // RFC 9110: a two-digit year more than 50 years in the future means the most recent past year
+      // with the same last two digits.
+      const nowYear = new Date(now).getUTCFullYear();
+      year += Math.floor(nowYear / 100) * 100;
+      if (year > nowYear + 50) year -= 100;
+    }
+    const [hours, minutes, seconds] = [timeMatch[1], timeMatch[2], timeMatch[3]].map(Number) as [
+      number,
+      number,
+      number,
+    ];
+    const day = Number(dayText);
+    if (day < 1 || day > 31 || hours > 23 || minutes > 59 || seconds > 60) return undefined;
+    return Date.UTC(year, MONTHS.indexOf(monthName), day, hours, minutes, seconds);
+  }
+  return undefined;
+}
+
+/**
+ * Seconds from a Retry-After header: delay-seconds (digits only) or an HTTP-date in any of the three
+ * forms. Anything else ("-5", "1.5", "1e3", which Date.parse would happily read as a date) is
+ * undefined, so the normal backoff applies.
  */
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
   const trimmed = value?.trim() ?? "";
   if (/^\d+$/.test(trimmed)) return Number(trimmed);
-  if (!IMF_FIXDATE.test(trimmed)) return undefined;
-  const date = Date.parse(trimmed);
-  if (Number.isNaN(date)) return undefined;
+  const date = parseHttpDate(trimmed, now);
+  if (date === undefined) return undefined;
   return Math.max(0, Math.ceil((date - now) / 1000));
 }
 

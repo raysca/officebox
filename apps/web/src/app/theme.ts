@@ -27,19 +27,20 @@ function storage(): Storage | null {
 }
 
 /**
- * The choice made in this page when storage is unavailable (blocked site data, some private modes),
- * so it survives components unmounting and remounting until the page reloads.
+ * The choice made in this page when it couldn't be stored (blocked site data, a full quota, some
+ * private modes), so it survives components unmounting and remounting until the page reloads.
  */
 let memoryPreference: ThemePreference | null = null;
 
 export function readThemePreference(): ThemePreference {
+  // A choice that couldn't be stored (no storage, or setItem threw: quota, Safari private mode)
+  // wins over whatever storage still holds.
+  if (memoryPreference !== null) return memoryPreference;
   try {
-    const store = storage();
-    if (!store) return memoryPreference ?? "system";
-    const value = store.getItem(THEME_STORAGE_KEY);
+    const value = storage()?.getItem(THEME_STORAGE_KEY);
     return isThemePreference(value) ? value : "system";
   } catch {
-    return memoryPreference ?? "system";
+    return "system";
   }
 }
 
