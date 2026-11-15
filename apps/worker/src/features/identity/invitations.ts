@@ -21,7 +21,7 @@ import { auditStatement } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
 import { ulid, ulidTime } from "../../core/ids";
-import { checkLimit, defineLimit, windowFor } from "../../core/rate-limit";
+import { defineLimit, refundLimit, takeCounterLimit } from "../../core/rate-limit";
 import { SETTINGS, SettingsStore } from "../../core/settings";
 import { isEmailConfigured } from "../email/config";
 import { enqueueEmail } from "../email/delivery";
@@ -171,8 +171,8 @@ async function sendInvitationEmail(
 ): Promise<InvitationEmailOutcome> {
   if (!(await isEmailConfigured(ctx))) return "not_configured";
   // 200 invitation emails per workspace per UTC day (Platform §8); beyond it, the copy link still works.
-  const limited = await checkLimit(ctx, INVITATION_SEND_LIMIT, "workspace");
-  if (!limited.ok) return "limited";
+  const counted = await takeCounterLimit(ctx, INVITATION_SEND_LIMIT, "workspace");
+  if (!counted.ok) return "limited";
   const rendered = invitationEmail({
     workspace: installation.workspaceName,
     inviterName,
@@ -182,14 +182,18 @@ async function sendInvitationEmail(
   });
   const queued = await enqueueEmail(ctx, { kind: "invitation", to: row.email, ...rendered, expiresAt: row.expires_at });
   if (!queued.ok) {
-    // The queue refused it: give the day's quota back (best effort), and say so; the link still works.
-    const { start } = windowFor(INVITATION_SEND_LIMIT.window, ctx.now());
-    await new Database(ctx.env.DB).run(
-      `UPDATE rate_counters SET count = count - 1
-        WHERE scope = ? AND key = 'workspace' AND window_start = ? AND count > 0`,
-      INVITATION_SEND_LIMIT.name,
-      start,
-    );
+    // Nothing was sent: give the quota back in the window it was taken from. The person sees
+    // "couldn't be emailed right now" either way (the copy link works); the log tells a queue outage
+    // (`unavailable`) from an email that failed its own schema (`internal`, a bug), which is an error.
+    await refundLimit(ctx, counted.value);
+    if (queued.error.code === "internal") {
+      ctx.log.error("invitation email failed its schema; not sent (a bug, not an outage)", {
+        invitationId: row.id,
+        reason: "email_invalid",
+      });
+    } else {
+      ctx.log.warn("invitation email couldn't be queued", { invitationId: row.id, reason: "queue_unavailable" });
+    }
     return "email_unavailable";
   }
   expectOk(

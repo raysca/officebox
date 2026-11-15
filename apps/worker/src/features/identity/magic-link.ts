@@ -20,7 +20,7 @@ import type { Auth } from "./auth";
 import { tokenHash } from "./crypto";
 import { approxLocation, deviceLabel } from "./device";
 import type { ClaimedInstallation } from "./installation";
-import { recordSignInDevice } from "./known-devices";
+import { lookupDevice, rememberDevice } from "./known-devices";
 import { emailSecurityNotices } from "./notice-email";
 import { noticeStatement } from "./notices";
 import { ipKey } from "./rate-limits";
@@ -264,11 +264,12 @@ export async function confirmMagicLink(
   // The session exists now, so a failure here is logged and never costs the person their sign-in.
   const setCookies = [...sessionCookies];
   let newDevice = false;
+  // Order matters: the notice is written before the device is remembered, so if writing it fails the
+  // browser stays unknown and the next sign-in from it raises the notice again; nothing is lost.
   try {
-    const device = await recordSignInDevice(ctx.env.DB, secrets.tokenHashKey, userId, request.headers, now);
-    setCookies.push(device.setCookie);
-    newDevice = device.isNew;
-    if (device.isNew) {
+    const device = await lookupDevice(ctx.env.DB, secrets.tokenHashKey, userId, request.headers);
+    newDevice = !device.known;
+    if (newDevice) {
       const details = {
         deviceLabel: deviceLabel(request.headers.get("User-Agent")),
         approxLocation: approxLocation(request.cf as { city?: unknown; country?: unknown } | undefined),
@@ -277,6 +278,7 @@ export async function confirmMagicLink(
       expectOk(await database.batchRun([noticeStatement(database, userId, "magic_link_new_device", details, now)]));
       await emailSecurityNotices(ctx, [{ userId, kind: "magic_link_new_device", details, at: now }]);
     }
+    setCookies.push(await rememberDevice(ctx.env.DB, userId, device, now));
   } catch (error) {
     ctx.log.error("known-device check or new-device notice failed after a magic-link sign-in", { userId, error });
   }

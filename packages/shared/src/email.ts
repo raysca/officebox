@@ -37,6 +37,11 @@ const hostnameSchema = z
   // (decimal, or 0x hex), so dotted IPv4 forms are refused; IPv6 literals never match the pattern above.
   .refine((host) => !/^(\d+|0x[0-9a-f]*)$/.test(host.slice(host.lastIndexOf(".") + 1)), {
     message: "A hostname such as smtp.example.com, not an IP address.",
+  })
+  // Names reserved for loopback and private networks. Wildcard DNS (nip.io and the like) can't be ruled
+  // out by name; Workers' connect() can't reach private address ranges anyway (Platform §9).
+  .refine((host) => !/(^|\.)(localhost|local|internal)$/.test(host), {
+    message: "A public hostname: not localhost, .local or .internal.",
   });
 
 /** An AWS region name such as `eu-west-1`. */

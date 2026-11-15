@@ -31,6 +31,52 @@ export function deviceCookie(value: string): string {
   return `${DEVICE_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${DEVICE_COOKIE_MAX_AGE}`;
 }
 
+export interface DeviceLookup {
+  /** The browser's device ID, or a new one when it had none. */
+  value: string;
+  hash: string;
+  /** Whether this member has signed in from this browser before. */
+  known: boolean;
+}
+
+/** Looks the request's browser up for `userId` without recording anything. */
+export async function lookupDevice(
+  db: D1Database,
+  key: string,
+  userId: string,
+  headers: Headers | undefined,
+): Promise<DeviceLookup> {
+  const value = readDeviceCookie(headers) ?? randomToken(32);
+  const hash = await tokenHash(key, `device:${value}`);
+  const row = expectOk(
+    await new Database(db).first<{ one: number }>(
+      "SELECT 1 AS one FROM user_devices WHERE user_id = ? AND device_hash = ?",
+      userId,
+      hash,
+    ),
+  );
+  return { value, hash, known: row !== null };
+}
+
+/** Records (or refreshes) a device for `userId`; returns the Set-Cookie value that keeps it. */
+export async function rememberDevice(
+  db: D1Database,
+  userId: string,
+  device: DeviceLookup,
+  now: number,
+): Promise<string> {
+  expectOk(
+    await new Database(db).run(
+      `INSERT INTO user_devices (user_id, device_hash, first_seen_at, last_seen_at) VALUES (?1, ?2, ?3, ?3)
+       ON CONFLICT (user_id, device_hash) DO UPDATE SET last_seen_at = ?3`,
+      userId,
+      device.hash,
+      now,
+    ),
+  );
+  return deviceCookie(device.value);
+}
+
 export interface DeviceOutcome {
   /** True when this member had never signed in from this browser before. */
   isNew: boolean;

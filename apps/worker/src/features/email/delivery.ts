@@ -123,6 +123,22 @@ async function record(
   state: DeliveryState,
   fields: { attempts: number; driver?: string | null; messageId?: string | null; error?: string | null },
 ): Promise<void> {
+  try {
+    await writeRecord(ctx, id, kind, state, fields);
+  } catch (error) {
+    // The record is bookkeeping: failing to write it must never change what happens to the message (a
+    // thrown error would retry it, resending a sent email or dead-lettering an expired link).
+    ctx.log.error("email delivery record wasn't updated", { jobId: id, state, error });
+  }
+}
+
+async function writeRecord(
+  ctx: CoreContext,
+  id: string,
+  kind: EmailKind,
+  state: DeliveryState,
+  fields: { attempts: number; driver?: string | null; messageId?: string | null; error?: string | null },
+): Promise<void> {
   const now = ctx.now();
   // Upsert: a message whose row is missing (it can't normally be) still gets one.
   expectOk(
@@ -157,6 +173,19 @@ export function emailQueueHandler(options: EmailHandlerOptions = {}) {
     schema: emailSendMessage,
     async handle(message, ctx: QueueMessageContext): Promise<HandlerOutcome> {
       const log = ctx.log.child({ jobId: message.jobId, kind: message.kind });
+      // A link that no longer works isn't worth sending (a magic link after 15 minutes). Checked before
+      // any D1 read, so even with D1 down an expired link is acked, never retried into the DLQ.
+      if (message.expiresAt !== undefined && ctx.now() >= message.expiresAt) {
+        const settled = await new Database(ctx.env.DB)
+          .first<{ state: string }>("SELECT state FROM email_deliveries WHERE id = ?", message.jobId)
+          .then((r) => (r.ok ? r.value?.state !== undefined && r.value.state !== "queued" : false))
+          .catch(() => false);
+        if (!settled) {
+          log.warn("email's link expired before it could be sent; the job failed");
+          await record(ctx, message.jobId, message.kind, "failed", { attempts: ctx.attempts, error: "expired" });
+        }
+        return ACK;
+      }
       const existing = expectOk(
         await new Database(ctx.env.DB).first<{ state: string }>(
           "SELECT state FROM email_deliveries WHERE id = ?",
@@ -165,12 +194,6 @@ export function emailQueueHandler(options: EmailHandlerOptions = {}) {
       );
       if (existing && existing.state !== "queued") {
         log.info("email job already settled; not sending again", { state: existing.state });
-        return ACK;
-      }
-      // A link that no longer works isn't worth sending (a magic link after 15 minutes).
-      if (message.expiresAt !== undefined && ctx.now() >= message.expiresAt) {
-        log.warn("email's link expired before it could be sent; the job failed");
-        await record(ctx, message.jobId, message.kind, "failed", { attempts: ctx.attempts, error: "expired" });
         return ACK;
       }
       const provider = await loadEmailProvider(ctx);
@@ -190,16 +213,12 @@ export function emailQueueHandler(options: EmailHandlerOptions = {}) {
         html: message.html,
       });
       if (outcome.kind === "sent") {
-        // Sent is sent: failing to record it must not make the queue deliver (and send) it again.
-        try {
-          await record(ctx, message.jobId, message.kind, "sent", {
-            attempts: ctx.attempts,
-            driver: driver.kind,
-            messageId: outcome.messageId,
-          });
-        } catch (error) {
-          log.error("email sent but its delivery record wasn't updated", { driver: driver.kind, error });
-        }
+        // Sent is sent: a failure to record it is logged by record() and never redelivers the email.
+        await record(ctx, message.jobId, message.kind, "sent", {
+          attempts: ctx.attempts,
+          driver: driver.kind,
+          messageId: outcome.messageId,
+        });
         log.info("email sent", { driver: driver.kind });
         return ACK;
       }

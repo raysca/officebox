@@ -326,7 +326,13 @@ describe("SMTP over STARTTLS or implicit TLS", () => {
   });
 
   it("envelope addresses with brackets or whitespace are refused permanently, before anything is sent (review L3)", async () => {
-    for (const to of ["a@example.com> RCPT TO:<b@example.com", "a b@example.com", "<a@example.com>"]) {
+    for (const to of [
+      "a@example.com> RCPT TO:<b@example.com",
+      "a b@example.com",
+      "<a@example.com>",
+      '"a"@example.com',
+      "a@b@example.com",
+    ]) {
       const server = scriptedSmtp(GOOD_REPLIES);
       const outcome = await sendSmtp(server.connect, SETTINGS, { ...EMAIL, to }, Date.now());
       expect(outcome).toEqual({ kind: "permanent", code: "smtp:unsafe envelope address" });
@@ -345,7 +351,18 @@ describe("SMTP over STARTTLS or implicit TLS", () => {
         username: "u",
       }).success;
     expect(smtp("smtp.example.com")).toBe(true);
-    for (const host of ["192.168.1.10", "127.0.0.1", "10.0.0.1", "1.0x7f", "[::1]", "::1", "localhost"]) {
+    for (const host of [
+      "192.168.1.10",
+      "127.0.0.1",
+      "10.0.0.1",
+      "1.0x7f",
+      "[::1]",
+      "::1",
+      "localhost",
+      "mail.localhost",
+      "smtp.local",
+      "smtp.corp.internal",
+    ]) {
       expect(smtp(host), host).toBe(false);
     }
   });

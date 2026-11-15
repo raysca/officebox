@@ -45,6 +45,22 @@ export async function callWorker(request: Request, overrides: Partial<Env> = {})
   return response;
 }
 
+/** A D1 binding whose `prepare` throws (a D1 outage) for every statement `fails` matches. */
+export function failingDb(fails: (sql: string) => boolean): D1Database {
+  return new Proxy(env.DB, {
+    get(target, prop) {
+      if (prop === "prepare") {
+        return (sql: string) => {
+          if (fails(sql)) throw new Error("D1 unavailable");
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, prop) as unknown;
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
+
 /** The token in a link's fragment (`…#t=<token>`), or null. */
 export function fragmentToken(text: string): string | null {
   return /#t=([A-Za-z0-9_-]+)/.exec(text)?.[1] ?? null;

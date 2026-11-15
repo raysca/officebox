@@ -148,17 +148,59 @@ export function windowFor(window: CounterWindow, now: number, timeZone = "UTC"):
   return { start, end: startOfDay(start + 36 * HOUR_MS, zone) };
 }
 
+/** Which counter row an allowed action was counted in, so it can be given back ({@link refundLimit}). */
+export interface LimitReceipt {
+  scope: string;
+  key: string;
+  windowStart: number;
+}
+
+/**
+ * Like `checkLimit` for a D1 counter, but returns the window the action was counted in, for an action
+ * that may turn out not to have happened (a queue that refused an email) and should be refunded.
+ */
+export async function takeCounterLimit(
+  ctx: CoreContext,
+  limit: CounterLimit,
+  key: string,
+  options: CheckOptions = {},
+): Promise<Result<LimitReceipt, ApiError>> {
+  const windowStart = windowFor(limit.window, ctx.now(), options.timeZone).start;
+  const checked = await checkCounter(ctx, limit, key, options, windowStart);
+  return checked.ok ? ok({ scope: limit.name, key, windowStart }) : checked;
+}
+
+/**
+ * Gives one counted action back, in the exact window it was counted in (never a newer one, even across
+ * a window edge). Best effort: a failure is logged, never thrown.
+ */
+export async function refundLimit(ctx: CoreContext, receipt: LimitReceipt): Promise<void> {
+  try {
+    await new Database(ctx.env.DB).run(
+      "UPDATE rate_counters SET count = count - 1 WHERE scope = ? AND key = ? AND window_start = ? AND count > 0",
+      receipt.scope,
+      receipt.key,
+      receipt.windowStart,
+    );
+  } catch (error) {
+    ctx.log.error("could not refund a rate-limit count", { scope: receipt.scope, error });
+  }
+}
+
 async function checkCounter(
   ctx: CoreContext,
   limit: CounterLimit,
   key: string,
   options: CheckOptions,
+  windowStart?: number,
 ): Promise<Result<void, ApiError>> {
   const now = ctx.now();
   if (options.timeZone !== undefined && !isValidTimeZone(options.timeZone)) {
     ctx.log.warn("unknown time zone for a daily limit; using UTC", { limit: limit.name });
   }
-  const { start, end } = windowFor(limit.window, now, options.timeZone);
+  const window = windowFor(limit.window, now, options.timeZone);
+  const start = windowStart ?? window.start;
+  const end = window.end;
   // One atomic statement: insert the first hit, or count another while under the limit. When the
   // limit is reached the conflict update's WHERE fails, nothing is returned, and the count stays put.
   const row = expectOk(

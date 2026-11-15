@@ -15,6 +15,7 @@ import {
   addMember,
   Browser,
   configureEmail,
+  failingDb,
   outbox,
   setupWorkspace,
   staleFreshAuth,
@@ -299,31 +300,50 @@ describe("a sent email whose record can't be written is still acked (review L1)"
   it("doesn't redeliver (and so resend) an email the provider accepted", async () => {
     await configureEmail();
     const message = await queuedJob();
-    const failingDb = new Proxy(env.DB, {
-      get(target, prop) {
-        if (prop === "prepare") {
-          return (sql: string) => {
-            if (sql.includes("ON CONFLICT (id) DO UPDATE SET state")) throw new Error("D1 unavailable");
-            return target.prepare(sql);
-          };
-        }
-        const value = Reflect.get(target, prop) as unknown;
-        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
-      },
-    });
     const { driver, sent } = fakeDriver([{ kind: "sent", messageId: "x" }]);
-    const handler = emailQueueHandler({ driverFor: () => driver });
-    const outcome = await handler.handle(message, {
-      env: { ...env, DB: failingDb },
-      log: quiet,
-      now: Date.now,
-      attempts: 1,
-      messageId: ulid(),
-    });
-    expect(outcome).toEqual({ kind: "ack" });
+    expect(await runWithRecordFailing(message, driver)).toEqual({ kind: "ack" });
     expect(sent).toHaveLength(1);
   });
+
+  it("a record failure on the failed, expired and expired-retry paths is acked too, never retried (review 2/4)", async () => {
+    await configureEmail();
+    const permanentJob = await queuedJob();
+    expect(
+      await runWithRecordFailing(
+        permanentJob,
+        fakeDriver([{ kind: "permanent", code: "E_SENDER_NOT_VERIFIED" }]).driver,
+      ),
+    ).toEqual({ kind: "ack" });
+    const expiredJob = { ...(await queuedJob("magic_link")), expiresAt: Date.now() - 1 };
+    const expiredDriver = fakeDriver([]);
+    // Every D1 statement fails: the expired link is still acked, before any read.
+    expect(await runWithRecordFailing(expiredJob, expiredDriver.driver, () => true)).toEqual({ kind: "ack" });
+    expect(expiredDriver.sent).toHaveLength(0);
+    const retryJob = { ...(await queuedJob("magic_link")), expiresAt: Date.now() + 60_000 };
+    expect(
+      await runWithRecordFailing(retryJob, fakeDriver([{ kind: "transient", code: "http_503" }]).driver, undefined, 4),
+    ).toEqual({ kind: "ack" });
+    const notConfigured = await queuedJob();
+    expect(await runWithRecordFailing(notConfigured, null)).toEqual({ kind: "ack" });
+  });
 });
+
+/** Runs the handler with a D1 whose delivery-record writes (or every statement matching `fails`) throw. */
+function runWithRecordFailing(
+  message: EmailSendMessage,
+  driver: EmailDriver | null,
+  fails: (sql: string) => boolean = (sql) => sql.includes("ON CONFLICT (id) DO UPDATE SET state"),
+  attempts = 1,
+) {
+  const handler = emailQueueHandler({ driverFor: () => driver });
+  return handler.handle(message, {
+    env: { ...env, DB: failingDb(fails) },
+    log: quiet,
+    now: Date.now,
+    attempts,
+    messageId: ulid(),
+  });
+}
 
 describe("the test email sink is inert on a non-loopback origin (review test gap)", () => {
   it("the Worker's own queue consumer sends through the configured driver, and creates no sink table", async () => {
@@ -469,9 +489,32 @@ describe("Send test email (TDD §7.6): admin-only, to the actor's own address, a
     expect((await ws.browser.json("/api/admin/email/test", { body: { to: "someone@example.com" } })).status).toBe(400);
   });
 
-  it("is limited to 5 an hour per actor (review L5)", async () => {
+  it("is limited to 5 an hour per actor; the 6th is rate_limited (review L5)", async () => {
     await configureEmail();
     const admin = await addMember("admin");
+    const statuses: number[] = [];
+    for (let i = 0; i < 5; i++) statuses.push((await admin.browser.json("/api/admin/email/test", { body: {} })).status);
+    const sixth = await admin.browser.json("/api/admin/email/test", { body: {} });
+    expect(statuses).toEqual([202, 202, 202, 202, 202]);
+    expect(sixth.status).toBe(429);
+    expect(sixth.body).toMatchObject({ error: { code: "rate_limited" } });
+  });
+
+  it("only queued test emails count: unconfigured and unqueued attempts burn no slots (second review 1)", async () => {
+    const admin = await addMember("admin");
+    await configureEmail({ driver: "none" });
+    for (let i = 0; i < 6; i++) {
+      expect((await admin.browser.json("/api/admin/email/test", { body: {} })).status).toBe(503);
+    }
+    await configureEmail();
+    const failingQueue = { send: () => Promise.reject(new Error("queue down")) } as unknown as Queue;
+    for (let i = 0; i < 6; i++) {
+      const refused = await admin.browser.json("/api/admin/email/test", {
+        body: {},
+        env: { EMAIL_QUEUE: failingQueue },
+      });
+      expect(refused.status).toBe(503);
+    }
     const statuses: number[] = [];
     for (let i = 0; i < 6; i++) statuses.push((await admin.browser.json("/api/admin/email/test", { body: {} })).status);
     expect(statuses).toEqual([202, 202, 202, 202, 202, 429]);

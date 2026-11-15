@@ -1,10 +1,11 @@
 import { env } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SoftAuthenticator } from "./authenticator";
 import {
   addMember,
   Browser,
   configureEmail,
+  failingDb,
   fragmentToken,
   joinByInvitation,
   meetInviteGate,
@@ -323,6 +324,66 @@ describe("confirming a magic link (Identity §4.4; Platform §10)", () => {
     for (let i = 0; i < 11; i++)
       statuses.push((await browser.json("/api/sign-in/link", { body: { token: "D".repeat(43) } })).status);
     expect(statuses[10]).toBe(429);
+  });
+});
+
+describe("failures after the link is consumed (second review 5; review L7)", () => {
+  it("if the new-device notice can't be written, the sign-in stands, the device isn't remembered, and the next sign-in raises it", async () => {
+    const member = await joinByInvitation(ws);
+    const browser = new Browser();
+    await requestLink(browser, member.email);
+    const devicesBefore = await count("SELECT count(*) AS n FROM user_devices WHERE user_id = ?", member.id);
+    const noticeFails = failingDb((sql) => sql.includes("json_insert("));
+    const confirm = await browser.call("/api/sign-in/link", {
+      body: { token: linkFor(member.email) },
+      env: { DB: noticeFails },
+    });
+    expect(confirm.status).toBe(200);
+    expect(browser.sessionCookie).toBeDefined();
+    expect(browser.cookies.get("__Host-officebox-device")).toBeUndefined();
+    expect(await count("SELECT count(*) AS n FROM user_devices WHERE user_id = ?", member.id)).toBe(devicesBefore);
+    const notices = async () =>
+      JSON.parse(
+        (await env.DB.prepare("SELECT coalesce(pending_security_notice, '[]') AS p FROM users WHERE id = ?")
+          .bind(member.id)
+          .first<{ p: string }>())!.p,
+      ) as { kind: string }[];
+    expect((await notices()).filter((n) => n.kind === "magic_link_new_device")).toHaveLength(0);
+    // The next magic-link sign-in from the same browser is still "new", so the notice isn't lost.
+    await requestLink(browser, member.email);
+    await browser.json("/api/sign-in/link", { body: { token: linkFor(member.email) } });
+    expect((await notices()).filter((n) => n.kind === "magic_link_new_device")).toHaveLength(1);
+    expect(browser.cookies.get("__Host-officebox-device")).toBeDefined();
+  });
+
+  it("a real failure inside better-auth's verify after our consume is a typed error that says to ask for a new link", async () => {
+    const member = await joinByInvitation(ws);
+    await requestLink(new Browser(), member.email);
+    const token = linkFor(member.email);
+    // better-auth's instance is cached per origin and secrets, so the route uses this same object.
+    const { authFor } = await import("../../src/features/identity/auth");
+    const { identitySecrets } = await import("../../src/features/identity/secrets");
+    const secrets = identitySecrets(env, {
+      error() {},
+      warn() {},
+      info() {},
+      debug() {},
+      child() {
+        return this;
+      },
+    });
+    if (!secrets.ok) throw new Error("secrets");
+    const auth = authFor(env, secrets.value, { canonicalOrigin: ORIGIN, workspaceName: "Acme Studio" });
+    const spy = vi.spyOn(auth.api, "magicLinkVerify").mockRejectedValueOnce(new Error("D1 unavailable"));
+    const browser = new Browser();
+    const failed = await browser.json("/api/sign-in/link", { body: { token } });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+    expect(failed.status).toBe(503);
+    expect(failed.body).toMatchObject({ error: { code: "unavailable", reason: "magic_link_failed" } });
+    expect(browser.sessionCookie).toBeUndefined();
+    // The link was used up by our consume.
+    expect((await new Browser().json("/api/sign-in/link", { body: { token } })).status).toBe(410);
   });
 });
 

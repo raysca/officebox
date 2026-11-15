@@ -134,7 +134,8 @@ function assertHeaderSafe(...values: string[]): void {
 /** Envelope addresses go inside `<…>` on MAIL FROM and RCPT TO: no brackets, whitespace or controls. */
 function assertAddressSafe(...addresses: string[]): void {
   for (const address of addresses) {
-    if (!/^[^\s<>\p{Cc}]+@[^\s<>\p{Cc}]+$/u.test(address)) {
+    // Exactly one "@"; no brackets, quotes (quoted local parts aren't supported), whitespace or controls.
+    if (!/^[^\s<>"@\p{Cc}]+@[^\s<>"@\p{Cc}]+$/u.test(address)) {
       throw new SmtpProtocolError("unsafe envelope address");
     }
   }
