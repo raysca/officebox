@@ -47,6 +47,12 @@ export default defineConfig(
   },
 
   {
+    // Classic scripts the web app serves as-is (public/theme-init.js runs in the browser).
+    files: ["apps/web/public/**/*.js"],
+    languageOptions: { globals: globals.browser, sourceType: "script" },
+  },
+
+  {
     files: ["apps/web/src/**/*.{ts,tsx}"],
     extends: [reactHooks.configs.flat["recommended-latest"]],
     languageOptions: { globals: globals.browser },
