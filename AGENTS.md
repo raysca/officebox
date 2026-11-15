@@ -145,6 +145,8 @@ Before adding a dependency, check all of these and note them in the PR:
 - It has a reasonable bundle size.
 - The version is pinned.
 
+**Security-sensitive dependencies** (today: `better-auth` and `@better-auth/passkey`) are pinned to exact versions, covered by Dependabot or GitHub advisory alerts and a CI gate on High or Critical advisories, and upgraded only after reviewing their published advisories, noted in the PR (TDD §8.1).
+
 Prefer the platform (WebCrypto, Workers APIs) over a library when the code is small.
 
 ## 5. Testing

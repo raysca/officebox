@@ -1,7 +1,7 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: admins can export private content (disclosed), new `workspace.export` and `member.export` actions, the room-level maintenance flag, and break-glass removed from Later
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: admins can export private content (disclosed), new `workspace.export` and `member.export` actions, the room-level maintenance flag, and break-glass removed from Later; token wording, the owners' invite gate, "no impersonation", step-up, promotion rules and the domain move updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
 **Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Admin & Operations](admin.md), [Platform](platform.md)
 
@@ -27,9 +27,9 @@ It replaces TDD §2.1's "stop at first match" resolution with a **union** rule.
 | Channel made private | **Keep explicit wider shares, but warn.** The conversion dialog lists those items so the channel admin can restrict them first. |
 | Group principals | Valid on **documents, whiteboards, folders, files, drives and calendars**. **Not on channels**: "invite this group" adds the current members individually. |
 | Private channel membership | **Any member can add people; channel admins remove them.** This corrects PRD §10.1. |
-| Admin powers over people | Admins act on **members only**. Recovery, email change, disable and delete on **admins or owners need an owner**. **Only owners invite or promote admins.** |
-| Notice of admin actions | Every recovery link or email change **notifies the person** (email to the old address and an in-app banner) and **revokes their pending sign-in, reset and recovery tokens**. |
-| Admins and private content | Admins see that private objects **exist** but **can't read private content in the app**. They **can't add themselves to private channels**; they can archive, delete and remove members. In private channels they **are** members of (added by a member), admins can delete messages. **Admins can export private content**, including DMs, time-off type and note, personal reminders and peppered password hashes ([Admin](admin.md) §2, §11.1). Changed by the approved Admin spec: exports are an owner and admin power so a restore is complete; this is disclosed in the privacy statement (§6) and every export is audited. |
+| Admin powers over people | Admins act on **members only**. Recovery, email change, disable and delete on **admins or owners need an owner**. **Only owners invite or promote admins.** Nobody can **impersonate** another member: better-auth's admin plugin isn't used (Identity §2). |
+| Notice of admin actions | Every recovery link or email change **notifies the person** (email to the old address and an in-app banner) and **revokes their pending magic links and recovery tokens**. |
+| Admins and private content | Admins see that private objects **exist** but **can't read private content in the app**. They **can't add themselves to private channels**; they can archive, delete and remove members. In private channels they **are** members of (added by a member), admins can delete messages. **Admins can export private content**, including DMs, time-off type and note, personal reminders and passkey public keys (there are no password hashes: sign-in is passwordless, [Identity](identity.md) §2) ([Admin](admin.md) §2, §11.1). Changed by the approved Admin spec: exports are an owner and admin power so a restore is complete; this is disclosed in the privacy statement (§6) and every export is audited. |
 | Exports | Engine actions **`workspace.export`** (owners and admins) and **`member.export`** (owners and admins; a subject who is an admin or owner needs an owner), checked when an export **starts** and on **every download request** ([Admin](admin.md) §11.1, §11.3, §12). The owner requirement for admin or owner subjects is a **process control, not a security boundary**: any admin can export the whole workspace ([Admin](admin.md) §2). |
 | Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** a role on a group drive or folder, **needs an owner**. Audited. |
 | Recovery links without email | Allowed for members, **loudly flagged**: a notice on the member's **sign-in page** and a flag on the member list for **every owner** until acknowledged (Identity §4.6). |
@@ -200,8 +200,8 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Edit own profile, status, handle, sign-in methods, devices | ✓ | — | — | — | — |
 | Change someone's email · issue a recovery link · disable · delete · sign out all sessions | — | — | — | **Members only** | Anyone |
 | Change role to member or admin | — | — | — | — (admins can't promote) | ✓ |
-| Invite with role member | — | — | — | ✓ | ✓ |
-| Invite with role admin | — | — | — | — | ✓ |
+| Invite with role member | — | — | — | ✓ | ✓ (once the owner has a second passkey or a set, unconsumed `RECOVERY_TOKEN`) |
+| Invite with role admin | — | — | — | — | ✓ (same condition) |
 | Create, rename or delete groups; appoint managers | — | — | — | ✓ | ✓ |
 | Add or remove group members | — | — | Own group | ✓ (adding **themselves** needs an owner) | ✓ |
 | View the audit log | — | — | — | ✓ | ✓ |
@@ -260,13 +260,16 @@ effective role(user, item) = max(
 | Power | Admin | Owner |
 |---|---|---|
 | Invite members | ✓ | ✓ |
-| Invite or promote admins; demote admins; manage owners | — | ✓ |
+| Invite or promote admins; demote admins; manage owners | — | ✓ (promoting to admin needs the person to have a passkey; to owner, two passkeys or an unconsumed `RECOVERY_TOKEN`) |
 | Change email, issue recovery link, disable, re-enable, delete, sign out all sessions: **members** | ✓ | ✓ |
+| **Move the workspace's domain** (two steps, Identity §4.4) | — | ✓ |
 | Same actions on **admins or owners** | — | ✓ (an owner can't disable or delete the last owner) |
 | Transfer content of leavers (My files, organised events, owned calendars) | ✓ | ✓ |
 | Archive, delete or remove members of **any** channel, including private ones (without reading) | ✓ | ✓ |
 | Join or read **private channels, DMs or restricted items** they haven't been given | **—** | **—** |
 | Delete messages in private channels they're a member of (added by a member) | ✓ | ✓ |
+
+**Step-up** ([Identity](identity.md) §4.5): these powers also need a **fresh passkey assertion within the last 10 minutes** on the acting session, otherwise the typed error `reauth_required`: changing a role (including promotion to admin or owner), changing an email address, issuing a recovery link, moving the domain, and adding or removing one's own passkeys. The permission engine decides *whether* the actor may act; the step-up check runs after it and decides *whether this session may act now*. Both are tested, allowed and denied.
 | Moderate messages in private channels they're not in | — | — |
 | Add **themselves** to a group, or grant **themselves** a role on a group drive or folder | — (needs an owner) | ✓ |
 | Delete a private event whose organiser is disabled or deleted (without seeing details) | ✓ | ✓ |
@@ -281,14 +284,14 @@ effective role(user, item) = max(
 **Notification and token revocation:**
 - When anyone issues a **recovery link** for a person or **changes their email**:
   - an email goes to the person's **current (old) address** (if email is configured): "Your Officebox email was changed by *Admin Name* on *date*" or "*Admin Name* issued a recovery link for your account"
-  - a **notice on the sign-in page** and after sign-in, on any device (`users.pending_security_notice`), plus a `security_notice` inbox item
+  - a **notice on the sign-in page** and after sign-in, on any device (`users.pending_security_notice`, a list acknowledged only on a fresh passkey sign-in), plus a `security_notice` inbox item from M2
   - **without email configured**, the recovery link is also **flagged to every owner** on the member list until an owner acknowledges it (Identity §4.6)
-  - all their **pending magic-link, password-reset and recovery tokens are revoked**, except the newly issued recovery link
+  - all their **pending magic links and recovery tokens are revoked**, except the newly issued recovery link
   - an audit entry is written.
-- Using a recovery link also signs out all the person's existing sessions (Identity §4.6).
+- Using a recovery link also signs out all the person's existing sessions and closes their sockets (Identity §4.6).
 
 **Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents **in the app**. These things are stated plainly:
-- **Exports** ([Admin](admin.md) §2, §11, §12). Owners and admins can **export the whole workspace, including private content**: DMs, group DMs, private channels, restricted documents, time-off type and note, personal reminders, and peppered password hashes (useless without the `PEPPER_*` Worker secrets, which are never exported). They can also run a per-member export for a data-protection request, which never contains password hashes. Every export is audited. Members aren't told about workspace exports; the subject of a per-member export gets a notice.
+- **Exports** ([Admin](admin.md) §2, §11, §12). Owners and admins can **export the whole workspace, including private content**: DMs, group DMs, private channels, restricted documents, time-off type and note, personal reminders, and passkey public keys (not secret; there are no password hashes, because sign-in is passwordless, [Identity](identity.md) §2). They can also run a per-member export for a data-protection request, which never contains credentials. Every export is audited. Members aren't told about workspace exports; the subject of a per-member export gets a notice.
 - **Export expiry and erasure** ([Admin](admin.md) §11.1, §11.2). On-demand exports are deleted after 45 days **(default)**, scheduled exports keep the latest 4, and per-member exports are deleted after 7 days **(default)**. Exports **aren't rewritten** when a member is deleted, so a deleted member's data can remain in an archive until it expires, and restoring an older export brings it back.
 - **Direct R2 access.** Reading export archives directly from R2 (Wrangler or R2 credentials) needs **Cloudflare account access**, which is outside Officebox's control ([Admin](admin.md) §11.1).
 - **Recovery links.** An admin could sign in as an ordinary **member** by issuing them a recovery link. Officebox emails the member (if email is configured), shows a notice on their sign-in page, flags it to every owner when email isn't configured, and audits it. The member may only find out at their next sign-in, so this is visible, not prevented.
@@ -388,10 +391,13 @@ The engine is internal. It's exposed only through:
 - **Admin powers:**
   - an admin can't issue a recovery link, change the email of, disable or delete an admin or owner; an owner can
   - an admin can't invite or promote an admin
+  - each step-up action returns `reauth_required` without a fresh passkey assertion and succeeds with one
+  - promotion is refused when the person lacks the required passkeys
+  - only an owner can start or commit a domain move
   - a recovery link or email change sends an email to the old address, shows the sign-in notice, and revokes pending tokens
   - without email configured, a recovery link flags the member to every owner until acknowledged
   - an admin adding themselves to a group, or granting themselves a group-drive role, gets 403; an owner can do it for them.
-- **Admins and private content:** an admin can't join or read a private channel or DM in the app. They can remove members from it and archive it. An admin who was added to a private channel by a member can delete messages in it. An admin **can export** private content: a workspace export they run includes DMs, private channels, time-off type and note, personal reminders and peppered password hashes ([Admin](admin.md) §18 Exports).
+- **Admins and private content:** an admin can't join or read a private channel or DM in the app. They can remove members from it and archive it. An admin who was added to a private channel by a member can delete messages in it. An admin **can export** private content: a workspace export they run includes DMs, private channels, time-off type and note, personal reminders and passkey public keys ([Admin](admin.md) §18 Exports).
 - **Exports:** the matrix test covers `workspace.export` and `member.export` for every workspace role, at start and at download. Members are denied both. An admin is denied `member.export` when the subject is an admin or owner, including at download when the subject was promoted after the export started; an owner is allowed.
 - **Comments:** an editor can delete another person's comment; a commenter can't.
 - **Document calls:** a viewer can start a call on a document.

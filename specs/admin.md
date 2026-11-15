@@ -3,6 +3,7 @@
 **Status:** Approved (product owner, 15 Nov 2026)
 **Revision:**
 - First draft written after four rounds of product-owner questions (15 Nov 2026).
+- **Aligned with passwordless sign-in (15 Nov 2026, merge with the [Identity](identity.md) revision).** Identity wins on authentication, so: there are no password hashes or peppers to export, and passkey public keys are exported instead; step-up uses Identity's `sessions.fresh_auth_at` (a passkey assertion) and `POST /me/reauth` in place of `authenticated_at` and `POST /auth/reauth`; alert links use `installation.canonical_origin` in place of `public_origin`; there is no token refresh. The changed passages say so where they appear. The history below is unchanged.
 - Revised after the independent review (see below), the product-owner decisions, then the second and final reviews:
 - Product-owner decisions (15 Nov 2026): admin exports include everything, including time-off notes and personal reminders; "What Butler remembers" meets the right of access to assistant memory; alert email stays owner-only.
 - Revised after the final independent review (15 Nov 2026): one export retention value (45 days); the command-line tool downloads through the Worker; download tokens re-checked on every request and kept out of URLs; clock-driven maintenance transitions applied on read; a stored canonical origin for alert emails; step-up failures counted against the sign-in limit; job, token and slot state in the data model; missing endpoints; budget and storage thresholds aligned.
@@ -62,7 +63,7 @@ Every export is audited and disclosed in the privacy statement.
 |---|---|
 | Owner and admin split | **Split by risk.** Owners alone: upgrades and channel, usage and cost, the post-deploy checklist, telemetry and diagnostics, maintenance mode. Owners and admins: members, groups, invitations, workspace settings (per key, Platform §7), the audit log, health, storage, assistant oversight (Assistant §10–§11), and **exports**. |
 | Who exports data | **Owners and admins only.** This is an organisation's workspace. Owners hold every admin power, so "admins" below includes owners. |
-| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, restricted documents, **time-off type and note, and personal reminders**. Exceptions: sessions, tokens, passkeys and MFA secrets (Platform §6), and assistant memory, which no admin can read. **Password hashes are included in workspace exports** **(default)**, because a restore needs them. They are peppered, so they're useless without the `PEPPER_*` Worker secrets, which are never exported (Platform §16). They're never in per-member exports, and the privacy statement says this. Confirmed by the product owner: admins export everything (this changes Permissions §11 and Assistant §7.1 and §13). |
+| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, restricted documents, **time-off type and note, and personal reminders**. Exceptions: sessions, tokens and MFA secrets (Platform §6), and assistant memory, which no admin can read. **Passkey public keys are included in workspace exports** (Identity §2), so a restore onto the same canonical origin keeps them working; they're never in per-member exports. There are no password hashes: sign-in is passwordless (this replaces the earlier "password hashes included" default). Confirmed by the product owner: admins export everything (this changes Permissions §11 and Assistant §7.1 and §13). |
 | Disclosure | **Privacy statement and audit log** **(default)**. The privacy statement says admins can export everything, including private content. Every export is audited. Members see no history of **workspace** exports. |
 | Member self-export | **None.** Members can't download their own data. This **removes** "Download my assistant data" from the approved Assistant spec (§19). |
 | Data-protection requests | **Admin per-member export.** An admin runs an export scoped to one member and hands it over. The member gets a confirmation notice (§12). |
@@ -143,7 +144,7 @@ A D1 or Worker outage can't be recorded or raised by Officebox, because alerts l
   - **Raise** emails are limited to one per alert record per 24 hours **(default)**.
   - A **clear** email is sent only if a raise email went out for that episode, so a flapping check can't flood owners.
   - Content names the alert and links to the admin area. It contains no member names or content.
-  - **Link origin.** The dispatcher has no request, so links use **`installation.public_origin`**. That value is recorded from the first-run setup request, and updated only from an authenticated owner or admin request when the origin changes (for example after adding a custom domain). Unauthenticated requests never write it (Platform §10).
+  - **Link origin.** The dispatcher has no request, so links use **`installation.canonical_origin`** (Identity §4.4; this spec first called it `public_origin`). It's recorded at the first-run setup claim and changed only by an owner's two-step domain move, committed by a passkey registration on the new origin. No other request writes it (Platform §10).
   - Sending is at-most-once: a failed send isn't retried for that episode **(default)**, and the inbox item still exists.
 - **Do not disturb:** follows Notifications §5. The inbox still records the item, while banners and email are held. `check_failing`, `protective_mode` and `d1_copy_paused` emails break through DND **(default)**.
 - **Storage sampling:** D1 size is sampled hourly (TDD §7.7), so storage alerts change at most hourly.
@@ -299,7 +300,7 @@ When an optional service is failing, members see a quiet notice **where the feat
 
 | Service | Where members see it |
 |---|---|
-| Email | The sign-in page, if magic links are affected ("Email sign-in links are unavailable — use your password or passkey"); admins see "Invitations can't be emailed right now — use copy links" on invitation screens |
+| Email | The sign-in page, if magic links are affected ("Email sign-in links are unavailable — use your passkey"); admins see "Invitations can't be emailed right now — use copy links" on invitation screens |
 | Calls | Call buttons are `aria-disabled` with "Calls are unavailable right now" |
 | Assistant | The assistant DM says "*Display name* is unavailable right now", using `assistant_display_name` |
 | Link previews | Nothing; previews are skipped |
@@ -350,7 +351,7 @@ A persistent prompt asks owners to set Cloudflare billing notifications until th
 ### 11.1 Exporting
 
 - **Who:** owners and admins. The permission engine checks a new action, `workspace.export`, both when an export starts and when it's downloaded (§19).
-- **Contents:** the Officebox export format v1 (TDD §7.5), including all private content (§2) and peppered password hashes (§2). Exceptions follow Platform §6: sessions, tokens, passkeys, MFA secrets, assistant conversations and memory, and operational tables. Operational tables are `exports`, `maintenance_windows`, `admin_alerts`, `health_checks`, `admin_jobs` and `download_tokens`, so a restore never starts read-only or with stale alerts.
+- **Contents:** the Officebox export format v1 (TDD §7.5), including all private content (§2) and passkey public keys (§2). Exceptions follow Platform §6: sessions, tokens, MFA secrets, assistant conversations and memory, and operational tables. Operational tables are `exports`, `maintenance_windows`, `admin_alerts`, `health_checks`, `admin_jobs` and `download_tokens`, so a restore never starts read-only or with stale alerts.
 - **Packing:**
   - The export Workflow writes the parts to `exports/<id>/`, then packs them into a single `export.tar` in R2 with a multipart upload. This keeps downloads within Worker limits. Tar headers sit between objects, so packing re-chunks the data into equal parts across Workflow steps, persisting the upload state between steps.
   - The download streams that one object, and supports `Range` requests, so an interrupted download can resume.
@@ -391,20 +392,14 @@ Exports are snapshots and **aren't rewritten** when a member is later deleted. A
 
 ### 11.3 Step-up re-authentication
 
-Sensitive downloads need **recent authentication**: the export archive, the member CSV, the audit CSV, and per-member export archives.
+Sensitive downloads need **recent authentication**: the export archive, the member CSV, the audit CSV, and per-member export archives. They use the same step-up as Identity's sensitive actions ([Identity](identity.md) §4.5).
 
-- **Session field.** `sessions.authenticated_at` records when the member last proved who they are: a password, passkey or magic-link sign-in, accepting an invitation, using a recovery link, or a step-up. A token refresh doesn't update it.
-- **Recent window.** If `authenticated_at` is older than **10 minutes (default)**, the download returns `reauth_required`.
-- **Re-authenticating.** The app then asks the member to authenticate again with `POST /auth/reauth`, using any method they have:
-  - password
-  - passkey
-  - a one-time magic link to their own email, when email is configured
-  - MFA, when it exists.
-
-  Passwordless admins use their passkey or email.
+- **Session field.** `sessions.fresh_auth_at` records the session's last **passkey assertion**, at sign-in or through a step-up. A magic-link sign-in and the session's sliding expiry don't update it. (This spec first called the field `authenticated_at` and let any sign-in method set it; aligned with the passwordless design on 15 Nov 2026.)
+- **Recent window.** If `fresh_auth_at` is older than **10 minutes (default)**, the download returns `reauth_required`.
+- **Re-authenticating.** The app asks for a passkey and calls `POST /me/reauth` (Identity §6). Owners and admins sign in with passkeys only (magic links are for members), so a passkey is always available to them. MFA joins when it exists.
 - **Binding and limits:**
-  - Passkey challenges and email links for step-up are bound to the current session and user.
-  - `POST /auth/reauth` is limited to **5 attempts per 10 minutes per session (default)** (Platform §8). **Failed attempts also count toward the per-account sign-in limit and its progressive delay** (Identity §4.4), and are audited (`auth.reauth_failed`).
+  - Step-up passkey challenges are bound to the current session and user.
+  - `POST /me/reauth` is limited to **5 attempts per 10 minutes per session (default)** (Platform §8). Failed attempts also count toward the per-IP passkey sign-in limit (there's no per-account password throttle any more), and are audited (`auth.reauth_failed`).
 - **Downloads:** step-up is checked when a download **starts**. A successful start issues a short-lived download token, valid for **1 hour (default)** and bound to the session, for `Range` resumes.
   - **Every request re-checks** that the session is valid, that the engine still allows `workspace.export` or `member.export` (including the subject's current role), and that the export isn't deleted, expired or cancelled. A demotion, sign-out, deletion or expiry stops further requests at once.
   - **Transport:** a browser receives the token as an HttpOnly cookie scoped to the download path; the command-line tool sends it in a header. It never appears in a URL, so it can't reach logs.
@@ -418,12 +413,12 @@ Restore follows TDD §7.5 and §6.8:
 - the command-line tool covers very large archives. Placing an archive in the bucket with Wrangler needs Cloudflare account access, as above.
 
 The Restore Workflow writes a **restore report**, which the Overview shows until an owner dismisses it. The report lists:
-- members who must re-register passkeys or need a recovery link (passkey-only members, Identity §4.4)
+- whether passkeys still work: they do if the restore's origin equals the export's canonical origin; otherwise the members who need a magic link or a recovery link to register new ones (Identity §4.4)
 - members who must re-enrol MFA
 - that assistant memory was not restored and the assistant index is being rebuilt
 - ICS subscriptions that need their URLs re-entered
 - the erasure warning in §11.2
-- that **all sessions are invalid**, and that passwords work only if the new installation has the **same `PEPPER_*` secrets** (Platform §16). Without them, owners sign in with the `RECOVERY_TOKEN` flow (TDD §6.8) and reset passwords.
+- that **all sessions are invalid**. There are no passwords or peppers to carry over; an owner who can't register a passkey uses the `RECOVERY_TOKEN` flow (TDD §6.8).
 
 ## 12. Per-member data exports
 
@@ -442,14 +437,13 @@ For data-protection access requests. Members can't run these themselves.
   - **Account:** group memberships, and their sessions list (devices and times, no tokens).
   - **Audit:** audit entries where they are the actor or target.
 - **Not included:**
-  - password hashes
+  - credentials, including passkey public keys (there are no password hashes)
   - other people's messages and content; quoted or forwarded content written by others appears only as a reference **(default)**
-  - assistant conversations and memory (not readable by admins; the member can see their memory in "What Butler remembers", and their conversation history in the assistant DM)
-  - credentials.
+  - assistant conversations and memory (not readable by admins; the member can see their memory in "What Butler remembers", and their conversation history in the assistant DM).
 - **Running:** a Workflow, packed like §11.1. The archive expires **7 days (default)** after completion. Downloads check `expires_at` themselves, and the daily job deletes expired archives.
 - **Download:** step-up re-authentication (§11.3), with the subject's role re-checked at download; audited (`member_export.started`, `.completed`, `.failed`, `.downloaded`, `.expired`).
 - **Limits:** one running per-member export per subject, and **10 per actor per day (default)** (Platform §8). Per-member exports don't block workspace exports.
-- **Notice to the subject:** a `security_notice` ("An admin exported your data on *date*") **(default)**, sent **when the export completes**. It's delivered as Notifications §3 defines (in-app and email, not held by DND), without the sign-in banner. This is a confirmation of a request, unlike workspace exports, which members aren't told about (§2).
+- **Notice to the subject:** a `security_notice` ("An admin exported your data on *date*") **(default)**, sent **when the export completes**. It's delivered as Notifications §3 defines: on the **sign-in banner** until acknowledged on a fresh passkey sign-in, plus email when configured, not held by DND (product-owner decision, 15 Nov 2026: like every other security notice). This is a confirmation of a request, unlike workspace exports, which members aren't told about (§2).
   - A **disabled** subject gets the notice when re-enabled.
   - A **deleted** subject gets none.
 
@@ -498,7 +492,7 @@ Reading works everywhere. Writes fall into three classes **(default)**:
 | Class | What | Behaviour |
 |---|---|---|
 | **Refused** | Creating, editing or deleting user content (messages, documents, files, events, polls, channels); settings changes; invitations; uploads; assistant requests; starting a call | Typed `maintenance` result; the app shows "The workspace is read-only for maintenance" |
-| **Exempt** | Sign-in, sign-out and token refresh (`POST /auth/*`); step-up re-authentication; **disabling a member, signing out all sessions and recovery** by owners and admins (so a compromised account can be handled); ending, rescheduling or cancelling maintenance; personal state that isn't shared content (read markers, presence, drafts, push subscriptions); everything inside **active calls** (in-call chat, call notes and transcript segments); system writes (audit, alerts, health, export status, outbox progress, inbox and notification delivery, outgoing email); the running export | Proceeds normally |
+| **Exempt** | Sign-in and sign-out (better-auth's routes and our sign-in confirmation routes), the session's sliding expiry, and passkey registration through an enrolment ticket; step-up re-authentication (`POST /me/reauth`); **disabling a member, signing out all sessions and recovery** by owners and admins (so a compromised account can be handled); ending, rescheduling or cancelling maintenance; personal state that isn't shared content (read markers, presence, drafts, push subscriptions); everything inside **active calls** (in-call chat, call notes and transcript segments); system writes (audit, alerts, health, export status, outbox progress, inbox and notification delivery, outgoing email); the running export | Proceeds normally |
 | **Deferred** | Content-creating timers and alarms (scheduled sends, poll auto-close); ICS refresh; purges and retention sweeps; scheduled exports | Wait until maintenance ends, then run. Reminders and other notification-only triggers fire on time, as system writes. |
 
 Members can still sign in **(default)**. Active calls continue, but no new calls start **(default)**.
@@ -644,11 +638,11 @@ CREATE TABLE IF NOT EXISTS download_tokens (
 ```
 
 **Other changes:**
-- `sessions` gains `authenticated_at INTEGER NOT NULL DEFAULT 0` (§11.3), in M1's baseline if M1 hasn't shipped, otherwise as an expand migration. `0` means "not recently authenticated".
+- `sessions` gains the step-up field, which is Identity's **`fresh_auth_at`** (§11.3; first written here as `authenticated_at`), in M1's baseline. NULL means "not recently authenticated".
 - `installation` gains:
   - `checklist` (JSON: manual items marked done)
   - `maintenance_epoch INTEGER NOT NULL DEFAULT 0`
-  - `public_origin` (§4)
+  - (`public_origin` from the first draft is Identity's `canonical_origin`, §4)
   - `scheduled_export_last_slot` (the claimed slot, for compare-and-set).
 - New settings keys (Platform §7):
   - `audit_retention_days` (owner, `settings.audit_retention`)
@@ -697,7 +691,7 @@ All bodies are validated with Zod schemas from `packages/shared`. Expected failu
 | `GET /admin/exports/:id` | Owner, admin | Export status and progress |
 | `GET /admin/member-exports` · `POST /admin/members/:id/export` · `DELETE /admin/member-exports/:id` · `GET /admin/member-exports/:id/download` | Owner, admin; an owner for admin or owner subjects | List, start, delete early, and download per-member exports (step-up to download) |
 | `POST /admin/overview/restore-report/dismiss` | Owner | Dismiss the restore report |
-| `POST /auth/reauth` | Any signed-in member | Step-up re-authentication (§11.3) |
+| `POST /me/reauth/options` · `POST /me/reauth` | Any signed-in member | Step-up re-authentication with a passkey (§11.3; Identity §6) |
 | `GET` / `POST /admin/maintenance` · `PATCH` / `DELETE /admin/maintenance/:id` · `POST /admin/maintenance/:id/end` | Owner (read: admin) | Schedule, start, reschedule, cancel and end |
 | `GET /admin/updates` | Owner (read: admin) | Version, channel, release notes, PR link, the auto-merge value as deployed |
 | `GET /admin/checklist` · `POST /admin/checklist/:item` | Owner | Checklist status and manual marks |
@@ -739,7 +733,7 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 **Health and notices**
 - [ ] **Health page:** it reflects stored check states, and loading it raises nothing.
 - [ ] **Member notices:** `/status` returns flags and the maintenance state only. `/status/public` works signed out, returns nothing else, is rate-limited, and shows the magic-link notice on the sign-in page.
-- [ ] **Alert links:** alert emails link to `installation.public_origin`. An unauthenticated request with a forged Host header doesn't change it.
+- [ ] **Alert links:** alert emails link to `installation.canonical_origin`. A request with a forged Host header doesn't change it; only a committed domain move does.
 - [ ] **Thresholds:**
   - Storage alerts follow `storage_thresholds`.
   - `assistant_budget` raises at 50, 80 and 100 %.
@@ -747,12 +741,12 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 - [ ] **Scheduled slot:** a missed slot runs within 24 hours, and is skipped after that. Two concurrent dispatcher runs claim it once. A failing SFU disables call buttons with the notice, and members see no workspace-wide banner.
 
 **Exports**
-- [ ] **Contents:** a workspace export run by an admin includes DMs, private channels, time-off notes, personal reminders and peppered password hashes. It excludes credentials, assistant memory and the operational tables.
+- [ ] **Contents:** a workspace export run by an admin includes DMs, private channels, time-off notes, personal reminders and passkey public keys. It excludes credentials, assistant memory and the operational tables.
 - [ ] **Step-up re-authentication:**
-  - A download with `authenticated_at` older than 10 minutes returns `reauth_required`. At 10 minutes exactly, it's allowed.
-  - A refresh doesn't reset `authenticated_at`.
-  - A passwordless admin can step up with a passkey or email.
-  - `POST /auth/reauth` is rate-limited. Failures count toward the account's sign-in limit, and are audited.
+  - A download with `fresh_auth_at` older than 10 minutes returns `reauth_required`. At 10 minutes exactly, it's allowed.
+  - The sliding expiry and a magic-link sign-in don't set `fresh_auth_at`; only a passkey assertion does.
+  - An admin steps up with a passkey.
+  - `POST /me/reauth` is rate-limited. Failures count toward the per-IP passkey sign-in limit, and are audited.
   - A resume with an expired or foreign download token is refused.
 - [ ] **Command-line tool:** `officebox export pull` needs sign-in and step-up, passes the engine check, and is audited. Without them it gets `forbidden` or `reauth_required`.
 - [ ] **Download tokens:** a token stops working on its next request after the export is deleted, the session signs out, or the holder is demoted. No token appears in a URL.
@@ -767,15 +761,15 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
   - It contains the subject's data per §12 and nothing written by others. A download after `expires_at` returns `not_found`.
   - The subject gets a `security_notice`, or gets it on re-enable if disabled.
   - An admin can't start an export whose subject is an admin or owner. An admin can't download one whose subject was promoted after it started.
-  - Per-member exports never contain password hashes.
+  - Per-member exports never contain credentials, including passkey public keys.
   - The per-actor daily limit holds.
   - The subject's notice bypasses DND. For a disabled subject, it's held until they're re-enabled.
   - The workspace export never includes the assistant DM.
-- [ ] **Restore:** restoring an export taken during maintenance starts the new installation writable, with no stale alerts. The restore report lists the §11.4 items: the export date with the erasure warning, the invalid sessions, and the pepper requirement.
+- [ ] **Restore:** restoring an export taken during maintenance starts the new installation writable, with no stale alerts. The restore report lists the §11.4 items: the export date with the erasure warning, the invalid sessions, and whether passkeys still work (same canonical origin) or who needs a link.
 
 **Maintenance**
 - [ ] **Read-only:**
-  - During maintenance, writes return `maintenance`, except the §13.3 exemptions. Token refresh keeps members signed in.
+  - During maintenance, writes return `maintenance`, except the §13.3 exemptions. Members stay signed in (the session's sliding expiry continues).
   - Sockets switch to read-only without reconnecting. New calls are refused while active calls continue.
   - Purges and scheduled exports wait.
 - [ ] **Timing:**
@@ -806,7 +800,7 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 
 ## 19. Changes to other documents
 
-All rows were **applied in the PR that approved this spec** (AGENTS §2). Keep this section as the index of those changes.
+All rows were **applied in the PR that approved this spec** (AGENTS §2). Keep this section as the index of those changes. **Superseded in part by the passwordless Identity revision (15 Nov 2026):** password hashes and `PEPPER_*` in exports and restore, `sessions.authenticated_at`, `POST /auth/reauth`, step-up by password or magic link, failures counting toward a per-account password limit, and `installation.public_origin` now read as in §11.3, §11.4 and §16 above.
 
 | Document | Change |
 |---|---|
