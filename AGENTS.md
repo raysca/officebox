@@ -172,16 +172,19 @@ Known testing behaviour, learned in the spike:
 
 ## 7. Commands
 
-Available once M0 lands; until then, run commands inside `spikes/realtime/`.
+Run from the repository root. The real-media run still lives in `spikes/realtime/` until calls are promoted (M4).
 
 ```sh
 npm install --legacy-peer-deps   # install
 npm run dev                      # Worker + web app locally (wrangler dev + Vite)
 npm run typecheck                # all workspaces
-npm run lint
+npm run lint                     # ESLint
+npm run format                   # Prettier (CI runs `npm run format:check`)
 npm test                         # unit + Worker integration
-npm run e2e                      # Playwright end-to-end
-npm run test:media               # real-media run (needs Realtime credentials)
+npm run build                    # web app + Worker bundle dry run
+npm run e2e                      # build, then Playwright end-to-end against wrangler dev
+npm run deploy                   # preflight, remote D1 migrations, wrangler deploy
+npm run test:media               # real-media run, inside spikes/realtime/ (needs Realtime credentials)
 ```
 
 ## 8. Working with the product owner
