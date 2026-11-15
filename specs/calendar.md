@@ -330,7 +330,7 @@ CREATE TABLE events (
   has_call INTEGER NOT NULL DEFAULT 0,
   organizer_id TEXT REFERENCES users(id),
   sequence INTEGER NOT NULL DEFAULT 0,           -- ICS SEQUENCE for updates
-  version INTEGER NOT NULL DEFAULT 0,            -- incremented on every change; compared with expectedVersion (§4.2)
+  version INTEGER NOT NULL DEFAULT 0,            -- incremented on every change; compared with expectedVersion (§4.2) (default)
   source_uid TEXT,                               -- ICS UID (external feeds)
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -373,7 +373,7 @@ CREATE TABLE event_notes (event_id TEXT NOT NULL REFERENCES events(id) ON DELETE
 -- Call notes for event calls live in call_notes (context_type = 'event'; Assistant §14.2), not in event_notes.
 -- They're deleted with the event (platform §4).
 
-CREATE TABLE calendar_idempotency (              -- §4.2; rows older than 24 hours are purged (default)
+CREATE TABLE calendar_idempotency (              -- §4.2 (default); rows older than 24 hours are purged (default)
   user_id TEXT NOT NULL REFERENCES users(id),
   key TEXT NOT NULL,                             -- client- or assistant-supplied idempotency key
   operation TEXT NOT NULL,                       -- 'event_create' | 'event_update' | 'rsvp' (Zod-validated)

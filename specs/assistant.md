@@ -94,7 +94,7 @@ AI stays optional (PRD principle 6). With the assistant off or its model unreach
 | No assistant access | **Means you can't use the assistant**, not that it's absent around you. Members without access are still transcribed in calls where someone else turned on notes, and get the same notice and Stop control. Mention replies and call notes are visible to them like any other content. |
 | Source index for purge | **D1 mirror** `assistant_source_refs` (object references only, no content) to find whose memory cites a deleted object (§4.4). Accepted over broadcasting to every Assistant DO. |
 | Assistant DO base class | **Our core DO base class** (AGENTS §4.2). Cloudflare's `agents` SDK is used only as a source of patterns, unless a spike shows it can wrap our base class cleanly. |
-| Mention handle | **Stored by ID.** `@assistant` always works, and the handle derived from the current display name is reserved too. |
+| Mention handle | **Stored by ID.** `@assistant` always works, and the handle derived from the current display name is reserved too. On rename, a derived handle already held by a member stays theirs, and the old derived handle is released after the usual 30-day hold **(default)** (Identity §4.8). |
 | Presence in chat | **A system actor** with a private DM for every member, which you can also `@mention` in any conversation you're in. It doesn't count as a seat and isn't in the directory. |
 | Placement | **New milestone M9** after M8, in four slices (header, §16). M9a is split into two PRs (PLAN). |
 | Web browsing | **Not in the first release (default).** Answers come from workspace sources the user can access and the model's general knowledge. |
@@ -312,7 +312,7 @@ A **personal reminder** is a private note-to-self with a time: "Send the deck �
 |---|---|
 | Created by | The member, via the assistant (confirmed), an accepted nudge, or "Add to my reminders" on a call-notes action item |
 | Visible to | The member only |
-| Fires | At its time, as inbox type `personal_reminder` (in-app; email per the member's email delay), via ReminderScheduler trigger kind `personal_reminder` |
+| Fires | At its time, as inbox type `personal_reminder` (in-app; email per the member's email delay, **without the reminder text** **(default)**), via ReminderScheduler trigger kind `personal_reminder` |
 | Shown in | `my_day`, the daily brief, and the Personal Inbox's Upcoming view (M8) |
 | Actions | Done, snooze (15 min, 1 h, tomorrow), delete |
 | Retention | Deleted 30 days after done or dismissed **(default)** |
@@ -499,7 +499,7 @@ Admins can see **that** a member used the assistant and which objects were touch
      - **Join** repeats the request with `ackNotes: true`. "Don't join" leaves cleanly.
      - Until then the member isn't in the call, so no audio is sent (Calls §5 change, §17).
      - If notes start while someone is joining, the same check applies.
-   - **In-call chat:** a system message records each start and stop.
+   - **In-call chat:** a system message (kinds `notes_started` and `notes_stopped`, Chat §4.6) records each start and stop.
    - Participants without assistant access are transcribed too (§2): no access means they can't *use* the assistant. They get the same notice and can also stop notes.
 3. **Stop and restart.**
    - **Any participant** can stop notes. The banner records who stopped them.
@@ -545,7 +545,7 @@ Admins can see **that** a member used the assistant and which objects were touch
 | No resurrection | Every Worker path checks the member's status in D1 **before** addressing an Assistant DO. Queue consumers and retention alarms never create a DO for a deleted member. |
 | Source object deleted, or access lost | §4.4 |
 | Retention expiry | A daily alarm (`retention_sweep`) in each Assistant DO deletes conversations and items older than the member's effective retention, applied to existing rows. It keeps running while the assistant is off. |
-| **Workspace export** (owner) | **Excludes** assistant conversations and memory **(default)**, because admins can't read them (§11). Also **excludes personal reminders** (§7.1). Includes `assistant_interactions` metadata, and call notes and transcripts within retention. |
+| **Workspace export** (owner) | **Excludes** assistant conversations and memory **(default)**, because admins can't read them (§11). Also **excludes personal reminders** (§7.1), `assistant_optins` and `assistant_source_refs` (operational state, rebuilt) **(default)**. Includes `assistant_interactions` metadata, and call notes and transcripts within retention. |
 | **Personal export** | "Download my assistant data" (§4.3): JSON of the member's conversations, active remembered items and personal reminders, filtered per §4.4. Audited. |
 | Restore | Assistant memory isn't part of a workspace restore. Members can't import a personal export in M9 **(default)**. The index is rebuilt by back-fill (§9). |
 
@@ -747,6 +747,7 @@ CREATE TABLE IF NOT EXISTS call_notes (
   huddle_id TEXT NOT NULL,
   context_type TEXT NOT NULL,        -- as huddles; reparented, must not cascade from huddles (Platform §5)
   context_id TEXT NOT NULL,
+  occurrence TEXT,                   -- event calls: the occurrence's ISO start (as Calls' event:<id>:<occurrence> key); NULL otherwise
   started_by TEXT NOT NULL,          -- "Former member" on deletion (Platform §3.1)
   windows TEXT NOT NULL,             -- JSON [{start, stop, started_by, stopped_by}]
   gaps TEXT,                         -- JSON [{from, to}] transcription gaps
@@ -772,7 +773,8 @@ CREATE TABLE IF NOT EXISTS call_transcript_segments (
 **Other schema changes** (folded per Platform §14):
 - `messages.kind` gains `assistant` and `call_notes`. Assistant messages use **`sender_id = 'assistant'`**, handled like `'system'` (Chat §4.6): a reserved non-user sender that bypasses posting policy. `system_payload` holds `{ invoked_by, sources }`.
 - `scheduled_triggers.kind` gains `assistant_brief`, `assistant_prep` and `personal_reminder`.
-- `inbox_items.event_type` gains `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply` (a long task finished) and `personal_reminder`.
+- `inbox_items.event_type` gains `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply` (a long task finished) and `personal_reminder`. `inbox_items.source_type` gains `assistant` and `reminder`.
+- `messages.kind` system kinds gain `notes_started` and `notes_stopped`.
 - `rate_counters` scopes gain `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes`.
 - `handles` reserves `assistant` and the handle derived from the display name.
 - `audit_log.metadata` carries `"via": "assistant"` for assistant-initiated writes (no new column).

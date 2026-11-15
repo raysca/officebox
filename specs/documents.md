@@ -295,8 +295,8 @@ ALTER TABLE folders ADD COLUMN channel_id TEXT REFERENCES channels(id);   -- cha
 ALTER TABLE documents ADD COLUMN folder_id TEXT REFERENCES folders(id);
 ALTER TABLE documents ADD COLUMN drive_id TEXT REFERENCES drives(id);
 ALTER TABLE documents ADD COLUMN created_by TEXT REFERENCES users(id);     -- for the channel-deletion move
-ALTER TABLE documents ADD COLUMN version INTEGER NOT NULL DEFAULT 0;       -- metadata version (title, location, access); compared with expectedVersion (§10)
-ALTER TABLE documents ADD COLUMN idempotency_key TEXT;                     -- create idempotency key (§10); cleared after 24 hours (default)
+ALTER TABLE documents ADD COLUMN version INTEGER NOT NULL DEFAULT 0;       -- metadata version (title, location, access); compared with expectedVersion (§10) (default)
+ALTER TABLE documents ADD COLUMN idempotency_key TEXT;                     -- create idempotency key (§10) (default); cleared after 24 hours (default)
 CREATE UNIQUE INDEX documents_idempotency ON documents(created_by, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- files: three kinds, kept apart (platform §14)

@@ -220,6 +220,7 @@ The UserHub computes each member's **derived availability**: `{ state, until, so
   - **DMs, group DMs and private channels:** **no message text**, only "Ana sent you 2 messages" or "3 new mentions in a private channel", unless the member opts in to message text in their preferences.
   - **Public channels:** the text of the mentioning message **(default)**.
   - **Documents, comments and events:** title, plus the comment text for public-workspace documents only **(default)**.
+  - **Personal reminders** (`personal_reminder`): "You have a reminder due" with a link, **without the reminder text** **(default)**, because it may come from a private assistant conversation. The in-app record shows the text to its owner.
   - **Assistant items** (`assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`): **no content**, only a fixed line with the assistant's display name ("Butler has your daily brief"), linking to the assistant DM. Push notifications follow the same rule when push exists ([Assistant](assistant.md) §11).
 - **Template:**
   - a fixed Officebox template with the workspace name, a deep link and the reason ("You were mentioned in #design")
@@ -260,7 +261,7 @@ CREATE TABLE inbox_items (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,                       -- notification | action | schedule | follow (Personal Inbox, PRD §5.3)
   event_type TEXT NOT NULL,                 -- §3 catalogue (Zod-validated)
-  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security
+  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder
   source_id TEXT NOT NULL,
   source_seq INTEGER,                       -- latest channel seq contributing (chat)
   message_id TEXT,                          -- latest message contributing (chat)

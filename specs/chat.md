@@ -184,6 +184,7 @@ System messages are messages with `sender_id = 'system'` and a `kind`:
 | `missed_call` | `{ huddleId, callerId }` | Calls (DMs) |
 | `poll_closed` | `{ pollId, results }` | Polls |
 | `message_pinned` | `{ messageId, byUserId }` | Pins |
+| `notes_started` / `notes_stopped` | `{ huddleId, byUserId }` | Call notes started or stopped, posted in the call's in-call chat ([Assistant](assistant.md) §12.3) **(default)** |
 
 - System messages may be posted into announcement channels, read-only #general and archived channels; posting policy doesn't apply to them.
 - `call_started` is the thread root for in-call chat (Calls §6.4). The HuddleRoom DO posts it through a typed ChatChannel RPC that returns a result, not a thrown denial (AGENTS §4.1).
