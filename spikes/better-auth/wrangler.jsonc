@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // M1a-0 better-auth spike. Throwaway: local checks only (wrangler dev + vitest-plugin). Nothing here is imported by the app.
+  "name": "officebox-better-auth-spike",
+  "main": "src/index.ts",
+  // Same compatibility date as the repository's wrangler.jsonc.
+  "compatibility_date": "2026-11-01",
+  // better-auth needs AsyncLocalStorage (node:async_hooks). test/platform.test.ts and scripts/nodejs-compat.mjs check
+  // what happens without this flag on our compatibility date.
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "better-auth-spike", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "vars": {
+    // Spike only: enables the /test/* helper routes used by the end-to-end script. The app has no such routes.
+    "SPIKE_TEST_ROUTES": "1"
+  }
+}
