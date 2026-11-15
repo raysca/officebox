@@ -198,10 +198,15 @@ describe("step-up re-authentication (Identity §4.5; POST /me/reauth)", () => {
     expect(await sessionsOf(member.id)).toBe(before);
     const me = await member.browser.json<{ session: { freshAuthAt: number; freshAuthMethod: string } }>("/api/me");
     expect(me.body.session.freshAuthMethod).toBe("passkey");
+    // A step-up is a use of the passkey.
+    const used = await env.DB.prepare("SELECT last_used_at FROM passkeys WHERE user_id = ?")
+      .bind(member.id)
+      .first<{ last_used_at: number }>();
+    expect(Date.now() - used!.last_used_at).toBeLessThan(60_000);
     expect(Date.now() - me.body.session.freshAuthAt).toBeLessThan(60_000);
   });
 
-  it("options are scoped to the signed-in user's passkeys and require UV", async () => {
+  it("options list the signed-in user's passkeys (better-auth scopes them by session) and require UV", async () => {
     const member = await addMember();
     const options = await member.browser.json<{ allowCredentials: unknown[]; userVerification: string }>(
       "/api/me/reauth/options",

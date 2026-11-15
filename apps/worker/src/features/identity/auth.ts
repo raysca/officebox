@@ -10,6 +10,7 @@ import { ulid } from "../../core/ids";
 import { rootLogger, type Logger } from "../../core/log";
 import type { Env } from "../../env";
 import { fromBase64url, tokenHash } from "./crypto";
+import { counterAtChallenge, recordCounterMove, settleCounter } from "./counters";
 import { createKysely } from "./d1-kysely";
 import { approxLocation, deviceLabel } from "./device";
 import { bindChallenge, consumeTicket, findValidTicket, readTicketCookie } from "./enrolment";
@@ -35,8 +36,10 @@ import { completeSetupClaim } from "./setup-state";
  * 2. user verification: both `afterVerification` hooks refuse `userVerified === false`; registration
  *    options require UV and resident keys; an after hook rewrites the authentication options' UV
  * 3. the passkey `origin` and `rpID` set explicitly from the installation record
- * 4. clone detection: a before hook captures the challenge; on `AUTHENTICATION_FAILED` the after hook
- *    re-verifies the assertion with the stored counter set aside and raises `clone_detected`
+ * 4. clone detection: a before hook captures the challenge, when it was issued and the counter before;
+ *    each accepted assertion records its counter move; on `AUTHENTICATION_FAILED` the after hook
+ *    re-verifies the assertion with the stored counter set aside and raises `clone_detected` only if
+ *    the counter is at or below its value at challenge time (otherwise a race, refused quietly)
  * 5. `createSession` on registration verify: forced on for ticket registrations, stripped when signed
  *    in (in the mount, `routes.ts`)
  * 6. the enrolment ticket: read in `resolveUser`, bound to the challenge after options, consumed by
@@ -103,14 +106,22 @@ function errorCode(value: unknown): string | undefined {
   return typeof body?.code === "string" ? body.code : undefined;
 }
 
-/** Workaround 4: re-verify a refused assertion; true when it is a genuine assertion with a regressed counter. */
-async function detectClone(
+type RefusalVerdict = { kind: "clone"; passkeyId: string; userId: string } | { kind: "race" } | null;
+
+/**
+ * Workaround 4: re-verify a refused assertion with the stored counter set aside. A genuine assertion
+ * is a **clone** only if its counter is at or below the counter as it was when its challenge was
+ * issued (not both 0); above that but at or below the stored value, it lost a **race** with a newer
+ * legitimate sign-in (counters.ts). Anything that doesn't verify is an ordinary failure (null).
+ */
+async function judgeRefusal(
   env: Env,
   origin: string,
   rpID: string,
   response: AuthenticationResponseJSON,
   challenge: string,
-) {
+  challengeIssuedAt: number,
+): Promise<RefusalVerdict> {
   const row = expectOk(
     await new Database(env.DB).first<{ id: string; user_id: string; public_key: string; sign_count: number }>(
       "SELECT id, user_id, public_key, sign_count FROM passkeys WHERE credential_id = ?",
@@ -120,6 +131,7 @@ async function detectClone(
   if (!row) return null;
   const publicKey = fromBase64url(row.public_key);
   if (!publicKey) return null;
+  let presented: number;
   try {
     const verification = await verifyAuthenticationResponse({
       response,
@@ -129,13 +141,17 @@ async function detectClone(
       credential: { id: response.id, publicKey, counter: 0 },
       requireUserVerification: true,
     });
-    const presented = verification.authenticationInfo.newCounter;
-    const regressed = (presented > 0 || row.sign_count > 0) && presented <= row.sign_count;
-    return verification.verified && regressed ? { passkeyId: row.id, userId: row.user_id } : null;
+    if (!verification.verified) return null;
+    presented = verification.authenticationInfo.newCounter;
   } catch {
     // Not a genuine assertion (bad signature, origin, RP ID or UV): an ordinary failure.
     return null;
   }
+  const atChallenge = await counterAtChallenge(env.DB, row.id, challengeIssuedAt, row.sign_count);
+  if ((presented > 0 || atChallenge > 0) && presented <= atChallenge) {
+    return { kind: "clone", passkeyId: row.id, userId: row.user_id };
+  }
+  return presented <= row.sign_count ? { kind: "race" } : null;
 }
 
 /** Notices and audit for a detected clone: the member and every active owner (Identity §4.4). */
@@ -339,10 +355,21 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
           },
         },
         authentication: {
-          afterVerification: ({ verification }) => {
+          afterVerification: async ({ verification }) => {
             // Workaround 2.
             if (!verification.authenticationInfo.userVerified) {
               throw apiError("UNAUTHORIZED", "USER_VERIFICATION_REQUIRED", "User verification is required.");
+            }
+            // Accepted: record the counter move before better-auth stores it (clone versus race).
+            const before = currentStore()?.passkeyBefore;
+            if (before) {
+              await recordCounterMove(
+                env.DB,
+                before.id,
+                before.count,
+                verification.authenticationInfo.newCounter,
+                Date.now(),
+              );
             }
           },
         },
@@ -450,6 +477,18 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
         } catch {
           // Not ours to judge: better-auth refuses a bad challenge itself.
         }
+        store.passkeyChallengeIssuedAt = new Date(value.createdAt).getTime();
+        // The counter before this assertion, for the counter move recorded if it's accepted.
+        const response = (ctx.body as { response?: { id?: unknown } } | undefined)?.response;
+        if (typeof response?.id === "string") {
+          const row = expectOk(
+            await new Database(env.DB).first<{ id: string; sign_count: number }>(
+              "SELECT id, sign_count FROM passkeys WHERE credential_id = ?",
+              response.id,
+            ),
+          );
+          if (row) store.passkeyBefore = { id: row.id, count: row.sign_count };
+        }
       }),
       after: createAuthMiddleware(async (ctx) => {
         const returned = ctx.context.returned;
@@ -485,20 +524,27 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
         const response = body?.response;
         if (!response || typeof response.id !== "string") return;
         if (returnedObject(returned)) {
-          expectOk(
-            await new Database(env.DB).run(
-              "UPDATE passkeys SET last_used_at = ? WHERE credential_id = ?",
-              Date.now(),
-              response.id,
-            ),
-          );
+          await settleCounter(env.DB, response.id, Date.now());
           return;
         }
-        // Workaround 4: on the library's generic failure, tell a clone from any other failure.
+        // Workaround 4: on the library's generic failure, tell a clone from a race and from any other failure.
         const store = currentStore();
         if (errorCode(returned) !== "AUTHENTICATION_FAILED" || !store?.passkeyChallenge) return;
-        const clone = await detectClone(env, origin, rpID, response, store.passkeyChallenge);
-        if (!clone) return;
+        const verdict = await judgeRefusal(
+          env,
+          origin,
+          rpID,
+          response,
+          store.passkeyChallenge,
+          store.passkeyChallengeIssuedAt ?? Date.now(),
+        );
+        if (verdict?.kind === "race") {
+          // A newer legitimate sign-in got there first: refused quietly, the person just tries again.
+          logger().info("passkey assertion lost a counter race; refused without a clone alert");
+          return;
+        }
+        if (verdict?.kind !== "clone") return;
+        const clone = { passkeyId: verdict.passkeyId, userId: verdict.userId };
         store.cloneDetected = clone;
         await raiseClone(env, clone);
         throw apiError("UNAUTHORIZED", "clone_detected", "This passkey looks like a copy and was refused.");

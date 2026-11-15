@@ -49,6 +49,10 @@ export interface RequestStore {
   reauth?: { userId: string; verifiedUserId?: string };
   /** Captured before better-auth consumes it, so a refused assertion can be re-verified (clones). */
   passkeyChallenge?: string;
+  /** When that challenge was issued (epoch ms): the clone check compares with the counter then. */
+  passkeyChallengeIssuedAt?: number;
+  /** The asserted passkey and its stored counter before this assertion. */
+  passkeyBefore?: { id: string; count: number };
   /** Set when a refused assertion turned out to be a genuine one with a regressed counter. */
   cloneDetected?: { passkeyId: string; userId: string };
 }

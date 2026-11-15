@@ -162,6 +162,103 @@ describe("clone detection (Identity §4.4; M1a-0 decision: re-verify refused ass
     expect((verify.body as { error: { reason?: string } }).error.reason).toBe("AUTHENTICATION_FAILED");
   });
 
+  const cloneAudits = () => count("SELECT count(*) AS n FROM audit_log WHERE action = 'auth.passkey_clone_detected'");
+  const noticesOf = async (id: string) =>
+    (await env.DB.prepare("SELECT pending_security_notice AS p FROM users WHERE id = ?")
+      .bind(id)
+      .first<{ p: string | null }>())!.p;
+
+  it("two legitimate sign-ins verified out of order (B before A): A is refused quietly, no clone, no notices", async () => {
+    const member = await addMember();
+    const audits = await cloneAudits();
+    const ownerNotices = await noticesOf(ws.ownerId);
+    const a = new Browser();
+    const b = new Browser();
+    const oa = await a.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
+    const ob = await b.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
+    const ra = await member.authenticator.authenticate(oa.body, ORIGIN); // counter n+1
+    const rb = await member.authenticator.authenticate(ob.body, ORIGIN); // counter n+2
+    const vb = await b.json("/api/auth/passkey/verify-authentication", { body: { response: rb } });
+    expect(vb.status).toBe(200);
+    const va = await a.json("/api/auth/passkey/verify-authentication", { body: { response: ra } });
+    expect(va.status).toBe(400);
+    expect((va.body as { error: { reason?: string } }).error.reason).toBe("AUTHENTICATION_FAILED");
+    expect(a.sessionCookie).toBeUndefined();
+    expect(await cloneAudits()).toBe(audits);
+    expect(await noticesOf(member.id)).toBeNull();
+    expect(await noticesOf(ws.ownerId)).toBe(ownerNotices);
+    // The person simply tries again.
+    expect((await signInWithPasskey(a, member.authenticator)).verify.status).toBe(200);
+  });
+
+  it("a true clone is still clone_detected after legitimate sign-ins moved the counter", async () => {
+    const member = await addMember();
+    await signInWithPasskey(new Browser(), member.authenticator); // a non-zero stored counter
+    const browser = new Browser();
+    // The cloner's challenge is issued first; then the real owner signs in twice.
+    const options = await browser.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
+    const stored = (await env.DB.prepare("SELECT sign_count FROM passkeys WHERE user_id = ?")
+      .bind(member.id)
+      .first<{ sign_count: number }>())!.sign_count;
+    await signInWithPasskey(new Browser(), member.authenticator);
+    await signInWithPasskey(new Browser(), member.authenticator);
+    const cloned = await member.authenticator.authenticate(options.body, ORIGIN, { counter: stored });
+    const verify = await browser.json("/api/auth/passkey/verify-authentication", { body: { response: cloned } });
+    expect(verify.body).toMatchObject({ error: { reason: "clone_detected" } });
+  });
+
+  it("both counters 0 is never a clone (synced passkeys)", async () => {
+    const member = await addMember();
+    const synced = new SoftAuthenticator({ counter: "zero" });
+    await giveTicket(member.browser, member.id);
+    member.browser.cookies.delete("__Host-officebox.session_token");
+    await registerPasskey(member.browser, synced);
+    const audits = await cloneAudits();
+    const a = new Browser();
+    const b = new Browser();
+    const oa = await a.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
+    const ob = await b.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
+    const ra = await synced.authenticate(oa.body, ORIGIN);
+    const rb = await synced.authenticate(ob.body, ORIGIN);
+    expect((await b.json("/api/auth/passkey/verify-authentication", { body: { response: rb } })).status).toBe(200);
+    expect((await a.json("/api/auth/passkey/verify-authentication", { body: { response: ra } })).status).toBe(200);
+    expect(await cloneAudits()).toBe(audits);
+  });
+
+  it("the same assertion sent twice at once signs in at most once and raises nothing", async () => {
+    const member = await addMember();
+    const audits = await cloneAudits();
+    const browser = new Browser();
+    const options = await browser.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
+    const response = await member.authenticator.authenticate(options.body, ORIGIN);
+    const twin = new Browser();
+    for (const [k, v] of browser.cookies) twin.cookies.set(k, v);
+    const results = await Promise.all([
+      browser.json("/api/auth/passkey/verify-authentication", { body: { response } }),
+      twin.json("/api/auth/passkey/verify-authentication", { body: { response } }),
+    ]);
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(await cloneAudits()).toBe(audits);
+  });
+
+  it("the stored counter never goes backwards after a lost update", async () => {
+    const member = await addMember();
+    await signInWithPasskey(new Browser(), member.authenticator);
+    const row = (await env.DB.prepare("SELECT id, sign_count FROM passkeys WHERE user_id = ?").bind(member.id).first<{
+      id: string;
+      sign_count: number;
+    }>())!;
+    // As if a slower verify had written an older value over a newer one.
+    await env.DB.prepare("UPDATE passkeys SET sign_count = ? WHERE id = ?")
+      .bind(row.sign_count - 1, row.id)
+      .run();
+    await signInWithPasskey(new Browser(), member.authenticator);
+    const after = (await env.DB.prepare("SELECT sign_count FROM passkeys WHERE id = ?")
+      .bind(row.id)
+      .first<{ sign_count: number }>())!;
+    expect(after.sign_count).toBe(row.sign_count + 1);
+  });
+
   it("two legitimate concurrent sign-ins never raise a clone alert", async () => {
     const member = await addMember();
     const before = await count("SELECT count(*) AS n FROM audit_log WHERE action = 'auth.passkey_clone_detected'");
@@ -259,6 +356,22 @@ describe("enrolment tickets (Identity §4.4, §9 'Enrolment tickets')", () => {
     ]);
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
     expect(await passkeysOf(member.id)).toBe(before + 1);
+  });
+
+  it("a ticket whose user was disabled after options is refused at verify", async () => {
+    const member = await addMember();
+    const browser = new Browser();
+    await giveTicket(browser, member.id);
+    const options = await browser.json<{
+      challenge: string;
+      rp: { id: string; name: string };
+      user: { id: string; name: string };
+    }>("/api/auth/passkey/generate-register-options");
+    await env.DB.prepare("UPDATE users SET status = 'disabled' WHERE id = ?").bind(member.id).run();
+    const { response } = await new SoftAuthenticator().register(options.body, ORIGIN);
+    const verify = await browser.json("/api/auth/passkey/verify-registration", { body: { response } });
+    expect(verify.status).toBe(403);
+    expect(verify.body).toMatchObject({ error: { reason: "ENROLMENT_TICKET_INVALID" } });
   });
 
   it("an expired ticket is refused", async () => {

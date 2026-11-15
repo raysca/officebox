@@ -19,10 +19,12 @@ export const MAX_PASSKEY_NAME_LENGTH = 64;
 
 /**
  * Email normalisation for lookup, uniqueness and rate-limit keys (Identity §4.4, §5): trim, lowercase,
- * Unicode NFKC.
+ * Unicode NFKC. NFKC runs first, so compatibility characters fold to letters that lower-casing then
+ * handles ("ℌ" → "H" → "h"), and again after, because lower-casing can leave a decomposed sequence
+ * ("İ" → "i" + U+0307).
  */
 export function normaliseEmail(email: string): string {
-  return email.trim().toLowerCase().normalize("NFKC");
+  return email.trim().normalize("NFKC").toLowerCase().normalize("NFKC");
 }
 
 /**

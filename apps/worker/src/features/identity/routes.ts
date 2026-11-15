@@ -26,7 +26,7 @@ import { getMe } from "./me";
 import { forwardSetCookies, identityServices, loadSession, requireAuth } from "./middleware";
 import { acknowledgeNotices, listNotices } from "./notices";
 import { listPasskeys, removePasskey, renamePasskey } from "./passkeys";
-import { limitPasskeyIp, limitReauth, limitSetup } from "./rate-limits";
+import { limitPasskeyIp, limitReauth, limitSetup, limitSetupStatus } from "./rate-limits";
 import { reauthenticate, reauthOptions } from "./reauth";
 import { currentStore } from "./request-store";
 import { filterAuthResponse } from "./token-filter";
@@ -74,7 +74,12 @@ function enrolmentResponse(c: AppContext, result: SetupEnrolmentResult) {
 }
 
 const setupRoutes = new Hono<AppEnv>()
-  .get("/", async (c) => respond(c, await setupStatus(coreContext(c))))
+  .get("/", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await limitSetupStatus(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    return respond(c, await setupStatus(ctx));
+  })
   .post("/", async (c) => {
     const ctx = coreContext(c);
     if (await isSetupComplete(ctx)) return respond(c, err(NOT_FOUND));
@@ -102,6 +107,15 @@ const setupRoutes = new Hono<AppEnv>()
   });
 
 // ---- /api/auth: the better-auth mount ----------------------------------------------------------
+
+/** Buffers a request body up to the WebAuthn bound, so better-auth never parses more than that. */
+async function boundedBody(request: Request): Promise<Request | ApiError> {
+  const text = await readBodyText(request, WEBAUTHN_BODY);
+  if (!text.ok) return text.error;
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  return new Request(request.url, { method: request.method, headers, body: text.value });
+}
 
 /** Rebuilds a JSON request with a changed body (the registration verify's `createSession`). */
 async function withBody(
@@ -146,6 +160,12 @@ const authRoutes = new Hono<AppEnv>().all("/*", async (c) => {
   }
 
   let request = c.req.raw;
+  if (request.method === "POST" && !isRegistrationRoute(path)) {
+    // Sign-out and verify-authentication: a size bound before better-auth reads the body.
+    const bounded = await boundedBody(request);
+    if (!(bounded instanceof Request)) return respond(c, err(bounded));
+    request = bounded;
+  }
   const extraCookies: string[] = [];
   const store = currentStore();
   if (isRegistrationRoute(path)) {
@@ -185,6 +205,19 @@ const authRoutes = new Hono<AppEnv>().all("/*", async (c) => {
 
   const response = await auth.handler(request);
   if (store?.consumedTicket && response.ok) extraCookies.push(CLEAR_TICKET_COOKIE);
+  const ticket = store?.consumedTicket;
+  if (ticket && response.status >= 500 && !(await userExists(c, ticket.userId))) {
+    // The setup claim expired (and its owner was deleted) between the ticket's consume and the passkey
+    // insert: a typed answer, not a 500.
+    return respond(
+      c,
+      err(
+        apiError("gone", "This setup expired before the passkey was saved. Start setup again.", {
+          reason: "setup_expired",
+        }),
+      ),
+    );
+  }
   const filtered = await filterAuthResponse(response, c.var.requestId);
   if (extraCookies.length === 0) return filtered;
   // This route returns a raw Response, which Hono doesn't merge with c.header(): append here, including
@@ -193,6 +226,10 @@ const authRoutes = new Hono<AppEnv>().all("/*", async (c) => {
   for (const cookie of extraCookies) headers.append("Set-Cookie", cookie);
   return new Response(filtered.body, { status: filtered.status, headers });
 });
+
+async function userExists(c: AppContext, userId: string): Promise<boolean> {
+  return (await c.env.DB.prepare("SELECT 1 AS one FROM users WHERE id = ?").bind(userId).first()) !== null;
+}
 
 // ---- /api/me -----------------------------------------------------------------------------------
 

@@ -127,6 +127,26 @@ describe("setup (Identity §4.1)", () => {
     expect(await screen.findByText(/can't be continued/)).toBeDefined();
   });
 
+  it("a released claim sends resume back to the full setup form", async () => {
+    const user = userEvent.setup();
+    let claimed = true;
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () => jsonResponse({ setupRequired: true, tokenSource: "generated", claimed })),
+        on("POST", "/api/setup/resume", () => {
+          claimed = false;
+          return apiError("conflict", 409, { reason: "setup_released" });
+        }),
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    await user.type(await screen.findByLabelText("Setup token"), "token-0123456789abcdefghijklmnopqrstuv");
+    await user.click(screen.getByRole("button", { name: "Continue setup" }));
+    expect(await screen.findByRole("button", { name: "Create workspace" })).toBeDefined();
+  });
+
   it("after setup, /setup says so and links to sign-in", async () => {
     await renderApp("/setup", {
       fetch: healthyFetch({ routes: [on("GET", "/api/setup", () => apiError("not_found", 404))] }),

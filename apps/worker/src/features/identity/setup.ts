@@ -92,9 +92,35 @@ export async function expireStaleClaim(ctx: CoreContext): Promise<boolean> {
   return released;
 }
 
+/** Runs the expiry batch only when the open claim is actually older than 24 hours (a read first). */
+export async function expireIfStale(ctx: CoreContext): Promise<boolean> {
+  const installation = await loadInstallation(ctx.env.DB);
+  if (!installation?.setupClaim || installation.setupCompletedAt !== null) return false;
+  if ((installation.setupClaimedAt ?? 0) >= ctx.now() - SETUP_CLAIM_TTL_MS) return false;
+  return expireStaleClaim(ctx);
+}
+
+/**
+ * Releases a claim that has no owner row (only while it's still the current, incomplete claim). The
+ * setup token is kept, so the same token works again. Returns whether it released one.
+ */
+export async function releaseOrphanedClaim(ctx: CoreContext, claim: string): Promise<boolean> {
+  const meta = expectOk(
+    await new Database(ctx.env.DB).run(
+      `UPDATE installation SET setup_claim = NULL, setup_claimed_at = NULL, canonical_origin = NULL, allowed_hosts = NULL
+        WHERE id = 1 AND setup_claim = ? AND setup_completed_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM users WHERE created_attempt_id = ?)`,
+      claim,
+      claim,
+    ),
+  );
+  if (meta.changes === 1) ctx.log.warn("an incomplete setup claim without an owner was released");
+  return meta.changes === 1;
+}
+
 export async function setupStatus(ctx: CoreContext): Promise<Result<SetupStatus, ApiError>> {
   if (await isSetupComplete(ctx)) return err(NOT_FOUND);
-  await expireStaleClaim(ctx);
+  await expireIfStale(ctx);
   await ensureGeneratedToken(ctx);
   const installation = await loadInstallation(ctx.env.DB);
   return ok({ setupRequired: true, tokenSource: setupTokenSource(ctx.env), claimed: installation?.setupClaim != null });
@@ -129,9 +155,10 @@ export async function claimSetup(
   secrets: IdentitySecrets,
   body: SetupBody,
   origin: string,
+  retried = false,
 ): Promise<Result<SetupEnrolmentResult, ApiError>> {
   if (await isSetupComplete(ctx)) return err(NOT_FOUND);
-  await expireStaleClaim(ctx);
+  await expireIfStale(ctx);
   await ensureGeneratedToken(ctx);
   const token = await checkSetupToken(ctx, body.token);
   if (!token.ok) return token;
@@ -171,24 +198,26 @@ export async function claimSetup(
   if ((claimed[1]?.changes ?? 0) !== 1) {
     if (await isSetupComplete(ctx)) return err(NOT_FOUND);
     const installation = await loadInstallation(ctx.env.DB);
+    // A claim whose owner row never got written (a crash mid-claim) is released, and this claim retried.
+    if (installation?.setupClaim && !retried && (await releaseOrphanedClaim(ctx, installation.setupClaim))) {
+      return claimSetup(ctx, secrets, body, origin, true);
+    }
     if (installation?.setupClaim) {
       return err(apiError("conflict", "Setup has already been claimed. Resume it with the same setup token."));
     }
     return err(INVALID_TOKEN); // the generated token was replaced since it was checked
   }
 
-  const owner = await createOwner(ctx, secrets, body, origin, nonce);
+  let owner: Result<string, ApiError>;
+  try {
+    owner = await createOwner(ctx, secrets, body, origin, nonce);
+  } catch (error) {
+    // A real failure (D1 inside better-auth, say): never leave a claim without an owner behind.
+    await releaseOrphanedClaim(ctx, nonce);
+    throw error;
+  }
   if (!owner.ok) {
-    // Undo the claim so setup can be tried again (only while it's still ours and has no owner).
-    expectOk(
-      await db.run(
-        `UPDATE installation SET setup_claim = NULL, setup_claimed_at = NULL, canonical_origin = NULL, allowed_hosts = NULL
-          WHERE id = 1 AND setup_claim = ? AND setup_completed_at IS NULL
-            AND NOT EXISTS (SELECT 1 FROM users WHERE created_attempt_id = ?)`,
-        nonce,
-        nonce,
-      ),
-    );
+    await releaseOrphanedClaim(ctx, nonce);
     return owner;
   }
   const ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, owner.value, "setup", nonce, now);
@@ -238,14 +267,23 @@ export async function resumeSetup(
   presented: string,
 ): Promise<Result<SetupEnrolmentResult, ApiError>> {
   if (await isSetupComplete(ctx)) return err(NOT_FOUND);
-  await expireStaleClaim(ctx);
+  await expireIfStale(ctx);
   const token = await checkSetupToken(ctx, presented);
   if (!token.ok) return token;
   const installation = await loadInstallation(ctx.env.DB);
   const claim = installation?.setupClaim;
   if (!claim) return err(apiError("gone", "There's no setup in progress to resume. Start setup again."));
   const owner = await claimedOwner(ctx, claim);
-  if (!owner || owner.passkeys > 0 || owner.firstSignedInAt !== null) {
+  if (!owner) {
+    // The claim never got its owner (a crash mid-claim): release it so setup can start again.
+    await releaseOrphanedClaim(ctx, claim);
+    return err(
+      apiError("conflict", "The earlier setup didn't finish and was reset. Start setup again.", {
+        reason: "setup_released",
+      }),
+    );
+  }
+  if (owner.passkeys > 0 || owner.firstSignedInAt !== null) {
     return err(apiError("gone", "This setup can't be resumed: the owner already has a passkey or has signed in."));
   }
   const ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, owner.id, "setup", claim, ctx.now());

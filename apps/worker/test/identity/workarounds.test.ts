@@ -138,6 +138,25 @@ describe("workaround 3: the passkey origin and rpID are set from the installatio
         .then(() => "signed in")
         .catch(() => "refused");
       expect(result).toBe("refused");
+
+      // Positive control: the same in-process flow with the canonical origin signs in.
+      const fresh = await auth.api.generatePasskeyAuthenticationOptions({
+        headers: new Headers(),
+        returnHeaders: true,
+      });
+      const freshCookie = fresh.headers
+        .getSetCookie()
+        .map((c) => c.split(";")[0])
+        .join("; ");
+      const good = await ws.authenticator.authenticate(fresh.response, ORIGIN);
+      const accepted = await auth.api
+        .verifyPasskeyAuthentication({
+          body: { response: good },
+          headers: new Headers({ cookie: freshCookie, origin: ORIGIN }),
+        })
+        .then(() => "signed in")
+        .catch(() => "refused");
+      expect(accepted).toBe("signed in");
     });
     const options = buildAuthOptions(env, secrets(), INSTALLATION);
     expect(options.baseURL).toBe(ORIGIN);

@@ -3,7 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useRef, useState, type FormEvent } from "react";
 import { ApiRequestError, describeApiError, errorCodeOf } from "../../lib/api/client";
-import { claimSetup, meQueryKey, registerPasskey, resumeSetup, setupStatusQuery } from "../../lib/api/identity";
+import {
+  claimSetup,
+  meQueryKey,
+  registerPasskey,
+  resumeSetup,
+  setupStatusQuery,
+  setupStatusQueryKey,
+} from "../../lib/api/identity";
 import { supportsPasskeys } from "../../lib/api/webauthn";
 import { Alert } from "../../lib/ui/Alert";
 import { Button } from "../../lib/ui/Button";
@@ -238,6 +245,7 @@ function ClaimForm({
 }
 
 function ResumeForm({ onEnrolled }: { onEnrolled: (enrolment: SetupEnrolment) => void }) {
+  const queryClient = useQueryClient();
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -249,7 +257,11 @@ function ResumeForm({ onEnrolled }: { onEnrolled: (enrolment: SetupEnrolment) =>
       const code = errorCodeOf(failure);
       if (code === "forbidden") setError(copy.tokenInvalid);
       else if (code === "gone") setFormError(copy.resumeGone);
-      else
+      else if (code === "conflict") {
+        // The earlier claim never got its owner and was released: back to the full setup form.
+        toastStore.show(copy.resumeReset, "info");
+        void queryClient.invalidateQueries({ queryKey: setupStatusQueryKey });
+      } else
         setFormError(
           failure instanceof ApiRequestError ? describeApiError(failure.detail, "mutation") : messages.errors.generic,
         );

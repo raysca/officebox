@@ -4,13 +4,15 @@ import { audit } from "../../core/audit";
 import type { AuthContext, CoreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
 import type { Auth } from "./auth";
+import { settleCounter } from "./counters";
 import { currentStore, runWithStore } from "./request-store";
 
 /**
  * Step-up re-authentication (Identity §4.5; M1a-0 spike Q10, workaround 11).
  *
- * `POST /me/reauth/options` asks better-auth for passkey authentication options scoped to the signed-in
- * user's passkeys and forwards the challenge cookie. `POST /me/reauth` runs better-auth's full passkey
+ * `POST /me/reauth/options` asks better-auth for passkey authentication options and forwards the
+ * challenge cookie. We pass no `allowCredentials`: better-auth reads the session from the request and
+ * lists that user's passkeys itself. Which passkey may confirm is enforced at verify, below. `POST /me/reauth` runs better-auth's full passkey
  * verification (signature, canonical origin and RP ID, UV through our hook, the counter) inside a
  * `reauth` context: the session-create hook records the verified user and **vetoes the new session**,
  * so better-auth answers `UNABLE_TO_CREATE_SESSION` after verifying. We then check the verified user
@@ -76,5 +78,7 @@ export async function reauthenticate(
       me.userId,
     ),
   );
+  // A step-up is a use of that passkey: last used, and the counter kept monotonic.
+  await settleCounter(ctx.env.DB, body.response.id, now);
   return ok({ freshAuthAt: now });
 }

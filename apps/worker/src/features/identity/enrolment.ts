@@ -158,6 +158,7 @@ export async function consumeTicket(
         WHERE token_hash = ?2 AND user_id = ?3 AND kind = 'passkey_enrol'
           AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?1
           AND json_extract(payload, '$.challenge') = ?4
+          AND EXISTS (SELECT 1 FROM users WHERE id = ?3 AND status = 'active')
         RETURNING payload`,
       now,
       hash,

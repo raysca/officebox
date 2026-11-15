@@ -13,6 +13,13 @@ import { clientIp, ipBucket } from "./device";
 export const IDENTITY_LIMITS = {
   /** Setup and setup resume: 5 per minute per IP. */
   setup: defineLimit({ mechanism: "binding", name: "setup", binding: "AUTH_RATE_LIMITER", periodSeconds: 60 }),
+  /** `GET /setup` (status, and the generated token on first visit): 20 per minute per IP (default). */
+  setupStatus: defineLimit({
+    mechanism: "binding",
+    name: "setup_status",
+    binding: "PASSKEY_RATE_LIMITER",
+    periodSeconds: 60,
+  }),
   /** Passkey sign-in and registration (options and verify), and step-up attempts: 20 per minute per IP. */
   passkeyIp: defineLimit({ mechanism: "binding", name: "passkey", binding: "PASSKEY_RATE_LIMITER", periodSeconds: 60 }),
   /** `POST /me/reauth`: 5 attempts per 10 minutes per session (default). */
@@ -25,6 +32,10 @@ export function ipKey(request: Request): string {
 
 export function limitSetup(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
   return checkLimit(ctx, IDENTITY_LIMITS.setup, ipKey(request));
+}
+
+export function limitSetupStatus(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
+  return checkLimit(ctx, IDENTITY_LIMITS.setupStatus, ipKey(request));
 }
 
 export function limitPasskeyIp(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {

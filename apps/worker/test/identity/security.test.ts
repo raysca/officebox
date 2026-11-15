@@ -237,6 +237,16 @@ describe("no response body or log line contains a session token (required test; 
   });
 });
 
+describe("request size bounds before better-auth parses a body", () => {
+  it("verify-authentication and sign-out refuse bodies over 64 KB", async () => {
+    const huge = { response: { id: "x", type: "public-key", pad: "a".repeat(70 * 1024) } };
+    for (const path of ["/api/auth/passkey/verify-authentication", "/api/auth/sign-out"]) {
+      const result = await new Browser().json(path, { body: huge });
+      expect(result.status, path).toBe(413);
+    }
+  });
+});
+
 describe("rate limits before better-auth (Platform §8)", () => {
   it("passkey sign-in: 20 per minute per IP, then rate_limited", async () => {
     const browser = new Browser();

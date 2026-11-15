@@ -1,5 +1,6 @@
 import { defineJob, type CronJob } from "../../core/cron";
 import { Database, expectOk } from "../../core/db";
+import { pruneCounterEventsStatement } from "./counters";
 import { expireStaleClaim, repairSetup } from "./setup";
 
 /**
@@ -35,6 +36,7 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
           db.statement("DELETE FROM sessions WHERE expires_at < ?", now),
           db.statement("DELETE FROM auth_verifications WHERE expires_at < ?", now),
           db.statement("DELETE FROM auth_tokens WHERE kind = 'passkey_enrol' AND expires_at < ?", now - day),
+          pruneCounterEventsStatement(db, now),
         ]),
       );
       ctx.log.info("pruned identity rows", {

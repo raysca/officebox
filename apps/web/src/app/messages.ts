@@ -113,6 +113,7 @@ export const messages = {
       "Someone started setting up this workspace but hasn't added a passkey yet. If that was you, enter the setup token to continue, on this device or another one.",
     resume: "Continue setup",
     resuming: "Continuing…",
+    resumeReset: "The earlier setup didn't finish, so it was reset. Fill in the details to start again.",
     resumeGone: "This setup can't be continued: the owner already has a passkey or has signed in. Sign in instead.",
     passkeyTitle: "Add your passkey",
     passkeyDescription: (email: string) =>

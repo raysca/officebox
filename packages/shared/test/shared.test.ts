@@ -99,3 +99,13 @@ describe("validationError", () => {
     expect(Object.keys(validationError(result.error).fields ?? {})).toEqual(["a.b"]);
   });
 });
+
+describe("normaliseEmail (Identity §4.4)", () => {
+  it("trims, applies NFKC before and after lower-casing", async () => {
+    const { normaliseEmail } = await import("../src/identity");
+    expect(normaliseEmail("  Sam@Example.COM ")).toBe("sam@example.com");
+    expect(normaliseEmail("\u210c@x.com")).toBe("h@x.com"); // ℌ folds to H, then lower-cases
+    expect(normaliseEmail("SAM\uff20EXAMPLE.COM")).toBe("sam@example.com"); // fullwidth @
+    expect(normaliseEmail("\u0130@x.com")).toBe("i\u0307@x.com".normalize("NFKC"));
+  });
+});

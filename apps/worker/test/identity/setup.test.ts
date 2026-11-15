@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger } from "../../src/core/log";
 import { IDENTITY_JOBS } from "../../src/features/identity/jobs";
-import { expireStaleClaim, SETUP_CLAIM_TTL_MS } from "../../src/features/identity/setup";
+import { authFor } from "../../src/features/identity/auth";
+import { identitySecrets } from "../../src/features/identity/secrets";
+import { expireIfStale, expireStaleClaim, SETUP_CLAIM_TTL_MS } from "../../src/features/identity/setup";
 import { completeSetupClaim } from "../../src/features/identity/setup-state";
 import { SoftAuthenticator } from "./authenticator";
 import {
@@ -280,6 +282,61 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
       console.warn = original;
     }
     expect(lines.filter((l) => l.includes("officebox setup token"))).toHaveLength(1);
+  });
+});
+
+describe("a claim that never got its owner (review m1)", () => {
+  it("a thrown error while creating the owner releases the claim, so setup can be tried again", async () => {
+    const owner = ownerDetails();
+    const secrets = identitySecrets(env, silent);
+    if (!secrets.ok) throw new Error("secrets");
+    const auth = authFor(env, secrets.value, { canonicalOrigin: ORIGIN, workspaceName: owner.workspace });
+    const internal = (await auth.$context).internalAdapter;
+    const spy = vi.spyOn(internal, "createUser").mockRejectedValueOnce(new Error("D1 is unreachable"));
+    try {
+      const failed = await claim(new Browser(), owner);
+      expect(failed.status).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await installation())?.setup_claim).toBeNull();
+    expect((await claim(new Browser(), owner)).status).toBe(201);
+  });
+
+  it("an orphaned claim: resume releases it (409 setup_released) and a new claim succeeds", async () => {
+    await claim(new Browser(), ownerDetails());
+    await env.DB.prepare("DELETE FROM users WHERE role = 'owner'").run();
+    const resumed = await new Browser().json("/api/setup/resume", { body: { token: SETUP_TOKEN } });
+    expect(resumed.status).toBe(409);
+    expect(resumed.body).toMatchObject({ error: { code: "conflict", reason: "setup_released" } });
+    expect((await installation())?.setup_claim).toBeNull();
+    expect((await claim(new Browser(), ownerDetails())).status).toBe(201);
+  });
+
+  it("an orphaned claim doesn't block POST /setup either", async () => {
+    await claim(new Browser(), ownerDetails());
+    await env.DB.prepare("DELETE FROM users WHERE role = 'owner'").run();
+    expect((await claim(new Browser(), ownerDetails())).status).toBe(201);
+  });
+});
+
+describe("GET /api/setup stays cheap (review m2)", () => {
+  it("runs the expiry batch only for a stale claim", async () => {
+    await claim(new Browser(), ownerDetails());
+    expect(await expireIfStale(ctx())).toBe(false);
+    expect((await installation())?.setup_claim).not.toBeNull();
+    await env.DB.prepare("UPDATE installation SET setup_claimed_at = ?")
+      .bind(Date.now() - SETUP_CLAIM_TTL_MS - 1000)
+      .run();
+    expect(await expireIfStale(ctx())).toBe(true);
+  });
+
+  it("is rate-limited per IP (20 per minute)", async () => {
+    const browser = new Browser();
+    const statuses: number[] = [];
+    for (let i = 0; i < 21; i++) statuses.push((await browser.call("/api/setup")).status);
+    expect(statuses.slice(0, 20).every((st) => st === 200)).toBe(true);
+    expect(statuses[20]).toBe(429);
   });
 });
 
