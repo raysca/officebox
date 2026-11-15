@@ -25,6 +25,7 @@ const bodySchema = z.strictObject({ name: z.string().min(1) });
 const sample = new Hono<AppEnv>()
   .get("/ok", (c) => respond(c, ok({ hello: "world" })))
   .get("/raw", (c) => c.json({ raw: true }))
+  .get("/cacheable", (c) => c.json({ public: true }, 200, { "Cache-Control": "public, max-age=60" }))
   .post("/items", async (c) => {
     const body = await readJson(c, bodySchema, 64);
     if (!body.ok) return respond(c, body);
@@ -191,6 +192,11 @@ describe("API caching", () => {
     for (const path of ["/api/sample/ok", "/api/sample/raw", "/api/sample/denied", "/api/nope"]) {
       expect((await call(path)).headers.get("Cache-Control"), path).toBe("no-store");
     }
+  });
+
+  it("keeps a Cache-Control header the route set itself", async () => {
+    const { call } = makeApp();
+    expect((await call("/api/sample/cacheable")).headers.get("Cache-Control")).toBe("public, max-age=60");
   });
 });
 
