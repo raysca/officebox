@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   can,
   decide,
+  decideWithoutFacts,
   DENIAL_REASONS,
   denialMessage,
   effectiveResourceRole,
@@ -77,13 +78,13 @@ const person = (
   status,
 });
 
-/** Every action the matrix exercises; checked against the engine's action lists in `afterAll`. */
-const exercised = new Set<PermissionAction>();
-
 function outcome(a: Actor, check: PermissionCheck, now = NOW): Expect {
-  exercised.add(check.action);
   const decision = decide(a, check, now);
   expect(can(a, check, now)).toBe(decision.ok);
+  // The fact-free pre-check never denies what decide allows, and when it denies, decide agrees.
+  const pre = decideWithoutFacts(a, check.action);
+  if (decision.ok) expect(pre.ok).toBe(true);
+  if (!pre.ok) expect(decision).toEqual(pre);
   return decision.ok ? "✓" : decision.error;
 }
 
@@ -180,7 +181,8 @@ const MEMBER_ADMIN_MATRIX: Record<ActorRole, Record<TargetRole, Expect>> = {
 };
 
 // Targets that aren't people an action can be aimed at: deleted (anonymised) members and the reserved
-// system rows (default), whatever their role.
+// system rows (default), whatever their role. (default) An admin gets invalid_target rather than
+// owner_required even for a deleted admin or owner: the target check comes first.
 const UNUSABLE_TARGET: RoleRow = {
   owner: "invalid_target",
   admin: "invalid_target",
@@ -195,6 +197,40 @@ const CHANGE_ROLE_MATRIX: Record<ActorRole, Record<WorkspaceRole, Expect>> = {
   admin: { owner: "owner_required", admin: "owner_required", member: "owner_required", guest: "owner_required" },
   member: { owner: "not_permitted", admin: "not_permitted", member: "not_permitted", guest: "not_permitted" },
   guest: { owner: "not_permitted", admin: "not_permitted", member: "not_permitted", guest: "not_permitted" },
+};
+
+// Disabled targets (default): they can be demoted and removed from groups, but not promoted or added.
+// The acting owner is fresh; the target has two passkeys and an unconsumed token exists.
+const DISABLED_TARGET: readonly [
+  label: string,
+  from: WorkspaceRole,
+  change: WorkspaceRole | "group add" | "group remove",
+  expected: Expect,
+][] = [
+  ["promote a disabled member to admin", "member", "admin", "invalid_target"],
+  ["promote a disabled admin to owner", "admin", "owner", "invalid_target"],
+  ["demote a disabled admin to member", "admin", "member", "✓"],
+  ["demote a disabled owner to admin", "owner", "admin", "✓"],
+  ["keep a disabled admin an admin", "admin", "admin", "✓"],
+  ["add a disabled member to a group", "member", "group add", "invalid_target"],
+  ["remove a disabled member from a group", "member", "group remove", "✓"],
+];
+
+// "Edit own profile, status, handle, sign-in methods, devices" (§4.6): only the person. Guests are
+// refused everything, own account included, (default) until Phase 2 defines them.
+const OWN_MATRIX: Record<ActorRole, { own: Expect; other: Expect }> = {
+  owner: { own: "✓", other: "not_own" },
+  admin: { own: "✓", other: "not_own" },
+  member: { own: "✓", other: "not_own" },
+  guest: { own: "not_permitted", other: "not_permitted" },
+};
+
+// Bulk-job progress (Admin §17 `GET /admin/jobs/:id`): the actor's own jobs, or any for owners.
+const JOB_VIEW_MATRIX: Record<ActorRole, { own: Expect; other: Expect }> = {
+  owner: { own: "✓", other: "✓" },
+  admin: { own: "✓", other: "owner_required" },
+  member: { own: "not_permitted", other: "not_permitted" },
+  guest: { own: "not_permitted", other: "not_permitted" },
 };
 
 // The promotion rule (Identity §2 "Promotion", §4.11, §9 "Promotion"; Permissions §6). The acting owner
@@ -316,12 +352,14 @@ describe("permission matrix: workspace actions (Permissions §4.6, §6; Admin §
     }
   }
 
-  it("admins see only the bulk jobs they started; owners see any (Admin §17)", () => {
-    expect(outcome(actor("owner"), { action: "admin.job.view", startedBy: "someone" })).toBe("✓");
-    expect(outcome(actor("admin"), { action: "admin.job.view", startedBy: "actor-admin" })).toBe("✓");
-    expect(outcome(actor("admin"), { action: "admin.job.view", startedBy: "someone" })).toBe("owner_required");
-    expect(outcome(actor("member"), { action: "admin.job.view", startedBy: "actor-member" })).toBe("not_permitted");
-  });
+  for (const role of ACTOR_ROLES) {
+    const row = JOB_VIEW_MATRIX[role];
+    it(`${role}: view a bulk job they started → ${row.own}, someone else's → ${row.other}`, () => {
+      const a = actor(role);
+      expect(outcome(a, { action: "admin.job.view", startedBy: a.userId })).toBe(row.own);
+      expect(outcome(a, { action: "admin.job.view", startedBy: "someone" })).toBe(row.other);
+    });
+  }
 });
 
 describe("permission matrix: invitations (Permissions §4.6, §6; Identity §2)", () => {
@@ -435,6 +473,30 @@ describe("permission matrix: role changes and promotion (Permissions §4.6, §6;
   }
 });
 
+describe("permission matrix: disabled targets (default)", () => {
+  for (const [label, from, change, expected] of DISABLED_TARGET) {
+    it(`${label} → ${expected}`, () => {
+      const target = person(from, "disabled");
+      const check: PermissionCheck =
+        change === "group add" || change === "group remove"
+          ? {
+              action: change === "group add" ? "group.add_member" : "group.remove_member",
+              group: { managerIds: [] },
+              target,
+            }
+          : {
+              action: "member.change_role",
+              target,
+              newRole: change,
+              activeOwnerCount: 3,
+              targetPasskeyCount: 2,
+              recoveryTokenUnconsumed: true,
+            };
+      expect(outcome(actor("owner"), check)).toBe(expected);
+    });
+  }
+});
+
 describe("permission matrix: exports (Permissions §2, §6, §11; Admin §11, §12)", () => {
   for (const [label, row] of Object.entries(WORKSPACE_EXPORT_MATRIX)) {
     for (const role of ACTOR_ROLES) {
@@ -468,6 +530,14 @@ describe("permission matrix: exports (Permissions §2, §6, §11; Admin §11, §
     expect(outcome(admin, { action: "member.export", subject: subjectAtStart, phase: "start" })).toBe("✓");
     expect(outcome(admin, { action: "member.export", subject: subjectNow, phase: "download" })).toBe("owner_required");
     expect(outcome(actor("owner"), { action: "member.export", subject: subjectNow, phase: "download" })).toBe("✓");
+  });
+
+  it("(default) a deleted subject stays exportable, so an export started before the deletion can be downloaded", () => {
+    for (const phase of ["start", "download"] as const) {
+      expect(outcome(actor("admin"), { action: "member.export", subject: person("member", "deleted"), phase })).toBe(
+        "✓",
+      );
+    }
   });
 
   it("the system rows are never export subjects", () => {
@@ -519,21 +589,30 @@ describe("permission matrix: group membership (Permissions §4.6, §6; Identity 
 describe("permission matrix: own account (Permissions §4.6 'Edit own profile, status, handle, sign-in methods, devices')", () => {
   for (const action of SELF_ACTIONS) {
     for (const role of ACTOR_ROLES) {
-      it(`${role}: ${action} on their own → ✓, on someone else's → not_own`, () => {
+      const row = OWN_MATRIX[role];
+      it(`${role}: ${action} on their own → ${row.own}, on someone else's → ${row.other}`, () => {
         const a = actor(role);
-        expect(outcome(a, { action, ownerId: a.userId })).toBe("✓");
-        expect(outcome(a, { action, ownerId: "someone-else" })).toBe("not_own");
+        expect(outcome(a, { action, ownerId: a.userId })).toBe(row.own);
+        expect(outcome(a, { action, ownerId: "someone-else" })).toBe(row.other);
       });
     }
   }
 
   for (const role of ACTOR_ROLES) {
-    it(`${role}: add a passkey to their own account → ✓, to someone else's → not_own`, () => {
+    const row = OWN_MATRIX[role];
+    it(`${role}: add a passkey to their own account → ${row.own}, to someone else's → ${row.other}`, () => {
       const a = actor(role);
-      expect(outcome(a, { action: "passkey.add", ownerId: a.userId, ownerPasskeyCount: 1 })).toBe("✓");
-      expect(outcome(a, { action: "passkey.add", ownerId: "someone-else", ownerPasskeyCount: 1 })).toBe("not_own");
+      expect(outcome(a, { action: "passkey.add", ownerId: a.userId, ownerPasskeyCount: 1 })).toBe(row.own);
+      expect(outcome(a, { action: "passkey.add", ownerId: "someone-else", ownerPasskeyCount: 1 })).toBe(row.other);
     });
   }
+
+  it("a guest can't remove their own passkey either (default)", () => {
+    const a = actor("guest");
+    expect(
+      outcome(a, { action: "passkey.remove", ownerId: a.userId, ownerPasskeyCount: 3, magicLinksAvailable: true }),
+    ).toBe("not_permitted");
+  });
 
   for (const [role, count, magicLinks, expected] of PASSKEY_REMOVE) {
     it(`${role}: remove a passkey with ${count} left, magic links ${magicLinks ? "working" : "unavailable"} → ${expected}`, () => {
@@ -722,6 +801,85 @@ describe("only active people act (Identity §4.5, §4.8; TDD §2.1 'Permission r
       });
     }
   }
+});
+
+// ---- Unknown values fail closed -----------------------------------------------------------------
+
+describe("unknown roles, statuses and actions are denied, never allowed by falling through", () => {
+  // Facts come from storage and requests: these casts stand for values a loader or caller could pass.
+  const superadmin = "superadmin" as WorkspaceRole;
+
+  it("an actor with an unknown role is refused everything, own account included", () => {
+    const a = actor(superadmin);
+    for (const check of ONE_OF_EACH(a)) expect(outcome(a, check)).toBe("not_permitted");
+    for (const action of WORKSPACE_ACTIONS) expect(outcome(a, { action })).toBe("not_permitted");
+  });
+
+  it("an actor with an unknown status is inactive", () => {
+    const a = actor("owner", { status: "suspended" as UserStatus });
+    expect(outcome(a, { action: "directory.view" })).toBe("inactive");
+  });
+
+  it("a target with an unknown role or status is invalid, for owners and admins alike", () => {
+    for (const target of [person(superadmin), person("member", "suspended" as UserStatus)]) {
+      for (const role of ["owner", "admin"] as const) {
+        expect(outcome(actor(role), { action: "member.disable", target, activeOwnerCount: 3 })).toBe("invalid_target");
+        expect(outcome(actor(role), { action: "group.add_member", group: { managerIds: [] }, target })).toBe(
+          "invalid_target",
+        );
+        expect(outcome(actor(role), { action: "member.export", subject: target, phase: "start" })).toBe(
+          "invalid_target",
+        );
+      }
+      // A promotion can't skip the passkey gate by way of an unknown current role.
+      expect(
+        outcome(actor("owner"), {
+          action: "member.change_role",
+          target,
+          newRole: "owner",
+          activeOwnerCount: 3,
+          targetPasskeyCount: 0,
+          recoveryTokenUnconsumed: false,
+        }),
+      ).toBe("invalid_target");
+    }
+  });
+
+  it("an unknown new role or invitation role can't be given", () => {
+    expect(
+      outcome(actor("owner"), {
+        action: "member.change_role",
+        target: person("member"),
+        newRole: superadmin,
+        activeOwnerCount: 3,
+        targetPasskeyCount: 2,
+        recoveryTokenUnconsumed: true,
+      }),
+    ).toBe("role_not_assignable");
+    expect(
+      outcome(actor("owner"), {
+        action: "invitation.create",
+        role: superadmin,
+        actorPasskeyCount: 2,
+        recoveryTokenUnconsumed: true,
+      }),
+    ).toBe("role_not_assignable");
+  });
+
+  for (const action of ["bogus", "constructor", "toString", "__proto__", "hasOwnProperty", ""]) {
+    it(`an unknown action ${JSON.stringify(action)} is denied without throwing`, () => {
+      const check = { action } as unknown as PermissionCheck;
+      for (const role of ["owner", "admin", "member"] as const) {
+        expect(decide(actor(role), check, NOW)).toEqual({ ok: false, error: "not_permitted" });
+        expect(decideWithoutFacts(actor(role), action)).toEqual({ ok: false, error: "not_permitted" });
+      }
+    });
+  }
+
+  it("an active guest is refused everything (default, until Phase 2)", () => {
+    const a = actor("guest");
+    for (const check of ONE_OF_EACH(a)) expect(outcome(a, check)).toBe("not_permitted");
+  });
 });
 
 // ---- Step-up -----------------------------------------------------------------------------------
@@ -1009,31 +1167,40 @@ describe("union rule building blocks (Permissions §3.2, §5.1, §9)", () => {
   });
 });
 
-/** The actions outside the exported lists; a compile error until a new check type is listed here. */
-const OTHER_ACTIONS: Record<
+/**
+ * The literal table covering each action outside the exported lists. Typed so that adding a check type
+ * to the engine is a compile error until it is listed here with its table. The exported lists
+ * (workspace, member-admin, group, own-account actions) are covered by tables keyed on, or loops over,
+ * those same lists. This needs no shared state, so it holds under filtering, shuffling and concurrency.
+ */
+const TABLE_FOR: Record<
   Exclude<PermissionAction, WorkspaceAction | MemberAdminAction | GroupMemberAction | SelfAction>,
-  true
+  object
 > = {
-  "admin.job.view": true,
-  "invitation.create": true,
-  "member.change_role": true,
-  "member.export": true,
-  "workspace.export": true,
-  "passkey.add": true,
-  "passkey.remove": true,
-  "setting.change": true,
+  "admin.job.view": JOB_VIEW_MATRIX,
+  "invitation.create": INVITE_MATRIX,
+  "member.change_role": CHANGE_ROLE_MATRIX,
+  "member.export": MEMBER_EXPORT_MATRIX,
+  "workspace.export": WORKSPACE_EXPORT_MATRIX,
+  "passkey.add": OWN_MATRIX,
+  "passkey.remove": PASSKEY_REMOVE,
+  "setting.change": SETTING_MATRIX,
 };
 
-// Runs last in this file (vitest keeps declaration order).
 describe("matrix coverage", () => {
-  it("exercises every action the engine knows, so adding one without a matrix row fails", () => {
-    const all: PermissionAction[] = [
-      ...WORKSPACE_ACTIONS,
-      ...MEMBER_ADMIN_ACTIONS,
-      ...GROUP_MEMBER_ACTIONS,
-      ...SELF_ACTIONS,
-      ...(Object.keys(OTHER_ACTIONS) as PermissionAction[]),
-    ];
-    expect(all.filter((action) => !exercised.has(action))).toEqual([]);
+  it("every workspace action has a literal row (keyed table)", () => {
+    expect(Object.keys(WORKSPACE_MATRIX).sort()).toEqual([...WORKSPACE_ACTIONS].sort());
+  });
+
+  it("every other action has a non-empty literal table", () => {
+    for (const [action, table] of Object.entries(TABLE_FOR)) {
+      expect(Object.keys(table).length, action).toBeGreaterThan(0);
+    }
+  });
+
+  it("the role tables have a row for every actor role", () => {
+    for (const table of [MEMBER_ADMIN_MATRIX, CHANGE_ROLE_MATRIX, MEMBER_EXPORT_MATRIX, OWN_MATRIX, JOB_VIEW_MATRIX]) {
+      expect(Object.keys(table).sort()).toEqual([...ACTOR_ROLES].sort());
+    }
   });
 });

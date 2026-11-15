@@ -198,11 +198,12 @@ export interface Actor {
 }
 
 /** Someone an action is aimed at, as stored now (roles are re-read on every check). */
-export interface PersonRef {
-  userId: string;
-  role: WorkspaceRole;
-  status: UserStatus;
-}
+export const personRefSchema = z.object({
+  userId: z.string().min(1),
+  role: workspaceRoleSchema,
+  status: userStatusSchema,
+});
+export type PersonRef = z.infer<typeof personRefSchema>;
 
 // ---- Actions -----------------------------------------------------------------------------------
 
@@ -330,7 +331,8 @@ export const STEP_UP_WINDOW_MS = 10 * 60 * 1000;
 
 /**
  * How far in the future a stored `fresh_auth_at` may be and still count, for clock differences between
- * Cloudflare machines **(default)**. A later timestamp is treated as not fresh.
+ * Cloudflare machines **(default)**. A later timestamp is treated as not fresh. The cost: a stamp
+ * written by a machine whose clock runs up to 60 s fast stays valid for up to 11 minutes of real time.
  */
 export const STEP_UP_CLOCK_SKEW_MS = 60 * 1000;
 
@@ -399,23 +401,47 @@ const deny = (reason: DenialReason): Decision => err(reason);
 
 const isManager = (role: WorkspaceRole): boolean => role === "owner" || role === "admin";
 
+/**
+ * Facts arrive from storage and requests, so the engine never trusts that a role, status or action is
+ * one it knows: anything unknown is denied, never allowed by falling through (fail closed).
+ */
+const isOneOf = (list: readonly string[], value: unknown): boolean => typeof value === "string" && list.includes(value);
+const isKnownRole = (role: unknown): role is WorkspaceRole => isOneOf(WORKSPACE_ROLES, role);
+const isKnownStatus = (status: unknown): status is UserStatus => isOneOf(USER_STATUSES, status);
+
+/** The audience of a workspace action, or null when `action` isn't one (own keys only, no prototype). */
+export function audienceOf(action: string): "everyone" | "admin" | "owner" | null {
+  return Object.hasOwn(WORKSPACE_ACTION_AUDIENCE, action) ? WORKSPACE_ACTION_AUDIENCE[action as WorkspaceAction] : null;
+}
+
 /** Would losing `target` as an active owner leave none? */
 function isLastOwner(target: PersonRef, activeOwnerCount: number): boolean {
   return target.role === "owner" && target.status === "active" && activeOwnerCount <= 1;
 }
 
-/** Reserved rows and anonymised members aren't people an action can be aimed at. */
-const isInvalidTarget = (target: PersonRef): boolean => target.status === "system" || target.status === "deleted";
+/** A target whose role or status isn't a known value; never acted on. */
+const isUnknownPerson = (target: PersonRef): boolean => !isKnownRole(target.role) || !isKnownStatus(target.status);
 
-function workspaceRule(actor: Actor, action: WorkspaceAction): Decision {
-  switch (WORKSPACE_ACTION_AUDIENCE[action]) {
+/**
+ * Reserved rows, anonymised (deleted) members and unknown values aren't people an action can be
+ * aimed at **(default)**.
+ */
+const isInvalidTarget = (target: PersonRef): boolean =>
+  isUnknownPerson(target) || target.status === "system" || target.status === "deleted";
+
+function workspaceRule(actor: Actor, audience: "everyone" | "admin" | "owner"): Decision {
+  switch (audience) {
     case "everyone":
-      return actor.role === "guest" ? deny("not_permitted") : ALLOW;
+      return actor.role === "owner" || actor.role === "admin" || actor.role === "member"
+        ? ALLOW
+        : deny("not_permitted");
     case "admin":
       return isManager(actor.role) ? ALLOW : deny("not_permitted");
     case "owner":
       if (!isManager(actor.role)) return deny("not_permitted");
       return actor.role === "owner" ? ALLOW : deny("owner_required");
+    default:
+      return deny("not_permitted");
   }
 }
 
@@ -458,11 +484,14 @@ function changeRoleRule(actor: Actor, check: Extract<PermissionCheck, { action: 
   if (isInvalidTarget(target)) return deny("invalid_target");
   if (!(ASSIGNABLE_WORKSPACE_ROLES as readonly string[]).includes(newRole)) return deny("role_not_assignable");
   if (newRole !== "owner" && isLastOwner(target, check.activeOwnerCount)) return deny("last_owner");
+  const promotes = ROLE_ORDER[newRole] > ROLE_ORDER[target.role];
+  // A disabled member can be demoted but not promoted (default): re-enable them first.
+  if (promotes && target.status === "disabled") return deny("invalid_target");
   // Promotion rule (Identity §2): to admin, at least one passkey; to owner, two passkeys or an
   // unconsumed RECOVERY_TOKEN. Only a move up is a promotion; keeping or lowering a role isn't gated.
   // Every promotion also needs at least one passkey (default): owners and admins sign in with
   // passkeys only, so a member promoted with none (signed in by magic link) would be locked out.
-  if (ROLE_ORDER[newRole] > ROLE_ORDER[target.role]) {
+  if (promotes) {
     if (check.targetPasskeyCount < 1) return deny("promotion_passkeys");
     if (newRole === "owner" && check.targetPasskeyCount < 2 && !check.recoveryTokenUnconsumed) {
       return deny("promotion_passkeys");
@@ -473,7 +502,9 @@ function changeRoleRule(actor: Actor, check: Extract<PermissionCheck, { action: 
 
 function memberExportRule(actor: Actor, subject: PersonRef): Decision {
   if (!isManager(actor.role)) return deny("not_permitted");
-  if (subject.status === "system") return deny("invalid_target");
+  // Deleted subjects stay exportable (default): an export of someone deleted since it started can
+  // still be downloaded until it expires (Admin §11.2). Reserved rows and unknown values can't.
+  if (isUnknownPerson(subject) || subject.status === "system") return deny("invalid_target");
   // A subject who is, or has since become, an admin or owner needs an owner (Admin §12). The
   // Worker passes the subject's role as stored now, at start and at every download.
   if (actor.role === "admin" && isManager(subject.role)) return deny("owner_required");
@@ -492,6 +523,8 @@ function groupMemberRule(actor: Actor, check: Extract<PermissionCheck, { action:
   const managesGroup = group.managerIds.includes(actor.userId);
   if (!isManager(actor.role) && !managesGroup) return deny("not_permitted");
   if (isInvalidTarget(target)) return deny("invalid_target");
+  // Disabled members can be removed from groups but not added (default).
+  if (action === "group.add_member" && target.status === "disabled") return deny("invalid_target");
   // An admin adding themselves needs an owner (Permissions §2, §6), even if they manage the group:
   // it would give them everything shared with the group (default for the manager case).
   if (action === "group.add_member" && actor.role === "admin" && target.userId === actor.userId) {
@@ -552,8 +585,11 @@ function rule(actor: Actor, check: PermissionCheck): Decision {
       return passkeyRemoveRule(actor, check);
     case "setting.change":
       return settingRule(actor, check.changeableBy);
-    default:
-      return workspaceRule(actor, check.action);
+    default: {
+      // An action that reaches here at runtime may be any string: look it up as an own key only.
+      const audience = audienceOf((check as { action: string }).action);
+      return audience ? workspaceRule(actor, audience) : deny("not_permitted");
+    }
   }
 }
 
@@ -576,21 +612,64 @@ function stepUp(actor: Actor, check: PermissionCheck, now: number): Decision {
 }
 
 /**
- * Step 1 on its own: why this actor can't act at all, or null when they're active. The Worker calls it
- * before loading any facts, so a disabled account costs no queries.
+ * Why this actor can't act at all, or null: a non-active status (unknown statuses included), an
+ * unknown role, or a guest. Guests are refused everything, own account included, **(default)** until
+ * Phase 2 defines them (Permissions §3.1).
  */
-export function actorDenial(actor: Pick<Actor, "status">): DenialReason | null {
+export function actorDenial(actor: Pick<Actor, "status" | "role">): DenialReason | null {
   if (actor.status === "system") return "system_actor";
   if (actor.status !== "active") return "inactive";
+  if (!isKnownRole(actor.role) || actor.role === "guest") return "not_permitted";
   return null;
+}
+
+/**
+ * Step 1 and the role part of step 2, with no facts: a denial when the actor can't take `action`
+ * whatever the facts, `ok` when the answer depends on facts. `decide` runs it first, so the two always
+ * agree; the Worker runs it **before loading facts**, so a request that's about to be denied costs no
+ * queries and can't learn whether its target exists.
+ */
+export function decideWithoutFacts(actor: Actor, action: string): Decision {
+  const refused = actorDenial(actor);
+  if (refused) return deny(refused);
+  const audience = audienceOf(action);
+  if (audience) return workspaceRule(actor, audience);
+  switch (action) {
+    case "admin.job.view":
+    case "invitation.create":
+    case "member.change_email":
+    case "member.issue_recovery_link":
+    case "member.disable":
+    case "member.enable":
+    case "member.delete":
+    case "member.sign_out_all":
+    case "member.export":
+    case "workspace.export":
+    case "setting.change":
+      return isManager(actor.role) ? ALLOW : deny("not_permitted");
+    case "member.change_role":
+      if (!isManager(actor.role)) return deny("not_permitted");
+      return actor.role === "owner" ? ALLOW : deny("owner_required");
+    case "group.add_member":
+    case "group.remove_member": // a group manager may be a member: the answer needs the group's managers
+    case "profile.edit":
+    case "devices.view":
+    case "devices.sign_out":
+    case "passkey.rename":
+    case "passkey.add":
+    case "passkey.remove":
+      return ALLOW;
+    default:
+      return deny("not_permitted");
+  }
 }
 
 /**
  * Decides one check at time `now` (epoch ms). Pure: the caller supplies every fact.
  */
 export function decide(actor: Actor, check: PermissionCheck, now: number): Decision {
-  const refused = actorDenial(actor);
-  if (refused) return deny(refused);
+  const pre = decideWithoutFacts(actor, check.action);
+  if (!pre.ok) return pre;
   const decision = rule(actor, check);
   if (!decision.ok) return decision;
   return stepUp(actor, check, now);
