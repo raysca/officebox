@@ -3,6 +3,7 @@
 **Status:** Draft for review
 **Revision:**
 - First draft written after four rounds of product-owner questions (15 Nov 2026).
+- Product-owner decisions (15 Nov 2026): admin exports include everything, including time-off notes and personal reminders; "What Butler remembers" meets the right of access to assistant memory; alert email stays owner-only.
 - Revised after the independent review (15 Nov 2026):
   - private-only data in exports made explicit
   - the per-member export gate treated as a process control
@@ -58,17 +59,17 @@ Every export is audited and disclosed in the privacy statement.
 |---|---|
 | Owner and admin split | **Split by risk.** Owners alone: upgrades and channel, usage and cost, the post-deploy checklist, telemetry and diagnostics, maintenance mode. Owners and admins: members, groups, invitations, workspace settings (per key, Platform §7), the audit log, health, storage, assistant oversight (Assistant §10–§11), and **exports**. |
 | Who exports data | **Owners and admins only.** This is an organisation's workspace. Owners hold every admin power, so "admins" below includes owners. |
-| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, restricted documents, **time-off type and note, and personal reminders**. Exceptions: credentials (Platform §6), and assistant memory, which no admin can read. *Including time-off notes and reminders follows from "admins export everything" and changes Permissions §11 and Assistant §7.1 and §13. Flagged for the product owner.* |
+| Export contents | **Everything, including private content**, so a restore is complete. That covers DMs, group DMs, private channels, restricted documents, **time-off type and note, and personal reminders**. Exceptions: credentials (Platform §6), and assistant memory, which no admin can read. Confirmed by the product owner: admins export everything (this changes Permissions §11 and Assistant §7.1 and §13). |
 | Disclosure | **Privacy statement and audit log** **(default)**. The privacy statement says admins can export everything, including private content. Every export is audited. Members see no history of **workspace** exports. |
 | Member self-export | **None.** Members can't download their own data. This **removes** "Download my assistant data" from the approved Assistant spec (§19). |
 | Data-protection requests | **Admin per-member export.** An admin runs an export scoped to one member and hands it over. The member gets a confirmation notice (§12). |
 | Owner gate on per-member exports | **A process control, not a security boundary.** An export of an admin or owner needs an owner. But any admin can export the whole workspace, which includes the same content, so the gate is about procedure and the notice, not secrecy. |
-| Assistant memory | **Not exportable by anyone.** It lives only in each member's private Assistant DO. Members can see it in "What Butler remembers". |
+| Assistant memory | **Not exportable by anyone.** It lives only in each member's private Assistant DO. Members see it in "What Butler remembers", which is how a member's **right of access** to it is met (product owner). |
 | Export retention | **On-demand exports are deleted after 30 days** **(default)**. Scheduled exports keep the latest 4. Per-member exports are deleted after 7 days **(default)**. |
 | Exports and erasure | **Exports aren't rewritten** when a member is deleted. Expiry bounds how long a deleted member's data survives in an archive. The privacy statement says so. |
 | Downloads | **Step-up re-authentication.** Downloading an export, or a CSV of members or audit entries, needs authentication within the last **10 minutes (default)** (§11.3). |
 | Audit log | **Full viewer** for owners and admins: filter by person, action, target and date; download as CSV; kept **365 days** by default, changeable by owners. Entries never contain content or secrets. |
-| Alerts | **Banner, inbox item and email.** A persistent admin banner and an inbox item for owners and admins. **Owners** also get email for serious alerts. Admins are in-app only. |
+| Alerts | **Banner, inbox item and email.** A persistent admin banner and an inbox item for owners and admins. **Owners** also get email for serious alerts. Admins are in-app only, with no opt-in to email (product owner). |
 | Alerting when Officebox itself is down | **Cloudflare's own notifications** cover outages of the alert path (a D1 or Worker outage). Setting them up is a required checklist item (§15). |
 | Scheduled exports | **Off by default, nudged.** When an owner or admin turns them on: weekly, files included, the latest 4 kept. |
 | Auto-upgrade | **Off by default; owner opt-in** to `security` or `patch` auto-merge on the stable channel, in the repository's `.officebox/config.json` (TDD §6.3). Minor and major releases always need a manual merge. |
@@ -699,7 +700,6 @@ These edits are made in the PR that approves this spec.
 
 ## 21. Open questions
 
-1. **Data-protection access to assistant memory.** Is the in-app "What Butler remembers" view enough to meet a member's right of access, now that the member download is removed?
-2. **CSV invite and sending limits.** Are 500 rows per upload and 200 invitations a day right for the target team size?
-3. **Email for admins.** Should admins be able to opt in to serious-alert email, or is owner-only right?
-4. **Time-off notes and reminders in exports.** Confirm that admin-run exports should include them (§2). The alternative is to keep them member-only, and strip them from exports.
+1. **CSV invite and sending limits.** Are 500 rows per upload and 200 invitations a day right for the target team size? (Kept as defaults until decided.)
+
+Resolved by the product owner (15 Nov 2026), now in §2: time-off notes and reminders in exports, the right of access to assistant memory, and owner-only alert email.
