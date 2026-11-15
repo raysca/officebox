@@ -5,48 +5,43 @@
 // M0a checks what can be checked from the repository alone. Remote reachability of D1 is proven by
 // the migrations step that follows; checks against release.json arrive with the release process.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { parse as parseJsonc, printParseErrorCode } from "jsonc-parser";
+
+// Paths resolve from the repository root (this script's parent directory), whatever the cwd.
+// Paths inside wrangler.jsonc are relative to that file, which also lives at the root.
+const ROOT = resolve(import.meta.dirname, "..");
+const fromRoot = (path) => join(ROOT, path);
 
 const failures = [];
 const notes = [];
 const fail = (message) => failures.push(message);
 
-/** Strips // and /* *\/ comments from JSONC, leaving string contents alone. */
-function stripJsonComments(text) {
-  let out = "";
-  let inString = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    const next = text[i + 1];
-    if (inString) {
-      out += ch;
-      if (ch === "\\") out += text[++i] ?? "";
-      else if (ch === '"') inString = false;
-    } else if (ch === '"') {
-      inString = true;
-      out += ch;
-    } else if (ch === "/" && next === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (ch === "/" && next === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i++;
-    } else {
-      out += ch;
-    }
-  }
-  return out;
-}
-
+/** Reads JSON, or JSONC the way wrangler does (comments and trailing commas allowed). */
 function readJson(path, { jsonc = false } = {}) {
+  let text;
   try {
-    const text = readFileSync(path, "utf8");
-    return JSON.parse(jsonc ? stripJsonComments(text) : text);
+    text = readFileSync(fromRoot(path), "utf8");
   } catch (error) {
-    fail(`${path}: cannot be read or parsed (${error.message})`);
+    fail(`${path}: cannot be read (${error.message})`);
     return null;
   }
+  if (!jsonc) {
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      fail(`${path}: cannot be parsed (${error.message})`);
+      return null;
+    }
+  }
+  const errors = [];
+  const value = parseJsonc(text, errors, { allowTrailingComma: true, disallowComments: false });
+  const first = errors[0];
+  if (first) {
+    fail(`${path}: cannot be parsed (${printParseErrorCode(first.error)} at offset ${first.offset})`);
+    return null;
+  }
+  return value;
 }
 
 const pkg = readJson("package.json");
@@ -86,15 +81,16 @@ if (pkg && config) {
   // The web app must be built: Workers Assets uploads this directory.
   const assetsDir = config.assets?.directory;
   if (!assetsDir) fail("wrangler.jsonc: assets.directory is missing");
-  else if (!existsSync(join(assetsDir, "index.html"))) {
+  else if (!existsSync(fromRoot(join(assetsDir, "index.html")))) {
     fail(`${assetsDir}/index.html not found: run \`npm run build\` before deploying`);
   }
 
   // D1 migrations: NNNN_<feature>_<change>.sql, numbered 0001 upwards with no gaps or duplicates (AGENTS §4.2).
-  const migrationsDir = d1?.migrations_dir ?? "migrations";
-  if (!existsSync(migrationsDir)) fail(`${migrationsDir}: migrations directory not found`);
+  // The default matches wrangler's: ./migrations next to the config file.
+  const migrationsDir = d1?.migrations_dir ?? "./migrations";
+  if (!existsSync(fromRoot(migrationsDir))) fail(`${migrationsDir}: migrations directory not found`);
   else {
-    const files = readdirSync(migrationsDir)
+    const files = readdirSync(fromRoot(migrationsDir))
       .filter((f) => f.endsWith(".sql"))
       .sort();
     files.forEach((file, index) => {

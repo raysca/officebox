@@ -1,4 +1,4 @@
-import { healthResponseSchema } from "@officebox/shared";
+import { apiErrorBodySchema, healthResponseSchema } from "@officebox/shared";
 import { expect, test } from "@playwright/test";
 
 test("the placeholder page loads", async ({ page }) => {
@@ -20,4 +20,16 @@ test("/health responds ok, even as a browser navigation", async ({ page, request
   // A navigation must reach the Worker, not the SPA fallback.
   const nav = await page.goto("/health");
   expect(nav?.headers()["content-type"]).toContain("application/json");
+});
+
+test("unknown /api paths return a 404 JSON error, even as a browser navigation", async ({ page, request }) => {
+  const res = await request.get("/api/nope");
+  expect(res.status()).toBe(404);
+  expect(apiErrorBodySchema.parse(await res.json()).error.code).toBe("not_found");
+
+  // A navigation must reach the Worker (run_worker_first), not the SPA fallback's index.html.
+  const nav = await page.goto("/api/nope");
+  expect(nav?.status()).toBe(404);
+  expect(nav?.headers()["content-type"]).toContain("application/json");
+  expect(apiErrorBodySchema.parse(await nav?.json()).error.code).toBe("not_found");
 });
