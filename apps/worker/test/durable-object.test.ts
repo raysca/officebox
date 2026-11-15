@@ -22,7 +22,7 @@ describe("schema versioning", () => {
   it("migrates a new object to the latest version on first wake", async () => {
     const s = stub();
     expect(await s.version()).toEqual({ ok: true, value: { schemaVersion: 2 } });
-    expect(await metaValue(s, "core_schema_version")).toBe("2");
+    expect(await metaValue(s, "core_schema_version")).toBe("3");
   });
 
   it("migrates an older object lazily after eviction, keeping its data (PLAN M0 exit criterion)", async () => {

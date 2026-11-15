@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   chunkRows,
   MAX_OUTBOX_BATCH_BYTES,
+  DEFAULT_MAX_SENDS_PER_DRAIN,
   MAX_OUTBOX_ATTEMPTS,
   MAX_OUTBOX_BATCH_MESSAGES,
   MAX_OUTBOX_MESSAGE_BYTES,
@@ -77,7 +78,7 @@ describe("outbox", () => {
     expect(await pending(s)).toEqual([]);
   });
 
-  it("keeps rows and backs the stream off exponentially while the queue fails, then delivers", async () => {
+  it("backs a failing row off exponentially, keeps it through eviction, then delivers", async () => {
     const s = stub();
     await s.meta("outbox_fail", "1");
     await s.addItem("x", "x");
@@ -85,169 +86,201 @@ describe("outbox", () => {
 
     const t0 = Date.now();
     await runDurableObjectAlarm(s);
-    let rows = await pending(s);
-    // Nothing proved the queue was up, so no attempt is counted against the row; the stream backs off.
-    expect(rows.map((r) => r.attempts)).toEqual([0]);
-    expect(await s.metaValue("outbox_outage_count:test")).toBe("1");
-    expect(rows[0]?.next_attempt_at).toBeGreaterThanOrEqual(t0 + 2000);
-    expect(rows[0]?.next_attempt_at).toBeLessThan(t0 + 2000 + 5000);
+    let [row] = await s.outboxRows();
+    expect(row?.attempts).toBe(1);
+    expect(row?.first_failed_at).not.toBeNull();
+    expect(row?.next_attempt_at).toBeGreaterThanOrEqual(t0 + 2000);
+    expect(row?.next_attempt_at).toBeLessThanOrEqual(t0 + 2000 + 1000); // 2 s (no jitter in tests)
     // The drain timer follows the retry.
-    expect(await runInDurableObject(s, (_i: TestObject, state) => state.storage.getAlarm())).toBe(
-      rows[0]?.next_attempt_at,
-    );
+    expect(await s.alarmTime()).toBe(row?.next_attempt_at);
 
-    await s.rewind(10_000);
+    await s.advanceToNextRetry();
     const t1 = Date.now();
     await runDurableObjectAlarm(s);
-    rows = await pending(s);
-    expect(rows.map((r) => r.attempts)).toEqual([0]);
-    expect(await s.metaValue("outbox_outage_count:test")).toBe("2");
-    expect(rows[0]?.next_attempt_at).toBeGreaterThanOrEqual(t1 + 4000);
+    [row] = await s.outboxRows();
+    expect(row?.attempts).toBe(2);
+    expect(row?.next_attempt_at).toBeGreaterThanOrEqual(t1 + 4000);
     expect(await s.sentBodies()).toEqual([]);
+    expect((await s.outboxStats()).streamBackoff).toBe(2); // two drains that sent nothing
 
     // Survives eviction; delivered once the queue recovers.
     await evictDurableObject(s);
     await s.meta("outbox_fail", "0");
-    await s.rewind(10_000);
+    await s.advanceToNextRetry();
     await runDurableObjectAlarm(s);
     expect((await s.sentBodies()).map((r) => r.id)).toEqual(["x"]);
-    expect(await pending(s)).toEqual([]);
-    expect(await s.metaValue("outbox_outage_count:test")).toBeNull();
+    const stats = await s.outboxStats();
+    expect(stats).toMatchObject({ pending: 0, dead: 0, streamBackoff: 0, oldestPendingAgeMs: null });
+    expect(stats.lastSuccessAt).not.toBeNull();
   });
 });
 
 describe("outbox failures", () => {
+  /** Lets time pass until the earliest retry, then runs the drain the runtime would run. */
   const drain = async (s: Stub) => {
-    await s.rewind(10 * 60_000); // past any backoff
+    await s.advanceToNextRetry();
     await runDurableObjectAlarm(s);
+    return s.lastDrain();
+  };
+  const drainUntil = async (s: Stub, done: () => Promise<boolean>, maxDrains: number) => {
+    const sends: number[] = [];
+    for (let i = 0; i < maxDrains && !(await done()); i++) sends.push((await drain(s))?.sends ?? 0);
+    return sends;
   };
 
   it("isolates a poison row by bisecting, sending the rest of the chunk", async () => {
     const s = stub();
-    for (const id of ["a", "b", "c", "d", "e", "f"]) await s.addItem(id, id, 0, id === "c");
-    await drain(s);
-    expect((await s.sentBodies()).map((r) => r.id).sort()).toEqual(["a", "b", "d", "e", "f"]);
-    const rows = await pending(s);
-    expect(rows.map((r) => r.attempts)).toEqual([1]); // only the poison row counts an attempt
-    const stats = await s.outboxStats();
-    expect(stats).toMatchObject({ pending: 1, dead: 0 });
-    expect(stats.sendCalls).toBeLessThanOrEqual(7); // a bisection, not one call per row
+    await s.addRows(["g1", "g2", "p1", "g3", "g4", "g5"]);
+    const report = await drain(s);
+    expect((await s.sentBodies()).map((r) => r.id).sort()).toEqual(["g1", "g2", "g3", "g4", "g5"]);
+    expect((await s.outboxRows()).map((r) => [r.id, r.attempts])).toEqual([["p1", 1]]);
+    expect(report).toMatchObject({ sends: 5, sentRows: 5, failedRows: 1 });
   });
 
-  it("moves a row that keeps failing while others succeed to core_outbox_dead", async () => {
+  it("sends the good rows behind poison rows at both ends, and dead-letters the poison", async () => {
     const s = stub();
-    await s.addItem("bad", "bad", 0, true);
-    for (let i = 0; i < MAX_OUTBOX_ATTEMPTS; i++) {
-      await s.addItem(`good${i}`, "good");
-      await drain(s);
-    }
-    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 1 });
-    const dead = await runInDurableObject(s, (_i: TestObject, state) =>
-      state.storage.sql.exec<{ attempts: number }>("SELECT attempts FROM core_outbox_dead").toArray(),
+    await s.meta("manual_alarms", "1");
+    await s.addRows(["p1", "p2", "p3", "g1", "g2", "pz"]);
+    const sends = await drainUntil(
+      s,
+      async () => (await s.sentBodies()).length === 2 && (await s.outboxStats()).dead === 4,
+      80,
     );
-    expect(dead).toEqual([{ attempts: MAX_OUTBOX_ATTEMPTS }]);
-    expect((await s.sentBodies()).length).toBe(MAX_OUTBOX_ATTEMPTS);
+    expect((await s.sentBodies()).map((r) => r.id).sort()).toEqual(["g1", "g2"]);
+    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 4 });
+    // The good rows went out in the first drain; the rest is the poison rows' own retries.
+    expect((await s.sentBodies()).every((r) => r.batch <= 1)).toBe(true);
+    expect(Math.max(...sends)).toBeLessThanOrEqual(DEFAULT_MAX_SENDS_PER_DRAIN);
   });
 
-  it("never kills rows during an outage, and probes cheaply", async () => {
+  it("sends every good row from a long alternating run of poison and good rows, within budget", async () => {
     const s = stub();
+    await s.meta("manual_alarms", "1");
+    const ids = Array.from({ length: 600 }, (_, i) => `${i % 2 === 0 ? "p" : "g"}${String(i).padStart(3, "0")}`);
+    await s.addRows(ids);
+    const sends = await drainUntil(s, async () => (await s.sentBodies()).length === 300, 400);
+    expect((await s.sentBodies()).length).toBe(300);
+    expect(Math.max(...sends)).toBeLessThanOrEqual(DEFAULT_MAX_SENDS_PER_DRAIN);
+    // Good rows are never blamed for the bad rows they shared batches with.
+    expect((await s.outboxRows()).every((r) => r.id.startsWith("p"))).toBe(true);
+  });
+
+  it("never dead-letters rows during a long outage, stays within budget and doesn't spin", async () => {
+    const s = stub();
+    await s.meta("manual_alarms", "1"); // only the test runs drains, so each check sees one drain
     await s.meta("outbox_fail", "1");
-    for (let i = 0; i < 20; i++) await s.addItem(`o${i}`, "o");
-    for (let i = 0; i < MAX_OUTBOX_ATTEMPTS + 2; i++) await drain(s);
-    const stats = await s.outboxStats();
-    expect(stats).toMatchObject({ pending: 20, dead: 0 });
-    expect(stats.sendCalls).toBeLessThanOrEqual((MAX_OUTBOX_ATTEMPTS + 2) * 10); // about log2(20) + 4 per drain
-    // Untried rows wait too, so a down queue isn't hammered.
-    const rows = await pending(s);
-    expect(rows.every((r) => r.next_attempt_at > Date.now())).toBe(true);
+    await s.addItems("o", 150);
+    const sends: number[] = [];
+    // Keep draining until some rows have failed more often than the dead-letter limit.
+    for (let i = 0; i < 150 && (await s.outboxStats()).maxAttempts < MAX_OUTBOX_ATTEMPTS + 2; i++) {
+      await s.advanceToNextRetry();
+      const start = Date.now();
+      const dueAtStart = (await s.outboxRows()).filter((r) => r.next_attempt_at <= start).map((r) => r.id);
+      await runDurableObjectAlarm(s);
+      sends.push((await s.lastDrain())?.sends ?? 0);
+      // No tight loop: every row that was due when the drain started is now due at least a backoff
+      // later (rows tried get their own backoff, rows not reached get the stream backoff).
+      const after = new Map((await s.outboxRows()).map((r) => [r.id, r.next_attempt_at]));
+      for (const id of dueAtStart) expect(after.get(id) ?? 0).toBeGreaterThanOrEqual(start + 1000);
+    }
+    expect(await s.outboxStats()).toMatchObject({ pending: 150, dead: 0 });
+    expect(Math.max(...sends)).toBeLessThanOrEqual(DEFAULT_MAX_SENDS_PER_DRAIN);
+    expect((await s.outboxStats()).maxAttempts).toBeGreaterThanOrEqual(MAX_OUTBOX_ATTEMPTS);
 
     await s.meta("outbox_fail", "0");
-    await drain(s);
-    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 0 });
+    await drainUntil(s, async () => (await s.outboxStats()).pending === 0, 20);
+    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 0, streamBackoff: 0 });
+    expect((await s.sentBodies()).length).toBe(150);
   });
 
-  it("delivers in order after the queue recovers", async () => {
+  it("dead-letters a lone poison row only after another row has been sent", async () => {
+    const s = stub();
+    await s.addRows(["p1"]);
+    for (let i = 0; i < MAX_OUTBOX_ATTEMPTS + 2; i++) await drain(s);
+    expect(await s.outboxStats()).toMatchObject({ pending: 1, dead: 0 });
+    expect((await s.outboxRows())[0]?.attempts).toBe(MAX_OUTBOX_ATTEMPTS + 2);
+
+    await s.addRows(["g1"]);
+    await drain(s);
+    expect((await s.sentBodies()).map((r) => r.id)).toEqual(["g1"]);
+    // p1 is dead-lettered at its next failure, now that something else has been sent.
+    await drainUntil(s, async () => (await s.outboxStats()).dead === 1, 3);
+    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 1 });
+  });
+
+  it("doesn't hold back new rows behind a failing row", async () => {
+    const s = stub();
+    await s.addRows(["p1"]);
+    for (let i = 0; i < 6; i++) await drain(s); // p1 is now backing off for a while
+    const before = Date.now();
+    await s.addRows(["g1"]);
+    const g1 = (await s.outboxRows()).find((r) => r.id === "g1");
+    expect(g1?.next_attempt_at).toBeLessThanOrEqual(before + 1000);
+    expect(await s.alarmTime()).toBeLessThanOrEqual(before + 1000);
+  });
+
+  it("a flapping queue dead-letters a good row only after a later success and 10 failures", async () => {
+    const s = stub();
+    // g1 fails each time (as if the queue flapped whenever it was sent), but nothing else succeeds.
+    await s.meta("fail_ids", "g1");
+    await s.addRows(["g1"]);
+    for (let i = 0; i < MAX_OUTBOX_ATTEMPTS + 2; i++) await drain(s);
+    expect(await s.outboxStats()).toMatchObject({ pending: 1, dead: 0 });
+    // Once another row has been sent, g1's next failure dead-letters it (accepted, documented).
+    await s.addRows(["h1"]);
+    await drainUntil(s, async () => (await s.outboxStats()).dead === 1, 3);
+    expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: 1 });
+    // Had the queue recovered for g1 instead, it would have been sent.
+    await s.meta("fail_ids", "");
+    await s.addRows(["g2"]);
+    await drain(s);
+    expect((await s.sentBodies()).map((r) => r.id)).toEqual(["h1", "g2"]);
+  });
+
+  it("stops a drain at its send budget", async () => {
+    const s = stub();
+    await s.meta("max_sends", "3");
+    await s.meta("outbox_fail", "1");
+    await s.addItems("b", 50);
+    const report = await drain(s);
+    expect(report).toMatchObject({ sends: 3, sentRows: 0, stoppedEarly: true });
+    // Untried rows were pushed back by the stream backoff, not left due.
+    expect((await s.outboxRows()).every((r) => r.next_attempt_at > Date.now())).toBe(true);
+  });
+
+  it("stops a drain at its wall-clock limit", async () => {
+    const s = stub();
+    await s.meta("send_delay_ms", "30");
+    await s.meta("max_drain_ms", "10");
+    await s.addItems("w", 300); // three chunks
+    const report = await drain(s);
+    expect(report).toMatchObject({ sends: 1, sentRows: 100, stoppedEarly: true });
+    expect((await s.outboxStats()).pending).toBe(200);
+  });
+
+  // Order after failures isn't kept (rows retry on their own jittered backoff); see outbox.ts.
+  it("delivers every row after the queue recovers", async () => {
     const s = stub();
     await s.meta("outbox_fail", "1");
     for (const id of ["x1", "x2", "x3"]) await s.addItem(id, id);
     await drain(s);
-    await s.addItem("x4", "x4");
     await s.meta("outbox_fail", "0");
-    await drain(s);
-    expect((await s.sentBodies()).map((r) => r.id)).toEqual(["x1", "x2", "x3", "x4"]);
-  });
-
-  it("stops early when the queue goes down part-way through a drain", async () => {
-    const s = stub();
-    await s.addItems("m", 300);
-    const before = (await s.outboxStats()).sendCalls;
-    await s.meta("outbox_fail_after", String(before + 1)); // the first chunk goes through, then the queue fails
-    await drain(s);
-    const stats = await s.outboxStats();
-    expect(stats.pending).toBe(200);
-    expect(stats.dead).toBe(0);
-    expect(stats.sendCalls - before).toBeLessThanOrEqual(12); // not ~400 single-row sends
-    const rows = await pending(s);
-    expect(rows.filter((r) => r.attempts > 0).length).toBeLessThanOrEqual(2);
-    expect(rows.every((r) => r.next_attempt_at > Date.now())).toBe(true);
-  });
-
-  it("doesn't pull the drain earlier for new messages during an outage", async () => {
-    const s = stub();
-    await s.meta("outbox_fail", "1");
-    await s.addItem("p1", "p");
-    await s.addItem("p2", "p");
-    await drain(s);
-    const retryAt = Number(await s.metaValue("outbox_outage_until:test"));
-    expect(retryAt).toBeGreaterThan(Date.now());
-    for (const row of await pending(s)) expect(row.next_attempt_at).toBeGreaterThanOrEqual(retryAt);
-    await s.addItem("p3", "p");
-    expect(await s.alarmTime()).toBeGreaterThanOrEqual(retryAt);
-    const newest = (await pending(s)).at(-1);
-    expect(newest?.next_attempt_at).toBeGreaterThanOrEqual(retryAt);
+    await drainUntil(s, async () => (await s.outboxStats()).pending === 0, 5);
+    expect((await s.sentBodies()).map((r) => r.id).sort()).toEqual(["x1", "x2", "x3"]);
   });
 
   it("never moves a row earlier than its own longer backoff", async () => {
     const s = stub();
-    await s.addItem("late", "late");
-    await s.rewind(1000);
-    const farFuture = Date.now() + 60 * 60_000;
-    await runInDurableObject(s, (_i: TestObject, state) =>
-      state.storage.sql.exec("UPDATE core_outbox SET next_attempt_at = 0, attempts = 0"),
-    );
     await s.meta("outbox_fail", "1");
-    // A second row is due now; the first is made due too, then given a long backoff mid-test.
-    await s.addItem("now", "now");
-    await s.rewind(1000);
+    await s.addRows(["late", "now"]);
+    const farFuture = Date.now() + 60 * 60_000;
     await runInDurableObject(s, (_i: TestObject, state) =>
       state.storage.sql.exec("UPDATE core_outbox SET next_attempt_at = ? WHERE body LIKE '%\"late\"%'", farFuture),
     );
+    await s.rewind(1000);
     await runDurableObjectAlarm(s);
-    const rows = await pending(s);
-    expect(rows.find((r) => r.next_attempt_at === farFuture)).toBeDefined();
+    expect((await s.outboxRows()).find((r) => r.id === "late")?.next_attempt_at).toBe(farFuture - 1000);
   });
-
-  for (const poisonCount of [2, 3]) {
-    it(`sends good rows behind ${poisonCount} adjacent poison rows and dead-letters the poison`, async () => {
-      const s = stub();
-      await s.addItem("g1", "g");
-      for (let i = 1; i <= poisonCount; i++) await s.addItem(`p${i}`, "p", 0, true);
-      await s.addItem("g2", "g");
-      await s.addItem("g3", "g");
-      await drain(s);
-      expect((await s.sentBodies()).map((r) => r.id).sort()).toEqual(["g1", "g2", "g3"]);
-      expect((await pending(s)).map((r) => r.attempts)).toEqual(Array.from({ length: poisonCount }, () => 1));
-      expect(await s.metaValue("outbox_outage_until:test")).toBeNull();
-
-      // Keep going with a fresh good row each time: the poison rows reach the limit and are moved.
-      for (let i = 1; i < MAX_OUTBOX_ATTEMPTS; i++) {
-        await s.addItem(`n${i}`, "n");
-        await drain(s);
-      }
-      expect(await s.outboxStats()).toMatchObject({ pending: 0, dead: poisonCount });
-      expect((await s.sentBodies()).length).toBe(3 + MAX_OUTBOX_ATTEMPTS - 1);
-    });
-  }
 
   it("runs one drain at a time", async () => {
     const s = stub();
@@ -278,8 +311,7 @@ describe("outbox failures", () => {
     await s.rewind(10 * 60_000);
     await s.drainNow();
     expect(await s.sentBodies()).toEqual([]);
-    expect(await s.metaValue("outbox_outage_count:test")).toBe("1"); // nothing went out: backing off
-    expect((await pending(s))[0]?.next_attempt_at).toBeGreaterThan(Date.now());
+    expect((await s.outboxRows())[0]?.attempts).toBe(1);
     await s.meta("outbox_hang", "0");
   });
 });

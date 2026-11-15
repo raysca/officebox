@@ -52,6 +52,10 @@ export class TestObject extends CoreDurableObject {
       stream: "test",
       send: (bodies) => this.fakeSend(bodies),
       sendTimeoutMs: () => Number(this.getMeta("send_timeout_ms") ?? "100"),
+      maxSendsPerDrain: () => Number(this.getMeta("max_sends") ?? "32"),
+      maxDrainMs: () => Number(this.getMeta("max_drain_ms") ?? "240000"),
+      // No jitter unless a test asks: deterministic retry times keep alarm timing predictable.
+      jitter: () => Number(this.getMeta("jitter") ?? "0"),
     });
     this.onTimer("record", (timer) => this.record(timer));
     this.onTimer("flaky", (timer) => {
@@ -97,10 +101,14 @@ export class TestObject extends CoreDurableObject {
     this.sendCalls += 1;
     // Held until the test releases it (or the outbox's send timeout gives up first).
     if (this.getMeta("outbox_hang") === "1") await this.hangUntilReleased();
+    const delay = Number(this.getMeta("send_delay_ms") ?? "0");
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     if (this.getMeta("outbox_fail") === "1") throw new Error("queue unavailable");
     const failAfter = Number(this.getMeta("outbox_fail_after") ?? "-1");
     if (failAfter >= 0 && this.sendCalls > failAfter) throw new Error("queue went down");
     if (bodies.some((b) => (b as { poison?: boolean }).poison === true)) throw new Error("message rejected");
+    const failIds = (this.getMeta("fail_ids") ?? "").split(",").filter(Boolean);
+    if (bodies.some((b) => failIds.includes((b as { id?: string }).id ?? ""))) throw new Error("rejected for now");
     this.batches += 1;
     for (const body of bodies) {
       this.sql.exec("INSERT INTO sent (batch, body) VALUES (?, ?)", this.batches, JSON.stringify(body));
@@ -188,6 +196,9 @@ export class TestObject extends CoreDurableObject {
       this.setMeta("alarm_write_failures", String(failures - 1));
       return Promise.reject(new Error("alarm write failed"));
     }
+    // With `meta.manual_alarms` set, the alarm is parked a day later so the runtime never fires it by
+    // itself during the test; runDurableObjectAlarm still runs it on demand.
+    if (due !== null && this.getMeta("manual_alarms") === "1") return super.writeAlarm(due + 86_400_000);
     return super.writeAlarm(due);
   }
 
@@ -213,9 +224,43 @@ export class TestObject extends CoreDurableObject {
     return this.outbox.drain(this.log);
   }
 
-  outboxStats(): { pending: number; dead: number; maxAttempts: number; sendCalls: number } {
-    const { pending, dead, maxAttempts } = this.outbox.stats();
-    return { pending, dead, maxAttempts, sendCalls: this.sendCalls };
+  outboxStats(): {
+    pending: number;
+    dead: number;
+    maxAttempts: number;
+    sendCalls: number;
+    streamBackoff: number;
+    lastSuccessAt: number | null;
+    oldestPendingAgeMs: number | null;
+  } {
+    const { pending, dead, maxAttempts, streamBackoff, lastSuccessAt, oldestPendingAgeMs } = this.outbox.stats();
+    return { pending, dead, maxAttempts, sendCalls: this.sendCalls, streamBackoff, lastSuccessAt, oldestPendingAgeMs };
+  }
+
+  lastDrain(): { sends: number; sentRows: number; failedRows: number; deadRows: number; stoppedEarly: boolean } | null {
+    return this.outbox.lastDrain;
+  }
+
+  /** Every pending row's id, attempts and retry time. */
+  outboxRows(): Array<{ id: string; attempts: number; next_attempt_at: number; first_failed_at: number | null }> {
+    return this.sql
+      .exec<{ body: string; attempts: number; next_attempt_at: number; first_failed_at: number | null }>(
+        "SELECT body, attempts, next_attempt_at, first_failed_at FROM core_outbox ORDER BY id",
+      )
+      .toArray()
+      .map((r) => ({
+        id: (JSON.parse(r.body) as { id: string }).id,
+        attempts: r.attempts,
+        next_attempt_at: r.next_attempt_at,
+        first_failed_at: r.first_failed_at,
+      }));
+  }
+
+  /** Adds rows whose ids are given; ids starting with "p" are poison. One transaction. */
+  addRows(ids: string[]): void {
+    this.ctx.storage.transactionSync(() => {
+      for (const id of ids) this.outbox.enqueue({ type: "test.item", id, poison: id.startsWith("p") });
+    });
   }
 
   cancel(name: string): void {
@@ -247,7 +292,18 @@ export class TestObject extends CoreDurableObject {
   rewind(ms: number): void {
     this.sql.exec("UPDATE core_timers SET due_at = due_at - ?", ms);
     this.sql.exec("UPDATE core_outbox SET next_attempt_at = next_attempt_at - ?", ms);
-    this.sql.exec("UPDATE meta SET value = CAST(value AS INTEGER) - ? WHERE key LIKE 'outbox_outage_until:%'", ms);
+  }
+
+  /**
+   * Moves time forward to the outbox drain timer (by moving rows and timers earlier), as if the
+   * runtime had waited for it. Unlike a fixed rewind, rows further back stay further back.
+   */
+  advanceToNextRetry(): void {
+    const next = this.sql
+      .exec<{ next: number | null }>("SELECT MIN(due_at) AS next FROM core_timers WHERE name LIKE 'outbox:%'")
+      .toArray()[0]?.next;
+    const gap = next == null ? 0 : next - Date.now();
+    if (gap > 0) this.rewind(gap + 1);
   }
 
   /** Reads schema state without the readiness guard. */

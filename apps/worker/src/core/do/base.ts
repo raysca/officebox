@@ -158,6 +158,17 @@ const CORE_MIGRATIONS: readonly DoMigration[] = [
       sql.exec("CREATE INDEX IF NOT EXISTS core_outbox_dead_stream ON core_outbox_dead(stream, id)");
     },
   },
+  {
+    version: 3,
+    description: "outbox first failure time",
+    up(sql) {
+      // Expand only: a nullable column older code ignores.
+      const columns = sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('core_outbox')").toArray();
+      if (!columns.some((c) => c.name === "first_failed_at")) {
+        sql.exec("ALTER TABLE core_outbox ADD COLUMN first_failed_at INTEGER");
+      }
+    },
+  },
 ];
 
 function checkMigrationList(list: readonly DoMigration[]): void {
@@ -201,6 +212,8 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
   /** True while `alarm()` runs; it re-derives the alarm itself when it finishes. */
   private alarmRunning = false;
   private alarmWriteFailures = 0;
+  /** While the schema migration has failed: when the object next wakes to try again. */
+  private recheckAt: number | null = null;
 
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
@@ -218,7 +231,7 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
     void ctx.blockConcurrencyWhile(async () => {
       this.migrate();
       this.alarmAt = await ctx.storage.getAlarm();
-      if (this.migrationFailure === null) this.flushAlarm();
+      await this.flushAlarm();
     });
     this.onTimer("outbox", (timer) => this.drainOutbox(timer), { timeoutMs: OUTBOX_TIMER_TIMEOUT_MS });
   }
@@ -410,21 +423,30 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
   protected syncAlarm(): void {
     if (this.alarmFlushQueued) return;
     this.alarmFlushQueued = true;
-    queueMicrotask(() => this.flushAlarm());
+    queueMicrotask(() => void this.flushAlarm());
   }
 
-  /** Points the alarm at the earliest timer, or clears it. Writes only when it changes. */
-  private flushAlarm(): void {
+  /**
+   * Points the alarm at the earliest timer (or, while the schema migration has failed, at the next
+   * recheck), or clears it. Writes only when it changes; a failed write is retried with backoff.
+   * Resolves once this write attempt has finished.
+   */
+  private flushAlarm(): Promise<void> {
     this.alarmFlushQueued = false;
     // While alarm() runs, it re-derives the alarm once when it finishes, so timer changes made in
     // the meantime (by handlers or concurrent requests) don't each write an alarm that is about to
     // be replaced.
-    if (this.alarmRunning) return;
-    const row = this.sql.exec<{ due: number | null }>("SELECT MIN(due_at) AS due FROM core_timers").toArray()[0];
-    const due = row?.due ?? null;
-    if (due === this.alarmAt) return;
+    if (this.alarmRunning) return Promise.resolve();
+    let due: number | null;
+    if (this.migrationFailure !== null) {
+      due = this.recheckAt ??= Date.now() + MIGRATION_FAILURE_RECHECK_MS;
+    } else {
+      const row = this.sql.exec<{ due: number | null }>("SELECT MIN(due_at) AS due FROM core_timers").toArray()[0];
+      due = row?.due ?? null;
+    }
+    if (due === this.alarmAt) return Promise.resolve();
     this.alarmAt = due;
-    this.writeAlarm(due).then(
+    return this.writeAlarm(due).then(
       () => {
         this.alarmWriteFailures = 0;
       },
@@ -456,15 +478,19 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
     // The alarm that woke us has been consumed; re-derive it from the table when we're done.
     this.alarmAt = null;
     if (this.migrationFailure !== null) {
+      // Try once more, in case the failure was a transient storage error.
+      this.migrationFailure = null;
+      this.migrate();
+    }
+    if (this.migrationFailure !== null) {
       // Timers can't run on a schema that failed to migrate. Check again later, so that once a fixed
       // release is deployed the object wakes, migrates and runs its timers without waiting for a
-      // request. (alarmAt becomes unknown so the next healthy flush re-derives it.)
-      this.alarmAt = undefined;
-      void this.writeAlarm(Date.now() + MIGRATION_FAILURE_RECHECK_MS).catch((error: unknown) => {
-        this.log.error("could not set the recheck alarm", { error });
-      });
+      // request. Goes through the same retrying write as every other alarm change.
+      this.recheckAt = Date.now() + MIGRATION_FAILURE_RECHECK_MS;
+      await this.flushAlarm();
       return;
     }
+    this.recheckAt = null;
     const due = this.sql
       .exec<TimerRow>(
         "SELECT name, due_at, payload, attempts, generation FROM core_timers WHERE due_at <= ? ORDER BY due_at, name LIMIT ?",
@@ -478,7 +504,7 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
       for (const row of due) await this.runTimer(row);
     } finally {
       this.alarmRunning = false;
-      this.flushAlarm();
+      await this.flushAlarm();
     }
   }
 

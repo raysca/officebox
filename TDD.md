@@ -580,9 +580,10 @@ CREATE TABLE core_outbox (                                -- generic transaction
   stream TEXT NOT NULL,
   body TEXT NOT NULL,                                     -- JSON message, at most 128 KB
   bytes INTEGER NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,                    -- failures when sent alone
   next_attempt_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  first_failed_at INTEGER                                 -- core migration 3; cleared by deletion on success
 );
 CREATE TABLE core_outbox_dead (                           -- rows given up on (core migration 2); same columns
   id INTEGER PRIMARY KEY, stream TEXT NOT NULL, body TEXT NOT NULL, bytes INTEGER NOT NULL,
@@ -590,7 +591,14 @@ CREATE TABLE core_outbox_dead (                           -- rows given up on (c
 );
 ```
 
-Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. Rows that keep failing to send while the queue is otherwise up are moved to `core_outbox_dead` after 10 attempts **(default)**, and the base class adds that table in its second core migration. Attempts only count when the queue is known to be up (something else was sent in the same drain); a drain that sends nothing backs the whole stream off instead, recorded in `meta` as `outbox_outage_until:<stream>` (next retry, epoch ms) and `outbox_outage_count:<stream>`, cleared by the next successful send. **Nothing reads or re-drives `core_outbox_dead` until M7**, which adds it to admin health with a re-drive action; until then dead rows are visible only in the error log and `Outbox.stats()` (admin note).
+Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. **Outbox failure handling** (`apps/worker/src/core/do/outbox.ts`; `first_failed_at` is added by core migration 3):
+- *Per-row failures.* A row that fails when sent on its own counts an attempt (`attempts + 1`, `first_failed_at` set on the first failure) and backs off on its own: `next_attempt_at = MAX(existing, now + backoff)`, 2 s doubling to 5 minutes, with up to 20 % jitter. Failing chunks are bisected down to single rows; a row only ever caught in failed multi-row sends is pushed back the same way without an attempt. Failed rows thus move behind untried rows, so good rows always make progress whatever bad rows are in front of them.
+- *Dead-letter rule.* A row moves to `core_outbox_dead` when it fails alone with `attempts >= 10` **(default)** *and* the stream has had a successful send since that row's `first_failed_at`. A queue outage never kills rows, however long; a lone bad row waits for any other row (such as the next one enqueued) to be sent, then goes at its next failure; a queue that flaps can, in an unlucky run of 10 failures with a success in between, dead-letter a good row (accepted).
+- *Budget.* A drain makes at most 32 sends and runs at most 4 minutes (both configurable), under the 5-minute outbox timer timeout. If a drain sends nothing, the due rows it didn't reach are pushed back by a stream backoff without attempts, so a down queue isn't re-drained in a tight loop; from 10 such drains in a row it logs at error level.
+- *Guarantees.* At least once. Order is by row ID within a drain; after failures, newer rows overtake older ones being retried, so consumers must be idempotent and order-tolerant.
+- *`meta` keys used by the outbox:* `outbox_last_success_at:<stream>` (epoch ms of the last successful send) and `outbox_failed_drains:<stream>` (consecutive drains that sent nothing; the stream backoff exponent, removed on success). `Outbox.stats()` reports pending, dead, oldest pending age, max attempts, last success and stream backoff.
+
+**Nothing reads or re-drives `core_outbox_dead` until M7**, which adds it to admin health with a re-drive action; until then dead rows are visible only in the error log and `Outbox.stats()` (admin note).
 
 **ChatChannel DO** — one per channel. This is the source of truth for the channel's messages.
 
