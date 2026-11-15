@@ -23,7 +23,7 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 - [Calls](specs/calls.md)
 - [Calendar](specs/calendar.md)
 - [Documents, Whiteboards & Files](specs/documents.md)
-- [Assistant](specs/assistant.md) (draft)
+- [Assistant](specs/assistant.md)
 
 **Cross-cutting specs** (every feature follows these):
 - [Permissions](specs/permissions.md)

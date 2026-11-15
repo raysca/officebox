@@ -1,6 +1,6 @@
 # Spec: Assistant ("Butler")
 
-**Status:** Draft for review
+**Status:** Approved (product owner, 15 Nov 2026)
 **Revision:**
 - First draft written after four rounds of product-owner questions (15 Nov 2026).
 - Revised after the first independent review: a tool allow-list for shared conversations, memory treated as untrusted, AI Gateway logging off, copies purged when sources go, a hardened confirmation protocol, captions separated from call notes.
@@ -940,7 +940,7 @@ Mentions need no new endpoint. ChatChannel recognises the `assistant` mention to
 
 ## 17. Changes to other documents
 
-This section sits outside the AGENTS §3.1 order because it's a temporary checklist; it can be removed once the edits are applied. These edits are made in the PR that moves this spec to **Approved**, so that no other document changes direction before the product owner signs off (AGENTS §3.1 item 5). Until then, this spec supersedes the following on assistant matters, and the listed statements are known to conflict with it.
+This section sits outside the AGENTS §3.1 order because it records where this spec changed other documents. All rows were **applied in the PR that approved this spec** (AGENTS §2: the losing document is fixed in the same PR). Keep it as the index of those changes.
 
 | Document | Change |
 |---|---|
