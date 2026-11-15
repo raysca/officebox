@@ -288,7 +288,7 @@ describe("outbox failures", () => {
     expect(stats.pending + (await s.sentBodies()).length).toBe(60);
   });
 
-  it("a queue alternating success and failure per send: dead-letters late without the gap, never within 90 minutes with it", async () => {
+  it("a queue alternating success and failure per send: no dead-letter in 120 drains without the gap, none within 90 minutes with it", async () => {
     // Big rows (two per chunk), and fresh traffic every drain, so sends keep alternating.
     const noGap = await manual();
     await noGap.meta("strike_gap_ms", "0");
@@ -346,6 +346,52 @@ describe("outbox failures", () => {
     expect((await s.outboxRows())[0]).toMatchObject({ id: "p-legacy", attempts: 16, strikes: 1 });
   });
 
+  it("the strike gap is what protects a lone good row from a queue that flips on every send", async () => {
+    // g1 fails whenever it is sent; every fresh row sent after it in the same drain succeeds, as if
+    // the queue flipped between them. Simulated time steps one minute per drain.
+    const run = async (gapMs: string) => {
+      const s = await manual();
+      await s.meta("strike_gap_ms", gapMs);
+      await s.meta("fail_ids", "g1");
+      await s.addRows(["g1"]);
+      await drainAll(s); // g1 has failed before now, so it rides along
+      for (let minute = 1; minute <= 30; minute++) {
+        await s.addRows([`f${minute}`]);
+        await s.rewind(60_000);
+        await runDurableObjectAlarm(s);
+        if ((await s.outboxStats()).dead > 0) return { deadAtMinute: minute, strikes: MAX_OUTBOX_STRIKES };
+      }
+      return { deadAtMinute: null, strikes: (await s.outboxRows()).find((r) => r.id === "g1")?.strikes ?? -1 };
+    };
+    // A 1-minute gap: one strike per minute, dead-lettered at the 10th.
+    expect(await run("60000")).toEqual({ deadAtMinute: MAX_OUTBOX_STRIKES, strikes: MAX_OUTBOX_STRIKES });
+    // The 10-minute default over the same 30 minutes: strikes at minutes 1, 11 and 21 only.
+    expect(await run("600000")).toEqual({ deadAtMinute: null, strikes: 3 });
+  });
+
+  it("lets nothing ride along while the stream is in backoff, so rows that aren't due keep it", async () => {
+    const s = await manual();
+    await s.meta("outbox_fail", "1");
+    await s.addRows(["r1", "r2", "r3", "r4", "r5", "r6"]);
+    for (let i = 0; i < 3; i++) await drainAll(s); // all six have failed; the stream is in backoff
+    const sends: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      await s.addRows([`n${i}`]);
+      await s.advanceToNextRetry(); // up to the fresh row's drain timer only
+      const start = Date.now();
+      const before = new Map((await s.outboxRows()).map((r) => [r.id, r]));
+      await runDurableObjectAlarm(s);
+      sends.push((await s.lastDrain())?.sends ?? 0);
+      // Rows that weren't due gained no attempts.
+      for (const row of await s.outboxRows()) {
+        const was = before.get(row.id);
+        if (was && was.next_attempt_at > start) expect(row.attempts, row.id).toBe(was.attempts);
+      }
+    }
+    expect(Math.max(...sends)).toBeLessThanOrEqual(2);
+    expect((await s.outboxStats()).dead).toBe(0);
+  });
+
   it("never dead-letters a lone poison row with no other traffic", async () => {
     const s = await manual();
     await s.meta("strike_gap_ms", "0");
@@ -360,7 +406,12 @@ describe("outbox failures", () => {
     await s.addRows(["p1"]);
     for (let i = 0; i < 8; i++) await drainAll(s); // long backoff now
     expect((await s.outboxRows())[0]).toMatchObject({ id: "p1", strikes: 0 });
-    // One fresh row per drain, while p1 is NOT due: it rides along and earns a strike each time.
+    // One fresh row per drain, while p1 is NOT due. The first fresh row goes out alone: the stream
+    // was in backoff (nothing sent for 8 drains), so nothing rides along. From then on p1 rides along
+    // and earns a strike each drain.
+    await s.addRows(["g0"]);
+    await drain(s);
+    expect((await s.outboxRows())[0]).toMatchObject({ id: "p1", strikes: 0 });
     for (let i = 1; i <= MAX_OUTBOX_STRIKES; i++) {
       await s.addRows([`g${i}`]);
       const before = Date.now();

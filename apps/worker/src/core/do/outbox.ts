@@ -28,8 +28,10 @@ import { backoffMs } from "./backoff";
  * chunks are bisected right half first. Under a sustained backlog of more than `DRAIN_ROWS` fresh
  * rows per drain, rows that have failed before (apart from the ride-along) wait until it clears.
  *
- * **Ride-along.** When a drain has fresh rows, up to `RIDE_ALONG_ROWS` (4) rows that have failed
- * before are tested too, even if they aren't due yet: those with the most strikes, then the most
+ * **Ride-along.** When a drain has fresh rows and the stream is healthy (the previous drain delivered
+ * something, so `outbox_failed_drains:<stream>` is absent), up to `RIDE_ALONG_ROWS` (4) rows that
+ * have failed before are tested too, even if they aren't due yet. During an outage nothing rides
+ * along, so rows that aren't due keep their backoff. those with the most strikes, then the most
  * attempts. So a lone bad row is tested whenever real traffic flows, and judged against it. They
  * count against the same 32-send budget (at most about 7 sends for 4 rows).
  *
@@ -43,8 +45,9 @@ import { backoffMs } from "./backoff";
  * strikes **(default)**. So:
  * - a queue outage adds no strikes, and neither does a queue that goes down after a success: nothing
  *   succeeds after the failures;
- * - a queue that alternates between success and failure on almost every send needs more than 90
- *   minutes of that (10 strikes, 10 minutes apart) before it can dead-letter a good row; accepted;
+ * - a queue that alternates between success and failure on every send **can still dead-letter a good
+ *   row** after 10 strikes, which takes at least 90 minutes of it (10 strikes, 10 minutes apart);
+ *   accepted **(default)**;
  * - a lone bad row is dead-lettered once ten drains, at least 10 minutes apart, have had other rows
  *   sent after it (it rides along with fresh traffic); with no other traffic it is never
  *   dead-lettered and keeps retrying with backoff;
@@ -65,8 +68,12 @@ import { backoffMs } from "./backoff";
  * to be run again shortly.
  *
  * **Guarantees.** Delivery is at least once, in no guaranteed order: rows that failed before are sent
- * ahead of fresh ones in a drain, failing chunks are bisected, and rows retry on their own backoff. Consumers must be idempotent and order-tolerant (TDD §3.3:
- * full state plus a version guard).
+ * ahead of fresh ones in a drain, failing chunks are bisected, and rows retry on their own backoff.
+ * Consumers must be idempotent and order-tolerant (TDD §3.3: full state plus a version guard).
+ *
+ * **Logging.** While failures persist, the per-drain warning is written at most once every 5 minutes
+ * per stream (with a count of the drains it stands for); the first error-level line, at 10 drains
+ * that sent nothing, is always written.
  *
  * `meta` keys used: `outbox_success_seq:<stream>` (successful sends so far), `outbox_last_success_at:
  * <stream>` (epoch ms of the last one, for `stats()` only) and `outbox_failed_drains:<stream>`
@@ -96,6 +103,8 @@ export const SEND_TIMEOUT_MS = 30_000;
 export const FAILED_DRAINS_ERROR_THRESHOLD = 10;
 /** Up to 20 % random extra on each backoff, so rows that failed together don't retry in lockstep. */
 export const DEFAULT_JITTER = 0.2;
+/** Least time between two failure log lines for one stream while failures persist. */
+const FAILURE_LOG_INTERVAL_MS = 5 * 60_000;
 /** Rows read per drain; more are picked up by the next run, scheduled straight away. */
 const DRAIN_ROWS = 500;
 /** When a drain is already running, the overlapping run asks to be retried after this long. */
@@ -199,6 +208,8 @@ export class Outbox {
   private readonly jitter: Tunable;
   private readonly minStrikeGapMs: Tunable;
   private draining = false;
+  private lastFailureLogAt = -Infinity;
+  private suppressedFailureLogs = 0;
   /** The last drain's report, for tests and diagnostics. */
   lastDrain: DrainReport | null = null;
 
@@ -322,7 +333,9 @@ export class Outbox {
       )
       .toArray();
     let rideAlong: Row[] = [];
-    if (rows.some((row) => row.attempts === 0)) {
+    // Only while the stream is healthy: during an outage, rows that aren't due keep their backoff.
+    const healthy = this.getMeta(this.failedDrainsKey) === null;
+    if (healthy && rows.some((row) => row.attempts === 0)) {
       // Ride-along: test a few rows that failed before against this fresh traffic.
       rideAlong = this.sql
         .exec<Row>(
@@ -439,11 +452,17 @@ export class Outbox {
         this.sql.exec("UPDATE core_outbox SET next_attempt_at = MAX(next_attempt_at, ?) WHERE id = ?", retryAt, id);
       }
       const fields = { stream: this.stream, failedDrains, failedRows, sends: state.sends };
-      if (failedDrains >= FAILED_DRAINS_ERROR_THRESHOLD) {
+      if (failedDrains === FAILED_DRAINS_ERROR_THRESHOLD) {
         log.error(`no send succeeded in ${failedDrains} drains: queue outage or all rows failing`, fields);
-      } else log.warn("outbox drain sent nothing; backing off", fields);
-    } else if (failedRows > 0) {
+        this.lastFailureLogAt = now;
+        this.suppressedFailureLogs = 0;
+      } else {
+        this.logFailure(log, failedDrains >= FAILED_DRAINS_ERROR_THRESHOLD ? "error" : "warn", now, fields);
+      }
+    } else if (deadRows > 0) {
       log.warn("outbox rows failed; will retry", { stream: this.stream, failedRows, deadRows });
+    } else if (failedRows > 0) {
+      this.logFailure(log, "warn", now, { stream: this.stream, failedRows, deadRows });
     }
 
     this.lastDrain = {
@@ -488,6 +507,21 @@ export class Outbox {
     // Right half first, so rows that failed before (at the end) are tested before fresh ones.
     await this.sendChunk(rows.slice(middle), state);
     await this.sendChunk(rows.slice(0, middle), state);
+  }
+
+  /** Writes a failure line at most once per `FAILURE_LOG_INTERVAL_MS`, counting the ones skipped. */
+  private logFailure(log: Logger, level: "warn" | "error", now: number, fields: Record<string, unknown>): void {
+    if (now - this.lastFailureLogAt < FAILURE_LOG_INTERVAL_MS) {
+      this.suppressedFailureLogs += 1;
+      return;
+    }
+    const message =
+      level === "error"
+        ? `no send succeeded in ${String(fields.failedDrains)} drains: queue outage or all rows failing`
+        : "outbox send failures; backing off";
+    log[level](message, { ...fields, suppressedSinceLastLog: this.suppressedFailureLogs });
+    this.lastFailureLogAt = now;
+    this.suppressedFailureLogs = 0;
   }
 
   /** Adds random jitter (up to the configured fraction) to a backoff. */
