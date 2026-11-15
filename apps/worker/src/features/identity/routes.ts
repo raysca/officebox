@@ -32,7 +32,7 @@ import {
 } from "./allowlist";
 import { acceptInvitation, lookupInvitation } from "./invitations";
 import { recordSignInDevice } from "./known-devices";
-import { confirmMagicLink, MAGIC_LINK_LIMITS, prepareMagicLinkRequest } from "./magic-link";
+import { confirmMagicLink, lookupMagicLink, MAGIC_LINK_LIMITS, prepareMagicLinkRequest } from "./magic-link";
 import { SESSION_COOKIE } from "./auth";
 import { tokenHash } from "./crypto";
 import { listDevices, signOutDevice, signOutEverywhere, signOutOthers } from "./devices";
@@ -430,21 +430,33 @@ const invitationRoutes = new Hono<AppEnv>()
 
 // ---- /api/sign-in: the magic-link confirmation page's POST (Identity §4.4) -----------------------
 
-const signInRoutes = new Hono<AppEnv>().post("/link", async (c) => {
-  const ctx = coreContext(c);
-  const limited = await checkLimit(ctx, MAGIC_LINK_LIMITS.confirmIp, ipKey(c.req.raw));
-  if (!limited.ok) return respond(c, limited);
-  const body = await readJson(c, magicLinkConfirmBodySchema, SMALL_BODY);
-  if (!body.ok) return respond(c, body);
-  const services = await identityServices(c);
-  if (!services.ok) return respond(c, services);
-  const { secrets, auth } = services.value;
-  const result = await confirmMagicLink(ctx, secrets, auth, c.req.raw, body.value.token);
-  if (!result.ok) return respond(c, result);
-  for (const cookie of result.value.setCookies) c.header("Set-Cookie", cookie, { append: true });
-  // better-auth's verify body holds the session token: never passed through (workaround 7).
-  return respond(c, ok({ signedIn: true as const }));
-});
+const signInRoutes = new Hono<AppEnv>()
+  .post("/link/lookup", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await checkLimit(ctx, MAGIC_LINK_LIMITS.confirmIp, ipKey(c.req.raw));
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, magicLinkConfirmBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, installation } = services.value;
+    return respond(c, await lookupMagicLink(ctx, secrets, installation, body.value.token));
+  })
+  .post("/link", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await checkLimit(ctx, MAGIC_LINK_LIMITS.confirmIp, ipKey(c.req.raw));
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, magicLinkConfirmBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, auth } = services.value;
+    const result = await confirmMagicLink(ctx, secrets, auth, c.req.raw, body.value.token);
+    if (!result.ok) return respond(c, result);
+    for (const cookie of result.value.setCookies) c.header("Set-Cookie", cookie, { append: true });
+    // better-auth's verify body holds the session token: never passed through (workaround 7).
+    return respond(c, ok({ signedIn: true as const }));
+  });
 
 // ---- /api/status: what signed-out pages may know (Platform §15, Admin §8.2) -----------------------
 

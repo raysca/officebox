@@ -442,10 +442,23 @@ export async function acceptInvitation(
   if (!row || row.revoked_at !== null) return err(GONE);
   if (row.accepted_attempt_id !== null) return reopen(ctx, secrets, row);
   if (row.expires_at <= ctx.now()) return err(EXPIRED);
+  if (body.name === undefined || body.handle === undefined) {
+    const message = "Fill in your name and handle.";
+    return err(
+      apiError("validation_failed", message, {
+        fields: {
+          ...(body.name === undefined ? { name: [message] } : {}),
+          ...(body.handle === undefined ? { handle: [message] } : {}),
+        },
+      }),
+    );
+  }
+  const name = body.name;
+  const handle = body.handle;
 
   const database = new Database(ctx.env.DB);
   const handleTaken = expectOk(
-    await database.first<{ one: number }>("SELECT 1 AS one FROM handles WHERE handle = ?", body.handle),
+    await database.first<{ one: number }>("SELECT 1 AS one FROM handles WHERE handle = ?", handle),
   );
   if (handleTaken) return err(handleConflict());
 
@@ -489,15 +502,12 @@ export async function acceptInvitation(
   const internal = (await auth.$context).internalAdapter;
   const store = {
     ...(currentStore() ?? {}),
-    create: { kind: "accept" as const, attemptId, role, handle: body.handle },
+    create: { kind: "accept" as const, attemptId, role, handle },
   };
   let userId: string;
   try {
     const user = await runWithStore(store, () =>
-      internal.createUser(
-        { email: row.email, name: body.name, emailVerified: true },
-        { method: "officebox-invitation" },
-      ),
+      internal.createUser({ email: row.email, name, emailVerified: true }, { method: "officebox-invitation" }),
     );
     if (!user) throw new Error("user creation refused inside the accept marker");
     userId = user.id;
@@ -509,7 +519,7 @@ export async function acceptInvitation(
   // 3. Claim the handle with the same attempt ID; a race lost since the check is compensated.
   const claimed = await database.run(
     "INSERT INTO handles (handle, owner_type, owner_id, created_attempt_id) VALUES (?, 'user', ?, ?)",
-    body.handle,
+    handle,
     userId,
     attemptId,
   );

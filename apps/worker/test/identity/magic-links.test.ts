@@ -246,6 +246,17 @@ describe("confirming a magic link (Identity §4.4; Platform §10)", () => {
     expect((await new Browser().json("/api/sign-in/link", { body: { token } })).status).toBe(410);
   });
 
+  it("lookup shows the account email and workspace without using the link", async () => {
+    const { member, token } = await freshLink();
+    const lookup = await new Browser().json("/api/sign-in/link/lookup", { body: { token } });
+    expect(lookup.body).toEqual({ email: member.email, workspaceName: "Acme Studio" });
+    expect((await new Browser().json("/api/sign-in/link", { body: { token } })).status).toBe(200);
+    expect((await new Browser().json("/api/sign-in/link/lookup", { body: { token } })).status).toBe(410);
+    expect((await new Browser().json("/api/sign-in/link/lookup", { body: { token: "F".repeat(43) } })).status).toBe(
+      410,
+    );
+  });
+
   it("opening the link page with GET uses nothing; better-auth's GET verify answers 404", async () => {
     const { token } = await freshLink();
     await new Browser().call("/sign-in/link", { noCsrf: true });

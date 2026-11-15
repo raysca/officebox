@@ -3,6 +3,8 @@ import {
   apiError,
   APP_CONTENT_SECURITY_POLICY,
   COMMON_SECURITY_HEADERS,
+  FRAGMENT_PAGE_HEADERS,
+  FRAGMENT_PAGES,
 } from "@officebox/shared";
 import { Hono, type MiddlewareHandler } from "hono";
 import type { AppEnv } from "./context";
@@ -98,6 +100,9 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
     // API responses carry user data: never stored by shared caches (TDD §8.2).
     if (isApi && !keepsApiCacheControl(c.res.headers.get("Cache-Control"))) c.header("Cache-Control", "no-store");
+    // Pages whose links carry a token in the fragment: no Referer, never cached (Platform §10).
+    if (FRAGMENT_PAGES.includes(path))
+      for (const [name, value] of Object.entries(FRAGMENT_PAGE_HEADERS)) c.header(name, value);
     // Assets fall-through and health probes are noisy and carry nothing worth keeping.
     if (path.startsWith("/api/") || path === "/api") {
       log.info("request", {

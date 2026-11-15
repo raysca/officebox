@@ -1,12 +1,15 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
+import { ApiRequestError, describeApiError, errorCodeOf } from "../../lib/api/client";
 import { meQueryKey, signInWithPasskey } from "../../lib/api/identity";
+import { publicStatusQuery, requestMagicLink } from "../../lib/api/onboarding";
 import { supportsPasskeys } from "../../lib/api/webauthn";
 import { Alert } from "../../lib/ui/Alert";
 import { Button } from "../../lib/ui/Button";
-import { describePasskeyFailure } from "../forms";
+import { TextField } from "../../lib/ui/TextField";
+import { describePasskeyFailure, emailError } from "../forms";
 import { PublicPage } from "../layout/PublicLayout";
 import { messages } from "../messages";
 
@@ -35,7 +38,15 @@ export function safeRedirect(value: string | undefined, origin: string = window.
     return "/";
   }
   if (url.origin !== origin) return "/";
-  if (url.pathname === "/sign-in" || url.pathname === "/setup" || url.pathname === "/not-configured") return "/";
+  if (
+    url.pathname === "/sign-in" ||
+    url.pathname === "/setup" ||
+    url.pathname === "/not-configured" ||
+    url.pathname === "/sign-in/link" ||
+    url.pathname === "/invitations/accept"
+  ) {
+    return "/";
+  }
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
@@ -47,14 +58,82 @@ export const signInSearchSchema = z.object({
 export type SignInSearch = z.infer<typeof signInSearchSchema>;
 
 /**
- * Sign in (Identity §4.4, §7 screen 2): one button, a discoverable passkey, so no email needs typing.
- * "Email me a sign-in link" for members arrives with email in M1b.
+ * "Email me a sign-in link" (Identity §4.4, §7 screen 3), shown only when email is configured and
+ * magic links are on. The answer never says whether the address has an account.
+ */
+function MagicLinkForm() {
+  const [email, setEmail] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const mutation = useMutation({
+    mutationFn: requestMagicLink,
+    meta: { errorToast: false },
+    onSuccess: (_result, sent) => setSentTo(sent),
+    onError: (failure) => {
+      if (errorCodeOf(failure) === "unavailable") setFormError(copy.linkUnavailable);
+      else
+        setFormError(
+          failure instanceof ApiRequestError ? describeApiError(failure.detail, "mutation") : messages.errors.generic,
+        );
+    },
+  });
+  return (
+    <section aria-labelledby="magic-link-heading" className="flex flex-col gap-4 border-t border-border pt-6">
+      <div className="flex flex-col gap-1">
+        <h2 id="magic-link-heading" className="text-lg font-semibold">
+          {copy.linkSection}
+        </h2>
+        <p className="text-sm text-muted">{copy.linkDescription}</p>
+      </div>
+      {sentTo ? (
+        <Alert tone="info">{copy.linkSent(sentTo)}</Alert>
+      ) : (
+        <form
+          noValidate
+          className="flex flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setFormError(null);
+            const problem = emailError(email);
+            setError(problem);
+            if (!problem) mutation.mutate(email.trim());
+          }}
+        >
+          {formError ? <Alert>{formError}</Alert> : null}
+          <TextField
+            label={copy.emailLabel}
+            type="email"
+            value={email}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              setError(null);
+            }}
+            error={error}
+            required
+            autoComplete="email"
+          />
+          <div>
+            <Button type="submit" disabled={mutation.isPending}>
+              {mutation.isPending ? copy.sendingLink : copy.sendLink}
+            </Button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Sign in (Identity §4.4, §7 screen 2): the passkey button first, a discoverable passkey, so no email
+ * needs typing; then "Email me a sign-in link" for members when email is configured.
  */
 export function SignInPage({ search }: { search: SignInSearch }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const supported = supportsPasskeys();
+  const status = useQuery(publicStatusQuery);
 
   const mutation = useMutation({
     mutationFn: signInWithPasskey,
@@ -89,6 +168,7 @@ export function SignInPage({ search }: { search: SignInSearch }) {
           {mutation.isPending ? copy.submitting : copy.submit}
         </Button>
       </div>
+      {status.data?.magicLinks ? <MagicLinkForm /> : null}
     </PublicPage>
   );
 }

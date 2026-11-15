@@ -5,6 +5,7 @@ import {
   normaliseEmail,
   ok,
   type ApiError,
+  type MagicLinkLookup,
   type Result,
 } from "@officebox/shared";
 import { APIError } from "better-auth/api";
@@ -173,6 +174,29 @@ export async function issueMagicLink(
 const INVALID_LINK: ApiError = apiError("gone", "This sign-in link isn't valid any more. Ask for a new one.", {
   reason: "magic_link_invalid",
 });
+
+/**
+ * `POST /api/sign-in/link/lookup`: the account email and workspace for the confirmation page, without
+ * using the link (Platform §10: "Sign in to *Workspace* as **email**"). Same validity rules as confirm.
+ */
+export async function lookupMagicLink(
+  ctx: CoreContext,
+  secrets: IdentitySecrets,
+  installation: ClaimedInstallation,
+  token: string,
+): Promise<Result<MagicLinkLookup, ApiError>> {
+  const row = expectOk(
+    await new Database(ctx.env.DB).first<{ email: string }>(
+      `SELECT u.email FROM magic_link_issues m JOIN users u ON u.id = m.user_id
+        WHERE m.token_hash = ? AND m.consumed_at IS NULL AND m.revoked_at IS NULL AND m.expires_at > ?
+          AND u.role = 'member' AND u.status = 'active' AND u.email_normalised = m.email_normalised`,
+      await tokenHash(secrets.tokenHashKey, token),
+      ctx.now(),
+    ),
+  );
+  if (!row) return err(INVALID_LINK);
+  return ok({ email: row.email, workspaceName: installation.workspaceName });
+}
 
 export interface ConfirmedSignIn {
   userId: string;

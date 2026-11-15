@@ -2,7 +2,7 @@ import type { RouterHistory } from "@tanstack/react-router";
 import { createQueryClient } from "../lib/api/query-client";
 import { createAppRouter, type AppRouter } from "./router";
 
-const PUBLIC_PATHS = new Set(["/sign-in", "/setup", "/not-configured"]);
+const PUBLIC_PATHS = new Set(["/sign-in", "/setup", "/not-configured", "/sign-in/link", "/invitations/accept"]);
 
 /**
  * Creates the query client and the router together, wiring the query client's `onUnauthorized` hook:

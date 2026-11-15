@@ -390,6 +390,13 @@ describe("accepting an invitation (Identity §4.3)", () => {
       body: { token: fragmentToken(created.body.link), name: "", handle: "admin" },
     });
     expect(bad.status).toBe(400);
+    // A new account needs both.
+    const missing = await new Browser().json("/api/invitations/accept", {
+      body: { token: fragmentToken(created.body.link) },
+    });
+    expect(missing.status).toBe(400);
+    const fields = (missing.body as { error: { fields: Record<string, unknown> } }).error.fields;
+    expect(Object.keys(fields).sort()).toEqual(["handle", "name"]);
   });
 
   it("a GET of the link page changes nothing (the token is only used by the page's POST)", async () => {
@@ -437,6 +444,10 @@ describe("reopening an accepted invitation (Identity §4.3: the 410 guard)", () 
 
     const lookup = await new Browser().json("/api/invitations/lookup", { body: { token } });
     expect(lookup.body).toMatchObject({ email, state: "resume" });
+    // Resuming needs no name or handle.
+    const bare = await new Browser().json("/api/invitations/accept", { body: { token } });
+    expect(bare.status).toBe(201);
+    expect(bare.body).toMatchObject({ resumed: true });
     const again = await acceptInvite(token, "Someone Else", uniqueHandle("other"));
     expect(again.accept.status).toBe(201);
     expect(again.accept.body).toMatchObject({ email, resumed: true });
@@ -448,7 +459,7 @@ describe("reopening an accepted invitation (Identity §4.3: the 410 guard)", () 
         .first<{ display_name: string }>())!.display_name,
     ).toBe("Ana Diaz");
 
-    // The earlier ticket was replaced; the reopened one registers the passkey.
+    // The earlier tickets were replaced; the latest reopened one registers the passkey.
     const reg = await registerPasskey(again.browser, new SoftAuthenticator());
     expect(reg.verify?.status).toBe(200);
     expect((await acceptInvite(token)).accept.status).toBe(410);

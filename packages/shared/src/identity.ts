@@ -355,11 +355,14 @@ export const invitationLookupSchema = z.object({
 });
 export type InvitationLookup = z.infer<typeof invitationLookupSchema>;
 
-/** `POST /api/invitations/accept`. Name and handle are ignored when the invitation is being resumed. */
+/**
+ * `POST /api/invitations/accept`. Name and handle are required to create the account; when the
+ * invitation is being resumed (the account exists without a passkey) they're ignored and may be left out.
+ */
 export const acceptInvitationBodySchema = z.strictObject({
   token: linkTokenSchema,
-  name: displayNameSchema,
-  handle: handleSchema,
+  name: displayNameSchema.optional(),
+  handle: handleSchema.optional(),
 });
 export type AcceptInvitationBody = z.infer<typeof acceptInvitationBodySchema>;
 
@@ -388,6 +391,13 @@ export const magicLinkConfirmBodySchema = z.strictObject({ token: linkTokenSchem
 export type MagicLinkConfirmBody = z.infer<typeof magicLinkConfirmBodySchema>;
 
 export const magicLinkConfirmResultSchema = z.object({ signedIn: z.literal(true) });
+
+/**
+ * `POST /api/sign-in/link/lookup`: what the confirmation page shows before Continue ("Sign in to
+ * *Workspace* as **email**", Platform §10), so a link someone else shared is obvious. Uses nothing.
+ */
+export const magicLinkLookupSchema = z.object({ email: z.string(), workspaceName: z.string() });
+export type MagicLinkLookup = z.infer<typeof magicLinkLookupSchema>;
 export type MagicLinkConfirmResult = z.infer<typeof magicLinkConfirmResultSchema>;
 
 // ---- Allowed invite domains (Identity §4.2, Platform §7) --------------------------------------
