@@ -1,11 +1,20 @@
-import { apiError, apiErrorBodySchema, err, ok, ULID_PATTERN } from "@officebox/shared";
+import {
+  API_CONTENT_SECURITY_POLICY,
+  apiError,
+  apiErrorBodySchema,
+  APP_CONTENT_SECURITY_POLICY,
+  COMMON_SECURITY_HEADERS,
+  err,
+  ok,
+  ULID_PATTERN,
+} from "@officebox/shared";
 import { env, exports } from "cloudflare:workers";
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createApp, defineFeature } from "../src/core/app";
 import type { AppEnv } from "../src/core/context";
-import { HTTP_STATUS, readJson, respond } from "../src/core/errors";
+import { HTTP_STATUS, readBodyText, readJson, respond } from "../src/core/errors";
 import type { LogLevel } from "../src/core/log";
 
 const ORIGIN = "http://officebox.test";
@@ -117,6 +126,84 @@ describe("feature routes and typed results", () => {
 
   it("maps every error code to a status", () => {
     for (const status of Object.values(HTTP_STATUS)) expect(status).toBeGreaterThanOrEqual(400);
+  });
+});
+
+describe("request body limits", () => {
+  const post = (body: BodyInit, headers: Record<string, string> = {}) =>
+    readBodyText(new Request(`${ORIGIN}/x`, { method: "POST", body, headers, duplex: "half" } as RequestInit), 64);
+
+  const stream = (...chunks: string[]) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+        controller.close();
+      },
+    });
+
+  it("reads a chunked body with no Content-Length within the limit", async () => {
+    expect(await post(stream('{"a":', "1}"))).toEqual({ ok: true, value: '{"a":1}' });
+  });
+
+  it("stops reading a chunked body once it passes the limit", async () => {
+    const result = await post(stream("x".repeat(40), "y".repeat(40), "z".repeat(1000)));
+    expect(!result.ok && result.error.code).toBe("payload_too_large");
+  });
+
+  it("refuses a declared size over the limit before reading", async () => {
+    const result = await post("small", { "Content-Length": "100000" });
+    expect(!result.ok && result.error.code).toBe("payload_too_large");
+  });
+
+  it("counts real bytes when the header understates the size", async () => {
+    const request = new Request(`${ORIGIN}/x`, {
+      method: "POST",
+      body: stream("x".repeat(500)),
+      duplex: "half",
+    } as RequestInit);
+    // Headers on a streamed request are what the client claimed; the runtime doesn't check them.
+    const lying = new Request(request, { headers: { "Content-Length": "10" } });
+    const result = await readBodyText(lying, 64);
+    expect(!result.ok && result.error.code).toBe("payload_too_large");
+  });
+
+  it("refuses a malformed or negative Content-Length", async () => {
+    for (const value of ["-1", "abc", "1e3", "Infinity"]) {
+      const headers = new Headers();
+      const request = new Request(`${ORIGIN}/x`, { method: "POST", body: stream("{}"), duplex: "half" } as RequestInit);
+      headers.set("Content-Length", value);
+      const result = await readBodyText(new Request(request, { headers }), 64);
+      expect(!result.ok && result.error.code, value).toBe("validation_failed");
+    }
+  });
+
+  it("refuses invalid UTF-8", async () => {
+    const bytes = new Uint8Array([0x7b, 0xff, 0x7d]);
+    const result = await post(bytes);
+    expect(!result.ok && result.error.code).toBe("validation_failed");
+  });
+});
+
+describe("security headers", () => {
+  it("sets the API CSP and the common headers on API and health responses", async () => {
+    const { call } = makeApp();
+    for (const path of ["/api/sample/ok", "/api/nope", "/health"]) {
+      const res = await call(path);
+      expect(res.headers.get("Content-Security-Policy"), path).toBe(API_CONTENT_SECURITY_POLICY);
+      for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) {
+        expect(res.headers.get(name), `${path} ${name}`).toBe(value);
+      }
+    }
+  });
+
+  it("sets the app CSP on assets the Worker passes through", async () => {
+    const assets = {
+      fetch: () => Promise.resolve(new Response("<!doctype html>", { headers: { "Content-Type": "text/html" } })),
+    };
+    const app = createApp({ features: [], logSink: () => {} });
+    const res = await app.request(`${ORIGIN}/some/file.js`, {}, { ...env, ASSETS: assets as unknown as Fetcher });
+    expect(res.headers.get("Content-Security-Policy")).toBe(APP_CONTENT_SECURITY_POLICY);
+    expect(res.headers.get("X-Request-Id")).toMatch(ULID_PATTERN);
   });
 });
 

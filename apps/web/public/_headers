@@ -1,0 +1,7 @@
+# Security headers for static assets served by Workers Assets (TDD §8.2).
+# Keep in step with packages/shared/src/security.ts; the e2e smoke test checks they match.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

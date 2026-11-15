@@ -56,24 +56,64 @@ export const INTERNAL_ERROR: ApiError = apiError("internal", "Something went wro
 
 const DEFAULT_MAX_JSON_BYTES = 1024 * 1024;
 
+const TOO_LARGE: ApiError = apiError("payload_too_large", "The request body is too large.");
+
+/**
+ * Reads a request body as UTF-8 text, refusing it once more than `maxBytes` have arrived. The count
+ * is kept while streaming, so a missing (chunked) or understated `Content-Length` can't make the
+ * Worker buffer more than `maxBytes`. A malformed or negative `Content-Length` is refused outright.
+ * The body is consumed here: read it once per request.
+ */
+export async function readBodyText(request: Request, maxBytes: number): Promise<AppResult<string>> {
+  const header = request.headers.get("Content-Length");
+  if (header !== null) {
+    if (!/^\s*\d{1,15}\s*$/.test(header)) {
+      return err(apiError("validation_failed", "The Content-Length header is not valid."));
+    }
+    if (Number(header) > maxBytes) return err(TOO_LARGE);
+  }
+  if (!request.body) return ok("");
+  // Request bodies are byte streams; the Workers types declare the reader loosely.
+  const reader = (request.body as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return err(TOO_LARGE);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return ok(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+  } catch {
+    return err(apiError("validation_failed", "The request body is not valid UTF-8."));
+  }
+}
+
 /**
  * Reads and validates a JSON request body against a Zod schema from `packages/shared` (AGENTS §4.1).
- * Bodies larger than `maxBytes` are refused with `payload_too_large` before parsing.
+ * The size is bounded while streaming (`readBodyText`), before anything is parsed.
  */
 export async function readJson<S extends z.ZodType>(
   c: AppContext,
   schema: S,
   maxBytes = DEFAULT_MAX_JSON_BYTES,
 ): Promise<AppResult<z.infer<S>>> {
-  const declared = Number(c.req.header("Content-Length") ?? "0");
-  if (declared > maxBytes) return err(apiError("payload_too_large", "The request body is too large."));
-  const text = await c.req.text();
-  if (new TextEncoder().encode(text).byteLength > maxBytes) {
-    return err(apiError("payload_too_large", "The request body is too large."));
-  }
+  const text = await readBodyText(c.req.raw, maxBytes);
+  if (!text.ok) return text;
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(text.value);
   } catch {
     return err(apiError("validation_failed", "The request body is not valid JSON."));
   }

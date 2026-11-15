@@ -1,4 +1,9 @@
-import { apiError } from "@officebox/shared";
+import {
+  API_CONTENT_SECURITY_POLICY,
+  apiError,
+  APP_CONTENT_SECURITY_POLICY,
+  COMMON_SECURITY_HEADERS,
+} from "@officebox/shared";
 import { Hono } from "hono";
 import type { AppEnv } from "./context";
 import { errorResponse, INTERNAL_ERROR } from "./errors";
@@ -17,6 +22,12 @@ import { createLogger, rootLogger, type LogSink } from "./log";
  *   becomes a 500 with the request ID and is logged with its stack.
  * - **Features** are Hono routers mounted under `/api/<name>` (see `defineFeature`).
  * - Unknown `/api` paths get a typed 404; everything else falls through to the web app in Assets.
+ * - **Security headers** (TDD §8.2) on every response the Worker produces: HSTS, `nosniff`, the
+ *   referrer policy, and a CSP: `default-src 'none'; frame-ancestors 'none'` for API responses, the
+ *   app CSP for assets. Assets answered without running the Worker get the same headers from
+ *   `apps/web/public/_headers`; both come from `packages/shared/src/security.ts`.
+ * - `X-Request-Id` is set on every response the Worker produces, including assets it fetches on the
+ *   fall-through route; assets that Workers Assets serves before the Worker runs have none.
  */
 
 export interface Feature {
@@ -52,8 +63,11 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     c.set("startedAt", startedAt);
     c.set("log", log);
     await next();
-    c.header("X-Request-Id", requestId);
     const path = new URL(c.req.url).pathname;
+    c.header("X-Request-Id", requestId);
+    for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) c.header(name, value);
+    const isApi = path === "/api" || path.startsWith("/api/") || path === "/health";
+    c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
     // Assets fall-through and health probes are noisy and carry nothing worth keeping.
     if (path.startsWith("/api/") || path === "/api") {
       log.info("request", {
@@ -83,7 +97,11 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   // Static files and SPA navigations are served by Workers Assets before the Worker runs. Requests that
   // reach the Worker anyway (for example a non-navigation request for a missing file) go back to Assets,
   // which applies the SPA fallback.
-  app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+  // The response is copied so its headers are mutable for the middleware above.
+  app.all("*", async (c) => {
+    const res = await c.env.ASSETS.fetch(c.req.raw);
+    return new Response(res.body, res);
+  });
 
   app.onError((error, c) => {
     c.var.log.error("unhandled error", { error, method: c.req.method, route: c.req.routePath });
