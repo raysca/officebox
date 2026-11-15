@@ -1,9 +1,9 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026)
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
-**Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Platform](platform.md)
+**Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Platform](platform.md)
 
 Decisions marked **(default)** were not discussed; change them on review.
 
@@ -74,6 +74,8 @@ It replaces TDD §2.1's "stop at first match" resolution with a **union** rule.
 
 A grant names a **user**, a **group** (meaning its current members) or a **channel** (meaning its current members). Group and channel principals are re-evaluated on every check, so joining or leaving changes access immediately.
 
+**The assistant is never a principal.** It's a **system actor** with no access of its own, and nothing can be granted to it. It always acts **as** the member asking, with that member's current access, or **for** an audience, with only what the whole audience can open (§8, [Assistant](assistant.md) §1, §6). Its reserved sender (`sender_id = 'assistant'`) is not a user for permission purposes.
+
 ## 4. Permission matrix
 
 Legend: ✓ allowed · — not allowed · *(cond.)* allowed under the stated condition. "Member" means any active workspace member who has no other role on the object.
@@ -98,6 +100,8 @@ Legend: ✓ allowed · — not allowed · *(cond.)* allowed under the stated con
 | Start or join a channel call | ✓ | ✓ (joins the call, not the channel) | ✓ | ✓ | ✓ | ✓ | Public ✓; **private —** |
 
 **DMs and group DMs:** only participants can see, read, post, react or call. Nobody else, including admins, can see the content or add people. Group DMs have fixed membership: adding someone starts a new group DM. Admins can see that a DM exists only in the export and in storage figures, never the participants' messages.
+
+**Assistant writes into DMs and group DMs:** when a member confirms an assistant write there (for example `post_message`), the audit entry records only the **object type**, not the conversation ID ([Assistant](assistant.md) §5.1).
 
 ### 4.2 Message-level objects
 
@@ -279,10 +283,17 @@ effective role(user, item) = max(
   - an audit entry is written.
 - Using a recovery link also signs out all the person's existing sessions (Identity §4.6).
 
-**Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents through Officebox. Three things are stated plainly:
+**Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents through Officebox. These things are stated plainly:
 - **Recovery links.** An admin could sign in as an ordinary **member** by issuing them a recovery link. Officebox emails the member (if email is configured), shows a notice on their sign-in page, flags it to every owner when email isn't configured, and audits it. The member may only find out at their next sign-in, so this is visible, not prevented.
 - **Deleted members' files.** Deleting a member hands their private My files to an admin, who can then read them (platform §3 Member lifecycle).
 - **Groups.** An admin can't add themselves to a group or grant themselves group-drive access without an owner, because that would expose everything shared with the group.
+- **Assistant** ([Assistant](assistant.md) §1, §9, §11):
+  - **Scope.** The assistant's privacy guarantee holds **within Officebox**. Anyone with direct access to the Cloudflare account (for example Durable Object storage) is outside Officebox's control.
+  - **Model provider.** Prompts and audio go to the configured model provider: Workers AI by default, or a BYOK provider an owner chooses.
+  - **Logging.** Officebox turns off AI Gateway request logging and caching for assistant calls.
+  - **Other members' data in memory.** A member's assistant memory may hold things they said about other people. Those stay until the member deletes them or retention expires, even if the other person's account is deleted.
+  - **What is indexed.** While the assistant is enabled, only content that **at least one member with assistant access can read** is indexed **(default)**. With `assistant_access = everyone`, that's all content.
+  - **Admins see metadata only:** who used the assistant, when, and which objects were touched, never prompts, replies or memory.
 
 The Cloudflare account owner has direct technical access to all stored data (PRD §10.1).
 
@@ -327,9 +338,10 @@ These screens apply everywhere an object can be referenced: links, embeds, forwa
 |---|---|
 | HTTP routes | Every route that reads or writes user content calls the engine. No ad-hoc checks (AGENTS §4.1). |
 | WebSocket upgrades | The Worker resolves the role before forwarding (TDD §3.1). The DO stores it in the socket attachment. |
-| Revocation | Total loss of access is `updateAccess(userId, null)`: sockets close with `4403` through the UserHub room registry (TDD §3.5). Disabling a member closes everything with `4401`. The registry covers ChatChannel, DocRoom, BoardRoom **and HuddleRoom**, and is persisted (platform §12). |
+| Revocation | Total loss of access is `updateAccess(userId, null)`: sockets close with `4403` through the UserHub room registry (TDD §3.5). Disabling a member closes everything with `4401`. The registry covers ChatChannel, DocRoom, BoardRoom, HuddleRoom **and the Assistant DO** (kind `assistant`: losing assistant access closes with `4403`), and is persisted (platform §12). |
 | **Access change on open sockets** | When a person's effective role on an open document, whiteboard, channel or call context changes (for example editor → viewer, or they leave a group), the Worker calls **`updateAccess(userId, role | null)`** on the affected DOs through the room registry. The DO updates the attachment and sends **`{ type: "access.changed", role }`**. A DocRoom then rejects that socket's updates (read-only) and the client switches to view mode without reconnecting. When `role` is **null** (all access lost), the DO closes the socket with **4403**. This is the only name for the mechanism (platform §12, TDD §3.5). |
 | Search, previews, embeds, forwards, notifications, AI | Filtered through the engine at read time (TDD §2.4, §5.3) |
+| **AI assistant** ([Assistant](assistant.md) §4, §5, §6) | **Private surfaces** (assistant DM, Talk, live voice, proactive): every tool runs **as the member** through the engine, with their current access; confirmed writes re-check permission. **Mentions in shared conversations** use the **audience rule**: only sources the **whole audience** can open (public channel: public-channel messages, this conversation's files and `workspace_view` objects; private channel: plus objects shared with the channel; DMs, group DMs and private channels of 8 or fewer: plus objects the engine confirms **each** member can open **(default)**), re-checked when the reply is posted. **Personal memory is isolated:** it lives only in the member's own Assistant DO, addressed only by the authenticated member's ID, never used to answer anyone else, and not readable by admins. Cited sources are re-checked on every recall; lost access hides them immediately. |
 | Offline edits | Queued offline edits are rejected if the role no longer allows editing when they reach the server. The client keeps them locally and offers "Copy your changes" **(default)**. |
 
 ## 9. Data model

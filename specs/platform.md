@@ -1,9 +1,9 @@
 # Spec: Platform Rules
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Revised after second independent review (14 Nov 2026)
+**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
 **Feature name:** Platform Rules (cross-cutting; not a user-facing feature)
-**Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md)
+**Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md)
 
 Decisions marked **(default)** were not discussed; change them on review. Where a feature spec and this spec disagree on a cross-cutting rule, **this spec wins** and the feature spec is fixed.
 
@@ -50,12 +50,13 @@ The rules every feature follows, so features behave consistently and no data is 
 |---|---|---|
 | **Identity** | Sign-in refused. `session_epoch` bumped. All sockets closed with `4401`, including chat, documents, hub **and calls** (room registry kind `huddle`, so the member drops out of calls immediately: the HuddleRoom socket closes and their SFU tracks are closed). Anyone who **loses access to a call's context** (removed from the channel, document or event) is removed the same way, but with close code **`4403`**. Revocation uses the durable room registry plus the Worker-side fallback (§12). Shown under **Deactivated** in the directory. Handle kept. | Everything for *disabled*, then the [erase list](#31-personal-data-erase-list) runs. Handle released (held 30 days). Shown as "Former member". |
 | **Chat** | DMs and group DMs are kept and marked **"deactivated"**. Sending to them is disabled **(default)**. Excluded from mention autocomplete and from `@here`. `@channel` and `@group` no longer notify them. Offline emails stop. If they were the **last channel admin**, the longest-standing remaining member is promoted (audited). | Messages stay, attributed to "Former member". Their `thread_follows`, `saved_items` and `sidebar_prefs` are erased. `@handle` text in plain-text copies and the search index is re-rendered as **"Former member"** **(default)**. |
-| **Calls** | Removed from any active call (above). Rings to them are **refused** ("*Name* is deactivated"). They can't host. Moderation of a call they hosted passes as set out in [Calls](calls.md) §6.7 (a present moderator; otherwise any participant in DM calls; otherwise the earliest remaining participant). | As disabled. Huddle participant rows show "Former member". |
+| **Calls** | Removed from any active call (above). Rings to them are **refused** ("*Name* is deactivated"). They can't host. Moderation of a call they hosted passes as set out in [Calls](calls.md) §6.7 (a present moderator; otherwise any participant in DM calls; otherwise the earliest remaining participant). | As disabled. Huddle participant rows, `call_notes.started_by` and transcript speakers (`call_transcript_segments.speaker_id`) show "Former member", like messages. Call notes and mention replies they triggered stay. |
 | **Calendar** | They **stay organiser** of their events **(default)**. An owner or admin can delete a **private** event they organised without seeing its details. Their reminders and emails stop. Invitations to them are refused. Hidden from find-a-time. **ICS-out feed tokens are revoked.** ICS-in refreshes pause. | **Events on their personal calendar:** an event with other attendees moves to the **first remaining attendee's** personal calendar (earliest to accept, otherwise earliest invited), and that attendee becomes organiser **(default)**. An event with no other attendees is deleted. **Events they organised on shared calendars:** the organiser becomes the first remaining editor of that calendar, or the calendar owner **(default)**. Private events among these can also be deleted by an owner or admin without seeing details. Standalone calendars they owned are **transferred to an admin**. ICS-in subscriptions and ICS-out feeds are **revoked**. `time_off` is **erased** (it holds sensitive types). `event_notes` and `event_reminders` are deleted. Attendee rows show "Former member". |
 | **Documents and files** | They **keep ownership** (PRD §6). Shares stay. Pending access requests to them are re-routed to other editors or managers. | **My files** (documents, whiteboards, files, folders) is **transferred to an admin**, who can then read it. This is stated in the privacy statement ([Permissions](permissions.md) §6). So is ownership of individual items elsewhere. Drives they managed get an admin as manager if none remains. `stars`, `recent_items` and `access_requests` are erased. Comments stay as "Former member". |
 | **Notifications** | No new inbox items, emails or rings. Pending delayed emails are dropped when they fire. | `inbox_items`, `notification_preferences`, `user_preferences`, `pending_emails` and `notify_anyway_log` rows are erased. |
 | **Search** | Their content stays searchable. Hidden from people search **(default)**. | Content stays (attributed to "Former member"). Removed from people search. `@handle` occurrences re-rendered (Chat row). |
 | **Presence** | Removed from WorkspacePresence immediately. | Same. |
+| **Assistant** | Assistant DO kept but unreachable. `/ws/assistant` sockets close with `4401`. Proactive triggers, personal reminders and proactive opt-ins are suspended. Queued mention, nudge and proactive requests for them are **dropped** at their status check. **Purges (`assistant-purge`), vector deletes and the DO's `retention_sweep` keep running**, because they're housekeeping, not requests. Re-enabling runs the **reconcile pass** before the DO serves requests ([Assistant](assistant.md) §4.4, §13). | The member's **Assistant DO storage is deleted** (all tables), and their proactive triggers removed ([erase list](#31-personal-data-erase-list)). Every Worker path checks the member's status in D1 before addressing an Assistant DO, so queue consumers and alarms never recreate it. |
 
 ### 3.1 Personal-data erase list
 
@@ -74,6 +75,8 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | Documents | `stars`, `recent_items`, `access_requests` (as requester) |
 | Notifications | `inbox_items`, `pending_emails`, `notify_anyway_log`, **`user_availability`** |
 | Membership | `group_members`, `channel_members` (channel history stays) |
+| Assistant | **Assistant DO storage** (all tables), `assistant_interactions`, `assistant_optins`, `assistant_source_refs`, `personal_reminders`, and their `assistant_brief`, `assistant_prep` and `personal_reminder` triggers ([Assistant](assistant.md) §13) |
+| Calls | Nothing erased: `call_notes.started_by` and `call_transcript_segments.speaker_id` keep the user ID and show "Former member", like messages |
 
 `ON DELETE CASCADE` on `users` never fires, because user rows are anonymised, not deleted. The purge job must delete each table explicitly.
 
@@ -91,10 +94,11 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | | Thread follows, sidebar sections, saved items | Kept |
 | **Channel → delete (Trash)** | Everything above | Hidden from everyone. Restorable by the person who deleted it or an admin. |
 | **Channel → purge** | Messages, polls and votes, pins, link previews (per-message mapping) | Deleted (channel DO `deleteAll()`) |
-| | Message-owned files | Deleted (R2) |
+| | Message-owned files | Deleted (R2), with their `file_derived_text` and vectors |
 | | Channel folder: documents, whiteboards, saved copies | **Moved to each creator's My files** (or an admin's if the creator is gone or deleted). Explicit grants kept. Channel-principal grants removed. Then the empty folder is deleted. |
 | | Channel calendar | Purged. Each event **moves to its organiser's personal calendar**; events whose organiser is deleted are deleted, with `event_cancel` to attendees. |
 | | Huddle records | `context_id` kept as a tombstone reference. In-call chat was a thread, so it's purged with the messages. |
+| | Call notes and transcripts (`call_notes`, `call_transcript_segments`) | Deleted, with their vectors ([Assistant](assistant.md) §12.3) |
 | | Saved items, thread follows, inbox items referencing it | Deleted |
 | | Sidebar sections | The conversation ID is removed from `sidebar_prefs.sections` |
 | | Grants where the channel is the principal | Deleted (audited) |
@@ -109,14 +113,20 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 | **Event → delete** | Single event or whole series | To Trash. Cancellations sent to members and external attendees. Reminders and triggers removed. |
 | | One occurrence / "this and following" | Exception (`cancelled`) or series split. No Trash for single occurrences. |
 | | Event call | An active call continues until empty. In-call chat stays with the event while it's in Trash, then is purged with it. |
+| | Call notes and transcripts | Follow the event: they stay with it while it's in Trash, then are deleted, with their vectors, when it's purged (Assistant §12.3) |
 | **Drive → delete** | Folders and items | To Trash as one unit. Restorable by a drive manager, the person who deleted it, or an admin. Items previously trashed individually keep their own purge date. |
 | **Folder → delete** | Sub-folders and items | To Trash as one unit. Restorable per the canonical rule (§5). |
-| **Document / whiteboard → delete** | Comments, versions, recovery snapshots in R2, **document-owned files** (pasted images, file cards) | To Trash with the item, then purged |
+| **Document / whiteboard → delete** | Comments, versions, recovery snapshots in R2, **document-owned files** (pasted images, file cards), **call notes and transcripts** of its calls (with their vectors) | To Trash with the item, then purged |
 | | Embeds of it elsewhere | Show "This *whiteboard* was deleted" |
 | | Search text and stars, recents and access requests | Removed from search immediately; the rest purged |
-| **File → delete** | All versions | To Trash. Purge deletes every version's R2 object. |
+| **File → delete** | All versions | To Trash, which removes the file's derived text from retrieval (restore re-indexes it). Purge deletes every version's R2 object, its `file_derived_text` rows and their vectors ([Assistant](assistant.md) §9). |
 | **Comment thread → delete** | Comments | Deleted immediately (no Trash) by the author (own comments) or the document owner, editors or admins (moderation, audited) |
 | **User → delete** | See §3 | |
+
+**Assistant purge fan-out.** Every pipeline that deletes content also purges copies derived from it in members' assistant memory ([Assistant](assistant.md) §4.4):
+- **Which pipelines:** a message deleted or a channel purged; a document or whiteboard purged; a file version dropped or purged; an event deleted; call notes or transcripts purged, by retention or by a context cascade. Editing a message doesn't purge **(default)**.
+- **How:** the pipeline looks up `assistant_source_refs` and enqueues one **`assistant-purge`** job per affected member. The job skips only **deleted** members; it runs for disabled members, members without assistant access and while the assistant is off.
+- **Vectors:** vector deletes and index invalidations always run, even while the assistant is off (Assistant §9).
 
 ## 5. Retention, Trash and purge
 
@@ -132,7 +142,7 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | Drives | Until deleted | 30 days | Canonical rule (below) |
 | Folders | Until deleted | 30 days | Canonical rule (below) |
 | Comments | Life of the document | No (moderated deletes are immediate) | — |
-| File versions | With their file. Purged when the file is purged, or when a version beyond the 100-version limit is dropped (oldest first) **(default)**. | With the file | As the file |
+| File versions | With their file. Purged when the file is purged, or when a version beyond the 100-version limit is dropped (oldest first) **(default)**. A dropped version's `file_derived_text` and vectors go with it. | With the file | As the file |
 | Polls and votes | Life of the channel; votes stored as per-poll hashed keys | With the channel | Admin (via channel) |
 | Saved items | Until removed, or until the member loses access or the message is deleted | No | — |
 | Huddle metadata (`huddles`, `huddle_participants`) | 365 days | No | — |
@@ -144,6 +154,13 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | `ws_tickets` | Deleted daily after expiry | No | — |
 | `auth_tokens` | Deleted 7 days after use or expiry | No | — |
 | `pending_emails` | Deleted when sent or cancelled | No | — |
+| **Assistant conversations and memory** (Assistant DO) | `assistant_memory_retention_days` (365 **(default)**), or shorter if the member chose; applied by the DO's daily `retention_sweep`, which keeps running while the assistant is off. **Incognito** conversations: deleted at End or 24 hours after last activity **(default)**. Content whose source the member lost access to: deleted after 7 days hidden **(default)**. Undecided pending items: 30 days **(default)**. Finished, cancelled and expired pending actions: 24 hours ([Assistant](assistant.md) §4, §5.1, §13). | No | — |
+| `assistant_interactions` (metadata) | `assistant_interaction_retention_days` (30, PRD §10.2) | No | — |
+| `assistant_source_refs` | Until the referencing memory is deleted | No | — |
+| Personal reminders (`personal_reminders`) | Deleted 30 days after done or dismissed **(default)** | No | — |
+| **Call notes** (`call_notes`) | **Life of the context.** Keyed to the context (`context_type`, `context_id`) and **must not cascade** from `huddles`. | With the context | As the context |
+| **Call transcripts** (`call_transcript_segments`) and their vectors | `call_transcript_retention_days` (90 **(default)**), then purged by the daily purge job; earlier if the context is purged | With the context | As the context |
+| `file_derived_text` and its vectors | Per file version, following the file: Trash removes it from retrieval, restore re-indexes it, purge deletes it. An owner can delete the whole assistant index (audited) **(default)**. | With the file | As the file |
 
 **Who can restore from Trash (canonical rule):** the item's **owner**, the **person who deleted it**, **drive managers** of its drive, and **admins**. Feature specs use this rule unchanged.
 
@@ -171,16 +188,22 @@ This extends TDD §7.5.
 | Saved items, stars, sidebar prefs, user and notification preferences | |
 | In-call chat | From `huddle_messages` (document and event calls) **and** from channel threads (channel and DM calls, part of channel export) |
 | Huddle metadata, call rings | Within retention |
+| `assistant_interactions` | Metadata only, within retention ([Assistant](assistant.md) §13) |
+| Call notes and transcripts | Within retention |
 
 | Excluded | Reason |
 |---|---|
 | `sessions`, `auth_tokens`, `ws_tickets` | Credentials |
 | `pending_emails`, `notify_anyway_log`, `scheduled_triggers` | Transient operational state, rebuilt after restore |
+| `assistant_optins`, `assistant_source_refs` | Assistant operational state: opt-ins are re-chosen after a restore, and the source mirror is rebuilt from the members' Assistant DOs, which aren't restored either ([Assistant](assistant.md) §13) **(default)** |
 | `passkeys` | Bound to the domain (WebAuthn relying-party ID). Members **re-register** after restoring to a new domain. Owners can sign in with their required password (§2). |
 | `mfa_factors` | Encrypted with an installation key |
 | `ics_feeds` tokens | Credentials. Members create new feed URLs after a restore. |
 | ICS-in URLs | Secrets. Subscriptions are exported **without URLs** and need re-entry after a restore **(default)**. |
 | `search_index` | Rebuilt on restore (TDD §2.4) |
+| `file_derived_text`, assistant vectors | Rebuilt by back-fill, like `search_index` ([Assistant](assistant.md) §9) |
+| Assistant conversations and memory (Assistant DO) | Admins can't read them (Assistant §11). Members use the personal export ("Download my assistant data") **(default)**. Not part of a workspace restore. |
+| `personal_reminders` | Often come from private conversations. Personal export only **(default)** (Assistant §7.1). |
 | Setup, recovery and Worker secrets | Never exported. Password hashes are exported but are only usable with the same `PEPPER_*` secrets (§16), which the restore guide tells owners to carry over. |
 
 ## 7. Admin settings
@@ -212,8 +235,28 @@ The single list of workspace settings. Feature specs reference this table instea
 | `upload_max_bytes` | 2 GB | Admin | `settings.upload_limit` | TDD §8.3 |
 | `blocked_file_extensions` | empty | Admin | `settings.file_types` | TDD §8.3 |
 | `retention_policies` | none (Phase 2) | **Owner** | `settings.retention` | PRD §10.2 |
+| `assistant_enabled` | off **(default)** | Admin | `settings.assistant_enabled` | Assistant §10.1 |
+| `assistant_access` | `everyone` **(default)** (`everyone` or a list of group IDs). Removing a member's access closes their `/ws/assistant` sockets (`4403`) and suspends their proactive triggers. | Admin | `settings.assistant_access` | Assistant §10.1 |
+| `assistant_display_name` | `Butler` (1–32 characters) | Admin | `settings.assistant_name` | Assistant §10.1 |
+| `assistant_avatar_key` | built-in icon | Admin | `settings.assistant_avatar` | Assistant §10.1 |
+| `assistant_models` | Per role (`chat`, `summaries`, `stt`, `tts`, `vision`): `{ provider, model }`, Workers AI for every role **(default)**. Switching a role to BYOK requires the owner to acknowledge that content will go to that provider. | **Owner** | `settings.assistant_models` | Assistant §10.1 |
+| `assistant_gateway_id` | none; set during post-deploy setup | **Owner** | `settings.assistant_gateway` | Assistant §10.1, §11 |
+| `assistant_monthly_budget` | none (warn-only thresholds at 50/80/100 % once set) | **Owner** | `settings.assistant_budget` | Assistant §10.1, §10.2 |
+| `assistant_daily_caps` | per member per day: 200 requests, 30 voice minutes, 20 image/audio file reads **(default)** | Admin | `settings.assistant_caps` | Assistant §10.1, §8 here |
+| `assistant_call_notes_monthly_minutes` | 3,000 per workspace **(default)** | Admin | `settings.assistant_call_notes_cap` | Assistant §10.1, §8 here |
+| `assistant_memory_retention_days` | 365 **(default)** (30–730 **(default)**); members can shorten it for themselves | **Owner** | `settings.assistant_retention` | Assistant §4.3, §10.1 |
+| `assistant_interaction_retention_days` | 30 (PRD §10.2) (7–365 **(default)**) | **Owner** | `settings.assistant_interaction_retention` | Assistant §10.1 |
+| `assistant_mentions` | on **(default)** | Admin | `settings.assistant_mentions` | Assistant §6, §10.1 |
+| `assistant_proactive` | `{ brief: on, prep: on, nudges: on }` **(default)**; members still opt in | Admin | `settings.assistant_proactive` | Assistant §8, §10.1 |
+| `assistant_call_notes` | on **(default)** | Admin | `settings.assistant_call_notes` | Assistant §12.3 |
+| `call_captions` | on **(default)** | Admin | `settings.call_captions` | Assistant §12.4 |
+| `call_transcript_retention_days` | 90 **(default)** | **Owner** | `settings.call_transcript_retention` | Assistant §12.3 |
+| `assistant_live_voice` | on **(default)** | Admin | `settings.assistant_live_voice` | Assistant §12.2 |
+| `assistant_file_media` | on **(default)** (image and audio reading) | Admin | `settings.assistant_file_media` | Assistant §9 |
 
 Every change writes the audit event with old and new values (values that are personal data, such as email addresses, are stored hashed). Settings are read and written through `GET` / `PATCH /admin/settings` (§15). Settings are cached per Worker isolate for at most 30 seconds **(default)**. Durable Objects that enforce a setting (for example ChatChannel for `general_read_only`) receive it through their config RPC.
+
+**Turning `assistant_enabled` off** hides every assistant surface, stops proactive timers and new indexing, and refuses requests. It **keeps** members' memory **(default)**, and leaves purges, vector invalidations and retention sweeps running. Turning it back on runs the reconcile pass (Assistant §4.4, §10.1).
 
 ## 8. Rate limits and quotas
 
@@ -244,6 +287,13 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Link-preview fetches | 60 per minute per workspace; 3 per message | binding (workspace key) + request check | §9 |
 | ICS-in fetches | 1 per subscription per hour; 50 subscriptions per workspace | Cron schedule + D1 count | §9 |
 | General API requests | 300 per minute per session **(default)** | binding | — |
+| Assistant requests (DM, talk, mentions, brief and prep) | `assistant_daily_caps.requests` per member per day (setting). Background work (summaries, extraction, indexing, nudge classification) doesn't count against member caps but is counted in usage **(default)**. | D1 counter (`assistant_requests`) | Assistant §10.2 |
+| Assistant voice (push-to-talk, live) | `assistant_daily_caps.voice_minutes` per member per day, charged per second (setting) | D1 counter (`assistant_voice`) | Assistant §10.2 |
+| Assistant image and audio file reads | `assistant_daily_caps.media_reads` per member per day (setting) | D1 counter (`assistant_media`) | Assistant §10.2 |
+| Call notes and captions | `assistant_call_notes_monthly_minutes` per workspace (setting), in call minutes: wall-clock time while notes or anyone's captions are on, not per track **(default)** | D1 counter (`assistant_call_notes`) | Assistant §10.2 |
+| Assistant burst | 10 requests per 60 seconds per member **(default)** | binding | Assistant §10.2 |
+| Assistant mentions | 5 per 60 seconds per conversation **(default)** | DO (ChatChannel) | Assistant §10.2 |
+| Live voice session | 30 minutes per session **(default)**; one at a time per member | DO (Assistant) | Assistant §10.2 |
 
 **Structural limits** (enforced at write time, validated with Zod and checked in the service):
 
@@ -264,6 +314,9 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Reactions per message | 50 distinct emoji **(default)** |
 | Poll options | 2–10 **(default)** |
 | Channel topic / description | 250 / 1,000 characters **(default)** |
+| Call notetakers | 1 per call; not counted toward the 25 participants (Assistant §12.3) |
+| Push-to-talk clip | 2 minutes **(default)** (Assistant §12.1) |
+| Assistant file reading | Documents up to 50 MB or 500 pages; audio up to 2 hours; images up to 20 MB **(default)** (Assistant §9) |
 
 ## 9. Outbound fetching
 
@@ -316,6 +369,9 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 | Focus-time DND start and end | ReminderScheduler | Kinds `focus_start` / `focus_end`, one pair per occurrence; write `user_availability.focus_until` and call UserHub `refreshAvailability()` (Notifications §5.7) |
 | Time-off status start and end | ReminderScheduler | Kinds `time_off_start` / `time_off_end`; write `user_availability.away_until` and call UserHub `refreshAvailability()` |
 | Status expiry | ReminderScheduler | Kind `status_expire` |
+| Assistant daily brief | ReminderScheduler | Kind `assistant_brief`, per opted-in member at the start of their working hours on working days; enqueues to `assistant-proactive` ([Assistant](assistant.md) §8) |
+| Assistant meeting prep | ReminderScheduler | Kind `assistant_prep`, 30 minutes **(default)** before a qualifying event the opted-in member attends; enqueues to `assistant-proactive` (Assistant §8) |
+| Personal reminders | ReminderScheduler | Kind `personal_reminder`; raises the `personal_reminder` inbox item (Assistant §7.1) |
 | DND schedule (weekly quiet hours) | ReminderScheduler | Kinds `dnd_start` / `dnd_end`, expanded from the member's schedule, refilled hourly; each calls UserHub `refreshAvailability()` |
 | Manual DND expiry | ReminderScheduler | Kind **`dnd_until_end`**, created when a member sets DND "for 1 hour", "until tomorrow" and so on; calls UserHub `refreshAvailability()` |
 | Holds longer than 24 hours (e.g. an email held for a long time off) | ReminderScheduler | Kind `email_release`, instead of a queue delay |
@@ -327,10 +383,13 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 | Huddle end (30 s after empty) | HuddleRoom DO | Alarm timer `end_at` |
 | Screen hand-over deadline (5 s) | HuddleRoom DO | Alarm timer `handover_deadline` |
 | Ring timeout (30 s) | UserHub DO (caller's) | Alarm timer `ring:<huddleId>`; ring state stored in UserHub SQLite (§12) |
+| Call notes idle stop | HuddleRoom DO | Alarm timer `notes_idle`: stops notes when no human participants remain (Assistant §12.3) |
+| Call notes finalising | HuddleRoom DO | Alarm timer `notes_finalize`: writes the notes after the call ends or after a crash (Assistant §12.3) |
+| Assistant memory housekeeping | Assistant DO (per member) | Alarm multiplexer timers `retention_sweep` (daily; also hidden refs after 7 days, pending items after 30 days, finished actions after 24 hours, and the D1 mirror reconcile), `conversation_close:<id>`, `incognito_expire:<id>`, `pending_expire` (Assistant §14.1) |
 | ICS-in refresh | Hourly cron | Queue a fetch per due subscription |
 | Snooze wake-ups | 5-minute cron | TDD §7.8 |
 | Room-registry sweep | Daily cron | §12 |
-| Purge, retention, reconciliation, version thinning, release check | Daily cron | TDD §7.8 |
+| Purge, retention, reconciliation, version thinning, release check | Daily cron | TDD §7.8. The purge job also deletes expired `assistant_interactions`, `call_transcript_segments` past retention (and their vectors), `file_derived_text` for purged versions, and finished `personal_reminders` (Assistant §14.3). |
 | Scheduled-trigger refill | Hourly cron | Below |
 
 **Offline unread email:**
@@ -362,7 +421,8 @@ CREATE TABLE scheduled_triggers (            -- in the ReminderScheduler DO's SQ
   id TEXT PRIMARY KEY,                        -- idempotency key, e.g. "reminder:<event>:<occurrence>:<user>:<minutes>"
   fire_at INTEGER NOT NULL,                   -- UTC ms
   kind TEXT NOT NULL,                         -- reminder | event_start | focus_start | focus_end | time_off_start | time_off_end
-                                              -- | status_expire | dnd_start | dnd_end | dnd_until_end | email_release (Zod-validated)
+                                              -- | status_expire | dnd_start | dnd_end | dnd_until_end | email_release
+                                              -- | assistant_brief | assistant_prep | personal_reminder (Zod-validated)
   target TEXT NOT NULL,                       -- JSON: { eventId, occurrence, userId, ... }
   fired_at INTEGER
 );
@@ -381,6 +441,7 @@ CREATE TABLE trigger_outbox (                 -- effects waiting to be delivered
   - An **hourly refill** job extends the window and repairs drift.
 - **Alarm:** one alarm, always set to the earliest of the next unfired `fire_at` and the next outbox retry.
 - **Firing (outbox pattern):** in **one DO transaction**, the trigger is marked `fired_at` and a `trigger_outbox` row is written. The alarm then drains the outbox to the notification queue, deleting a row only after the send succeeds and retrying with backoff otherwise. The consumer is **idempotent on the trigger ID**, so a redelivered effect has no second result.
+- **Assistant triggers** (`assistant_brief`, `assistant_prep`, `personal_reminder`) are suspended while the member is disabled; proactive triggers also while they lack assistant access, or the assistant or that proactive feature is off. They're deleted with the member (§3.1).
 - **Catch-up after downtime:** overdue triggers **less than 1 hour late** fire immediately. Older ones are dropped (marked fired, with a log entry, no outbox row) **(default)**.
 - **Load:** a 100-member workspace stays in the low thousands of rows for 48 hours. If one object becomes hot, shard by `hash(userId) % N` **(default N = 1)**.
 
@@ -395,6 +456,7 @@ This replaces TDD §3.5's "at most three WebSockets per tab".
 | Document or whiteboard (DocRoom / BoardRoom) | The item on screen |
 | Call (HuddleRoom) | While in a call |
 | Embedded whiteboard | **Only while "edit in place" is active** |
+| Assistant (Assistant DO, `/ws/assistant`) | **Only while an assistant surface is on screen** ([Assistant](assistant.md) §3, §15) |
 
 - **Other embeds** (messages, events, document previews, link previews) **don't open sockets**. They refresh through hub `activity` events for objects the viewer has open.
 - **Hard cap: 6 sockets per tab** **(default)**. Opening another closes the least recently used embedded-board socket first.
@@ -405,10 +467,10 @@ This replaces TDD §3.5's "at most three WebSockets per tab".
 - **Offline edits after losing access:** on reconnect the server rejects updates from a connection without edit rights. The client keeps the unsynced changes in a local copy the user can **export as Markdown**, and shows "You no longer have edit access — your offline changes were not saved" **(default)**.
 
 **Durable room registry (revocation):**
-- Each member's UserHub keeps a **room registry in its SQLite storage**, keyed by `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board` and `huddle`.
+- Each member's UserHub keeps a **room registry in its SQLite storage**, keyed by `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board`, `huddle` and `assistant`. `assistant` sockets close with `4401` when the member is disabled and `4403` when they lose assistant access (Assistant §14.1).
 - A room DO **registers** a connection when it accepts the socket and **unregisters** it when the socket closes (the DO calls the hub). Heartbeats refresh `last_seen_at`.
 - Entries are **never pruned by age while the socket lives.** A **daily sweep** asks each room whether the connection still exists, and removes entries the room doesn't recognise.
-- **Worker-side fallback:** revocation doesn't rely on the registry alone. The Worker also **recomputes the affected rooms from D1** (channel memberships, grants on documents and boards, active call contexts from `huddles`) and calls `closeConnections(userId)` on each directly. Revocation is complete when both paths have run.
+- **Worker-side fallback:** revocation doesn't rely on the registry alone. The Worker also **recomputes the affected rooms from D1** (channel memberships, grants on documents and boards, active call contexts from `huddles`, and the member's own Assistant DO) and calls `closeConnections(userId)` on each directly. Revocation is complete when both paths have run.
 
 **Durable UserHub state:** the hub stores **live ring state**, **`currentCall`** (one call at a time), the **held-notification flag and summary** (DND), the room registry and derived availability in its **SQLite storage**, never only in memory, so hibernation or eviction loses nothing.
 
@@ -458,7 +520,8 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `channels.type` | Add value | `public`, `private`, `dm`, **`group_dm`**. `dm_key` is required for `dm` and `group_dm`. Converting a group DM to a private channel clears `dm_key` and sets a name. | Chat §3.1 |
 | `channels` | Add | `topic`, `description`, `posting_policy`, **`config_version`** (`INTEGER NOT NULL DEFAULT 0`, bumped on every change pushed by `applyConfig`) | Chat §3.4, §15 |
 | `channel_members` | Add | `can_post`, `hidden` (no per-conversation email delay; the delay lives only in `user_preferences.email_delay`, Notifications §7) | Chat §15 |
-| `messages` (D1 copy) | Add | `kind` (`user`, **`call_chat`**, or a system kind, Chat §4.6), `format` (rich-text JSON; the existing `body` column holds the plain-text copy, `text`), `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15 |
+| `messages` (D1 copy) | Add | `kind` (`user`, **`call_chat`**, **`assistant`**, **`call_notes`**, or a system kind, Chat §4.6), `format` (rich-text JSON; the existing `body` column holds the plain-text copy, `text`), `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` | Chat §15 |
+| `messages.sender_id` and `users` | Reserved rows | `messages.sender_id` references `users(id)`, but `'system'` and `'assistant'` are not people. Reserved `users` rows with ids `'system'` and `'assistant'` and **`status = 'system'`** (a new `users.status` value), excluded from the directory, seats and sign-in **(default)**. Assistant messages use `sender_id = 'assistant'`, handled like `'system'`: a reserved sender that bypasses posting policy; `system_payload` holds `{ invoked_by, sources }`. | Assistant §14.2, §17 |
 | `thread_follows` | New table | Thread follows and per-thread read state. The TDD `follows` table remains for other object types. | Chat §15 |
 | `saved_items`, `sidebar_prefs`, `link_previews`, `message_previews` | New tables | As Chat §15 (`saved_items.state`: `in_progress`, `done`) | Chat §15 |
 | `channel_members.notify_level` | Values | `default`, `all`, `mentions`, `mute`, `nothing` | Notifications §7 |
@@ -481,12 +544,19 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `calendars.kind` | Values | `personal`, `group`, `channel`, `standalone`, `workspace`, `external` (holidays are generated, not stored) | Calendar §12 |
 | Calendar tables | New tables | `calendars`, `events` (with `range_start`, `range_end` in UTC ms for every event, and `purge_after`), `event_exceptions`, `event_attendees`, `event_reminders`, `event_notes`, `time_off`, `ics_feeds`, `ics_subscriptions` | Calendar §12 |
 | `time_off` | Columns | `deleted_at` for audit only; **no `purge_after`** (no Trash; hard-deleted 30 days after `deleted_at`, §5) | Calendar §12 |
-| UserHub room registry | Durable | SQLite table keyed `(kind, room_id, connection_id)`; kinds `channel`, `doc`, `board`, **`huddle`** (§12) | §3, §12 |
+| UserHub room registry | Durable | SQLite table keyed `(kind, room_id, connection_id)`; kinds `channel`, `doc`, `board`, **`huddle`**, **`assistant`** (§12) | §3, §12, Assistant §14.1 |
 | `user_preferences`, `notify_anyway_log`, **`user_availability`** | New tables | Defined in Notifications §7 (`user_preferences.reminder_defaults`, `offline_cache`, `dnd_until`, `dnd_schedule`, ...; `user_availability.focus_until`, `away_until`, `schedule_dnd_until`, ...) | Notifications §5.7, §7 |
 | `inbox_items` | Replace | As Notifications §7: adds `count`, `preview` (redactable, up to 140 characters), `last_event_at` and a `message_id` index; `UNIQUE (user_id, dedupe_key)`, with resolved records reopened in place | Notifications §3.1, §7 |
+| `inbox_items.event_type` | Add values | `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder` | Notifications §3, Assistant §14.2 |
 | `scheduled_triggers`, `trigger_outbox` | New tables (ReminderScheduler DO SQLite) | §11.1 | §11 |
+| `scheduled_triggers.kind` | Add values | `assistant_brief`, `assistant_prep`, `personal_reminder` | §11.1, Assistant §14.2 |
 | `pending_emails`, `rate_counters`, `ics_opt_outs` | New D1 tables | §11, §8, §15 | here |
 | `cron_leases` | New D1 table (M0b) | One lease per cron schedule `(schedule, holder, expires_at)`; overlap guard for the dispatcher. `schedule` is Zod-validated (no `CHECK`). Excluded from export as a job table. | TDD §2.1, §7.8 |
+| `rate_counters.scope` | Add values | `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes` | §8, Assistant §14.2 |
+| `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments` | New D1 tables | As Assistant §14.2. `call_notes` is keyed to the context and **must not cascade** from `huddles` (§5). | Assistant §14.2 |
+| Assistant DO | New DO schema | Versioned with lazy migration through the core DO base class (Assistant §14.1) | Assistant §14.1 |
+| `handles` | Reserved | `assistant` and the handle derived from the current `assistant_display_name` | Assistant §14.2, Identity |
+| `audit_log.metadata` | Convention | `"via": "assistant"` on assistant-initiated writes (no new column). For writes into DMs and group DMs, only the object type is recorded (Permissions §4.1). | Assistant §5.1, §14.2 |
 | Spec DDL `CHECK`s on growable enums | Rule | `calendars.kind`, `events.type`, `huddle_messages.context_type`, `auth_tokens.kind`, `drives.kind`, `item_activity.kind`, `pending_emails.state` and similar are **Zod-validated; the `CHECK` is omitted in migrations**, even where a spec's illustrative DDL shows one | here |
 
 ## 15. API
@@ -534,6 +604,9 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 | `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | TURN credentials | Optional | Rotate in the dashboard |
 | `ANALYTICS_API_TOKEN` | Read-only usage panel | Optional | Rotate in the dashboard |
 | `PEPPER_1`, `PEPPER_2`, … | HMAC pepper applied to passwords before PBKDF2; the number is the `pepperId` in `pbkdf2-sha256-hmac$<pepperId>$…` (Identity §4.4). Each at least **32 random bytes**. | Yes (from M1); at least one | Add `PEPPER_<n+1>` and hash new passwords with it; re-hash at next sign-in; after a published deadline, accounts still on a retired pepper must reset; delete the old secret only after that deadline. **Restoring an export to another installation needs the same `PEPPER_*` secrets**, or every password must be reset. |
+| AI Gateway authentication token | Sent as `cf-aig-authorization` when the configured AI Gateway requires authentication (TDD §5.1) | Optional (assistant, authenticated gateway only) **(default)** | Rotate in the dashboard |
+
+**The assistant adds no other secrets** ([Assistant](assistant.md) §10.1, §11). Workers AI and Vectorize are bindings. BYOK provider keys live only in AI Gateway's Secrets Store (TDD §5.1), never in Worker secrets, D1, logs or client code. `assistant_gateway_id` is a setting (§7), not a secret.
 
 ## 17. Acceptance criteria
 
@@ -545,7 +618,8 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
   - deleting a group trashes its drive and archives its calendar; purging that calendar moves each event to its organiser's personal calendar, and deletes events whose organiser is deleted with `event_cancel` to attendees
   - deleting a member moves their personal-calendar events that have other attendees to the first remaining attendee
   - deleting a standalone calendar sends cancellations
-  - a deleted whiteboard's embeds show "deleted".
+  - a deleted whiteboard's embeds show "deleted"
+  - purging a channel, event or document deletes its call notes, transcripts and their vectors; purging a file deletes its `file_derived_text` and vectors; each deleting pipeline enqueues `assistant-purge` for members whose memory cites the object, including disabled members.
 - **Retention:** document and event in-call chat survives the 365-day huddle purge. External attendee emails are gone 90 days after the event ends.
 - **Export:** an export contains file versions, calendars, time off and hashed poll votes. It contains no sessions, auth tokens, passkeys, ICS feed tokens or ICS-in URLs. A restore into a new domain requires passkey re-registration and works with owner passwords.
 - **Admin settings:** every key in §7 is enforced, changeable only by the listed role, and writes its audit event.

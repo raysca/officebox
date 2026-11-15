@@ -1,7 +1,7 @@
 # Spec: Calendar
 
 **Status:** Draft for review
-**Revision:** Revised after independent review, and again after the second review (14 Nov 2026)
+**Revision:** Revised after independent review, and again after the second review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: idempotency keys, `expectedVersion` on update, "Call notes" on events)
 **Feature name:** Calendar (marketing name to be decided later)
 **Milestone:** M5, in slices M5a–M5c (§15) ([PLAN](../PLAN.md))
 
@@ -12,6 +12,7 @@
 - [Platform](platform.md): lifecycle, retention, timers, outbound fetching, email links
 - [Calls](calls.md): event calls
 - [Chat](chat.md): status, create event from message
+- [Assistant](assistant.md) §5, §7, §12.3: scheduling tools, personal reminders, call notes on events
 
 **Related PRD section:** §5.3 (to be extended)
 
@@ -110,6 +111,9 @@ A team calendar built into the workspace:
   - attendees can't change event details; they can add **personal notes and reminders** **(default)**.
 - **Moving an event to another calendar** requires editor access to **both** calendars. The organiser stays the same.
 - Changes notify attendees (§9), with a "Notify guests?" choice for minor edits **(default)**.
+- **Idempotency and versions** ([Assistant §5.1](assistant.md)):
+  - Event create, update and RSVP accept an optional **idempotency key**. The key is stored with its result for **24 hours (default)**; a repeat with the same key returns the original result instead of writing again.
+  - Update accepts an optional **`expectedVersion`**. The change is applied only if the event's current `version` still matches, as an atomic compare-and-set; otherwise the update returns a typed **`conflict`** result and changes nothing. Every change to an event increments `version`.
 
 ### 4.3 Recurrence
 
@@ -126,6 +130,7 @@ A team calendar built into the workspace:
 - **Inviting members:** the event is added straight away to each invitee's view of their **personal calendar** as tentative ("not responded"), even though it's stored on the organiser's chosen calendar (§12.1). An inbox notification is sent ([Notifications](notifications.md) §3).
 - **RSVP:** Yes / No / Maybe, with an optional note, from the event, the notification or the inbox.
 - Recurring events take a series RSVP, or a per-occurrence answer.
+- An RSVP accepts an idempotency key (§4.2).
 - Declined events are hidden from the attendee's views. A "Show declined" toggle brings them back.
 - The organiser sees an attendee list with responses and counts, with optional attendees marked.
 - **Group attendees:** inviting a group expands to its members when the invitation is sent **(default)**. People who join the group later aren't added.
@@ -146,6 +151,8 @@ What a person sees for an event depends on their role on its calendar, the event
 - **An attendee always sees full details of an event they're invited to**, even on a calendar they can't otherwise view.
 - **Busy blocks** show only the time range, no title or location. `show_as = free` events don't appear as blocks.
 - **Deletion of a private event** by a calendar editor isn't possible.
+- **Call notes** (M9c) on an event follow its details: the organiser, attendees and anyone with details-level access see the event's "Call notes" section (§11); busy-block and free/busy-only viewers don't ([Assistant §12.3](assistant.md)).
+- **The assistant** reads events only through these rules, per event and per occurrence, as the member it acts for. Events are **not in the vector index** ([Assistant §5, §9](assistant.md)).
 - **Orphaned private events** (decision): when a private event's organiser is **disabled or deleted**, an **owner or admin** can delete it **without seeing its details** (the delete action is offered on the busy block, and audited). This is how such an event is removed from a group or personal calendar, which can't be deleted directly.
 
 ## 5. Special event types
@@ -229,7 +236,8 @@ What a person sees for an event depends on their role on its calendar, the event
 - **The same scheduler drives:**
   - event calls' "starting now — join" ([Calls](calls.md) §5)
   - focus-time DND on and off (§5)
-  - time-off status changes (§7).
+  - time-off status changes (§7)
+  - from M9, the assistant's personal reminders, daily brief and meeting prep (trigger kinds `personal_reminder`, `assistant_brief`, `assistant_prep`; [Assistant §7.1, §8](assistant.md)). Personal reminders are separate from event reminders and aren't attached to events.
 - **Notifications** ([Notifications](notifications.md) §3): invitation, update (time or location change), cancellation, RSVP responses (to the organiser, batched **(default)**), reminders, and event calls starting.
 - **Today view:** today's events appear at the top of the Personal Inbox **Today** view (PRD §5.3). If calendar ships before the Personal Inbox (M8), the calendar gets its own **Today** panel. No agenda email.
 
@@ -262,6 +270,7 @@ What a person sees for an event depends on their role on its calendar, the event
   - free/busy-only calendars contribute busy blocks without details.
 - **Group calendar view:** the group's events, plus rows per member for time off (dates only) and working location (a "who's in" strip).
 - **Event detail:** time in the viewer's zone, with the organiser's zone shown if different; attendees and responses; call join button; description; links.
+- **Call notes** (M9c): when notes were taken in the event's call, the event detail shows a **"Call notes"** section with the summary, decisions and action items, and a link to the transcript ([Assistant §12.3](assistant.md)). It is **separate from attendees' personal notes** (`event_notes`), and visible as §4.5 says.
 
 ### 11.1 Accessibility
 
@@ -321,6 +330,7 @@ CREATE TABLE events (
   has_call INTEGER NOT NULL DEFAULT 0,
   organizer_id TEXT REFERENCES users(id),
   sequence INTEGER NOT NULL DEFAULT 0,           -- ICS SEQUENCE for updates
+  version INTEGER NOT NULL DEFAULT 0,            -- incremented on every change; compared with expectedVersion (§4.2) (default)
   source_uid TEXT,                               -- ICS UID (external feeds)
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -360,6 +370,17 @@ CREATE TABLE event_reminders (event_id TEXT NOT NULL REFERENCES events(id) ON DE
   PRIMARY KEY (event_id, user_id, minutes_before, channel));
 CREATE TABLE event_notes (event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   user_id TEXT NOT NULL REFERENCES users(id), note TEXT, PRIMARY KEY (event_id, user_id));   -- attendee's private notes
+-- Call notes for event calls live in call_notes (context_type = 'event'; Assistant §14.2), not in event_notes.
+-- They're deleted with the event (platform §4).
+
+CREATE TABLE calendar_idempotency (              -- §4.2 (default); rows older than 24 hours are purged (default)
+  user_id TEXT NOT NULL REFERENCES users(id),
+  key TEXT NOT NULL,                             -- client- or assistant-supplied idempotency key
+  operation TEXT NOT NULL,                       -- 'event_create' | 'event_update' | 'rsvp' (Zod-validated)
+  result TEXT NOT NULL,                          -- JSON of the original typed result
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, key)
+);
 
 CREATE TABLE time_off (
   id TEXT PRIMARY KEY,
@@ -444,8 +465,8 @@ SELECT e.* FROM events e
 |---|---|
 | `GET /calendars` · `POST /calendars` · `PATCH/DELETE /calendars/:id` · `PUT /calendars/:id/grants` | Calendars and sharing |
 | `GET /events?calendars=…&from=…&to=…` | Expanded occurrences in a window: requested calendars plus the viewer's invitations (§12.1) |
-| `POST /events` · `PATCH /events/:id?scope=this|following|all&occurrence=…` · `DELETE …` · `POST /events/:id/move` (target calendar) | Events, recurring edits and moving between calendars |
-| `POST /events/:id/rsvp` | Member RSVP |
+| `POST /events` · `PATCH /events/:id?scope=this|following|all&occurrence=…` · `DELETE …` · `POST /events/:id/move` (target calendar) | Events, recurring edits and moving between calendars. Create and update accept `idempotencyKey`; update accepts `expectedVersion` and returns `conflict` on a mismatch (§4.2). |
+| `POST /events/:id/rsvp` | Member RSVP; accepts `idempotencyKey` |
 | `GET /rsvp/:token` (confirmation page) · `POST /rsvp/:token` (response) | External RSVP, safe against link scanners |
 | `GET /freebusy?users=…&from=…&to=…` | Find a time |
 | `GET/POST /time-off` · `PATCH/DELETE /time-off/:id` | Time off (type and note returned to the member only) |
@@ -475,6 +496,8 @@ Criteria tagged **(manual)** need a real external client and are run before rele
 - **Deleted organiser:** deleting a member moves their personal-calendar events that have other attendees to the first remaining attendee, who becomes organiser.
 - **Orphaned private events:** after a private event's organiser is disabled, an admin can delete it from the busy block without the API returning its title or details; a non-admin editor can't.
 - **Event calls:** an attendee and a details-level viewer can start the event's call; a free/busy-only viewer gets 403.
+- **Idempotency and versions:** repeating an event create, update or RSVP with the same idempotency key within 24 hours returns the original result and writes nothing new; an update whose `expectedVersion` no longer matches returns `conflict` and changes nothing, including when the event changes between the check and the write.
+- **Call notes (M9c):** the event's "Call notes" section is returned to the organiser, attendees and details-level viewers, not to free/busy-only viewers or a removed attendee, and is separate from `event_notes` ([Assistant §16](assistant.md)).
 - **External opt-out:** a GET on the opt-out link changes nothing; after the POST, inviting that address is refused with a typed result.
 - **External attendees:**
   - automated ICS conformance tests check `METHOD:REQUEST`, `METHOD:CANCEL`, `SEQUENCE` increments and `RECURRENCE-ID` overrides against RFC 5545

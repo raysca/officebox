@@ -1,8 +1,9 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.5  
-**Date:** 14 November 2026  
+**Version:** 1.6  
+**Date:** 15 November 2026  
+**Changes in 1.6:** the [assistant spec](specs/assistant.md) is adopted. Personal memory moves from deferred into the first AI release. New or changed: the assistant's display name, audience-safe mentions, voice, call notes and captions, AI Gateway logging off, indexing only while the assistant is enabled, the privacy scope, personal reminders, and assistant retention and export rules. Tasks and issues stay with projects. Phase 3 maps to PLAN M9 (§2, §4, §5.3, §5.8, §5.9, §10.2, §11, §13, §14, §15, §18, Appendix A).  
 **Changes in 1.5:** second independent review decisions: admin self-access to groups and drives needs an owner; recovery links issued without email are flagged on the sign-in page and to every owner; first-release setup creates identity objects only, with other objects arriving with their milestones; editors moderate comments; viewers can start document calls; admins moderate private channels they belong to; orphaned private events can be removed by owners and admins; one Trash restore rule; calendar purge moves events to organisers; time off has no Trash (§5.3, §5.8, §6, §8, §10.1, §10.2, §18).  
 **Changes in 1.4:** Feature specs ([identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md)) and cross-cutting specs ([permissions](specs/permissions.md), [notifications](specs/notifications.md), [platform rules](specs/platform.md)) adopted. Calendar becomes a first-class feature (§5.10). Decisions from the spec interviews and the independent review are folded in: identity (§6), chat (§5.4), documents and files (§5.5, §5.7), calls (§5.8), notifications (§8), permissions (§10.1), retention (§10.2), export (§13), phases (§15) and limits (§18). **Where this PRD and a spec differ on feature detail, the spec wins.**  
 **Changes in 1.3:** Screen sharing and present mode (§5.8). Remaining review items addressed:
@@ -65,7 +66,7 @@ Officebox is not multi-tenant SaaS. Each customer deploys their own instance int
 - No per-seat fees, ever. Officebox is open source. Infrastructure cost is your own Cloudflare bill, typically the $5/month Workers Paid plan for a small team, plus usage-based charges that grow with data and activity rather than headcount.
 - One integrated experience. Chat, calls, calendars, documents, whiteboards, files, projects and issues are connected workspace objects, not disconnected apps.
 - Realtime without operational burden. Presence, chat and collaborative editing work out of the box on Cloudflare's managed realtime primitives.
-- AI on your terms. Bring your own model provider key via AI Gateway; AI is optional and never disables core collaboration.
+- AI on your terms. Workers AI works out of the box, or bring your own model provider key via AI Gateway; AI is optional and never disables core collaboration.
 - Upgrade on your schedule. Stable and beta channels. New releases arrive as a reviewable pull request in your repository, and merging it upgrades the workspace. Rollback is supported.
 
 ## 3. Target users and needs
@@ -107,8 +108,8 @@ How personas map to the roles in §10.1:
 3. One integrated workspace. Objects are connected; context follows the work.
 4. Open source, no per-seat fees. The code is AGPL-3.0 and every release is free. Infrastructure cost is the customer's own, predictable Cloudflare bill.
 5. Realtime by design, durable by default. Realtime is a first-class capability; important data is persisted independently of connections.
-6. AI-native, not AI-dependent. Core collaboration works with no AI configured.
-7. BYOK via AI Gateway. Customers store their own provider keys in their own Cloudflare account.
+6. AI-native, not AI-dependent. Core collaboration works with no AI configured. With the assistant off, workspace content is not indexed or sent to any model.
+7. BYOK via AI Gateway. Workers AI works by default. Customers who bring their own provider keys store them in their own Cloudflare account.
 8. Privacy and permissions by default. Every feature, including AI retrieval and previews, respects access controls.
 9. Visible operational risks, not blockers. Warn about misconfiguration without preventing evaluation.
 10. Safe upgrades. Stable and beta channels, reviewable release pull requests, rollback-compatible migrations, and clear migration status.
@@ -181,7 +182,7 @@ The Inbox distinguishes:
 
 Users can acknowledge, dismiss, snooze, complete or follow items. Dismissing an inbox notification does not delete the underlying message, issue or document.
 
-The first release uses Officebox-native sources: mentions, direct messages, assignments, review requests, due dates and project/document activity. Automatic commitment extraction arrives with AI in Phase 3.
+The first release uses Officebox-native sources: mentions, direct messages, assignments, review requests, due dates and project/document activity. Commitment nudges arrive with the assistant (PLAN M9b): the member opts in, and each suggested reminder is added only if they accept it.
 
 **Inbox rules:**
 
@@ -204,6 +205,13 @@ The first release uses Officebox-native sources: mentions, direct messages, assi
 - **Retention:** resolved items are purged after 90 days (§10.2).
 
 **Calendar in the Inbox:** today's events appear at the top of **Today**, and upcoming events, invitations and reminders in **Upcoming** and **Inbox**. If the calendar ships before the Personal Inbox, the calendar has its own Today panel until the Inbox arrives. There is no agenda email. The calendar itself is described in §5.10 and [specs/calendar.md](specs/calendar.md).
+
+**Personal reminders and the assistant in the Inbox** (with the assistant, PLAN M9):
+
+- **Personal reminders** are private notes-to-self with a time ("Send the deck — Fri 09:00"). The member creates them through the assistant (confirmed), by accepting a nudge, or with "Add to my reminders" on a call-notes action item. They fire as inbox items, appear in **Upcoming**, and can be marked done, snoozed or deleted. Only the member can see them.
+- **Assistant items** (daily brief, meeting prep, commitment nudges, and "reply ready") appear in the Inbox with **no preview text** and open the assistant DM. They follow do-not-disturb, focus time and time off. Mentioning the assistant creates no inbox item.
+
+Detail is in [specs/assistant.md](specs/assistant.md) §7.1 and §8.
 
 ### 5.4 Chat and communication
 
@@ -355,7 +363,12 @@ Delivery sequence:
 2. Collaborative documents and whiteboards (Durable Objects + Yjs).
 3. Channel and DM calls with audio, video and screen sharing (Realtime SFU).
 4. Event calls (with the calendar) and document calls with present mode (with documents).
-5. Optional AI transcription, summaries and action items, with consent and retention controls.
+5. Call notes and live captions with the assistant (PLAN M9c). Detail is in [specs/assistant.md](specs/assistant.md) §12.3–§12.4.
+   - **Notes are visible and stoppable.** Any participant with assistant access can start notes. Everyone sees a persistent banner saying who started them and who will be able to read them. Anyone in the call can stop them.
+   - **Joining a call with notes on requires acknowledging a notice first.** Until then the person isn't in the call and no audio is sent.
+   - Participants without assistant access are transcribed too, and get the same notice and Stop control.
+   - Notes (summary, decisions, suggested action items) go to the call's context. Transcripts are kept for a set period (§10.2). Audio is never stored.
+   - **Captions are separate from notes.** Any participant can turn on captions for themselves. They are never stored, and everyone sees a "Captions on" indicator because audio is sent to the model provider.
 
 Recording is not an initial requirement.
 
@@ -363,18 +376,27 @@ Recording is not an initial requirement.
 
 The assistant helps users:
 
-- Search permitted messages and documents.
-- Summarise conversations and documents.
-- Draft or create documents.
-- Create and update tasks/issues.
+- Search permitted messages, documents, files and meeting notes.
+- Summarise conversations, documents, files and calls.
+- Draft or create documents and messages.
+- Schedule meetings and set personal reminders.
 - Answer questions grounded in workspace knowledge.
-- Understand related workspace context.
+- Remember what the user has discussed with it.
 
-The first AI release (Phase 3) is a permission-aware team workspace assistant. A separate personal assistant with private memory is deferred until its ownership, isolation, retention and retrieval rules are separately specified.
+The first AI release (Phase 3, PLAN M9) gives every member a **personal assistant with private memory**. Its behaviour is specified in [specs/assistant.md](specs/assistant.md).
 
-AI actions that modify data or affect external systems require confirmation and permission checks. Sensitive actions are auditable.
+- **Name:** the name people see is an admin setting that defaults to **"Butler"**. Code and tables say `assistant`.
+- **No access of its own.** It always acts as the person asking, or for the audience of a shared conversation. It can never be granted anything.
+- **Personal memory is in scope.** Each member's conversations and remembered items stay in that member's own storage, are never used to answer anyone else, and can't be read by admins. Members can view and delete what it remembers, use incognito conversations, and shorten the retention window an owner sets (§10.2).
+- **Audience-safe mentions.** Anyone with assistant access can `@mention` it in a conversation. A reply others can see uses only the conversation and sources the whole audience can open, never the asker's memory or private material.
+- **Voice:** push-to-talk and call notes (M9c), and live spoken conversation (M9d). Call notes and captions follow §5.8.
+- **Proactive help:** a daily brief, meeting prep and commitment nudges, each off until the member turns it on.
+- **Rollout:** an admin turns it on for the workspace or chosen groups. Owners set a monthly budget and admins set usage caps.
+- **Tasks and issues** stay with projects (Phase 2). They are not part of the first AI release.
 
-Semantic retrieval uses Vectorize with Workers AI embeddings. The retrieval pipeline filters results by the requesting user's permissions before returning content to the model.
+AI actions that modify data or affect external systems require confirmation and permission checks. The assistant shows a preview card and nothing changes until the member confirms. Sensitive actions are auditable.
+
+Semantic retrieval uses Vectorize with Workers AI embeddings. The retrieval pipeline filters results by the requesting user's permissions before returning content to the model. Workspace content is indexed only while the assistant is enabled. Turning it on back-fills the index, and an owner can delete the index.
 
 ### 5.10 Calendar
 
@@ -595,8 +617,12 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 | Inbox items | 90 days after being completed or dismissed | Purged automatically. Underlying objects are unaffected. |
 | User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, password, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents passes to an admin. |
 | Audit log | 365 days, configurable | Purged automatically. It never stores message or document content. |
-| AI interaction logs (Phase 3) | 30 days, configurable | Purged automatically. |
-| Call (huddle) history | 365 days | Metadata only (context, participants, times, rings). No audio, video or screen content is ever recorded. Separate from in-call chat. |
+| AI interaction logs (Phase 3) | 30 days, configurable by an owner (`assistant_interaction_retention_days`) | Metadata only, never prompts or replies. Purged automatically. |
+| Assistant memory (conversations and remembered items) | 365 days **(default)**, set by an owner (`assistant_memory_retention_days`). Members can shorten it for themselves. | Private to the member. Members can delete one item, a conversation or everything. Content derived from a deleted source is purged; content whose source the member can no longer open is hidden at once and deleted after 7 days **(default)**. Erased when the member is deleted. |
+| Incognito assistant conversations | Until the member ends them, or 24 hours after their last activity **(default)** | Never remembered. |
+| Personal reminders | Until done or dismissed | Deleted 30 days after done or dismissed **(default)**. Erased when the member is deleted. |
+| Call (huddle) history | 365 days | Metadata only (context, participants, times, rings). No audio, video or screen content is ever recorded. Text transcripts exist only when someone turns on call notes (next row). Separate from in-call chat. |
+| Call notes and transcripts | Notes: life of their context. Transcripts: 90 days **(default)**, set by an owner (`call_transcript_retention_days`). | Transcripts are purged with their search vectors. Deleting the channel, event or document deletes its notes and transcripts. |
 | In-call chat | Life of its context | Channel and DM calls: a thread in the conversation. Document and event calls: kept with the document or event, not purged with the call record. |
 | Calendars and events | Kept until deleted | Trash for 30 days, restorable under the Trash rule (§10.1). Purged group and channel calendars move their events to the organisers' personal calendars. |
 | Time off | Until the member deletes it | No Trash: a deleted entry is kept for audit and hard-deleted 30 days later. Erased when the member is deleted (it can contain sensitive types). |
@@ -607,7 +633,7 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 | Polls and votes | Life of the channel | Votes are stored only as per-poll hashed keys |
 | Saved items | Until removed, or until access is lost or the message is deleted | — |
 | Access requests | Pending ones expire after 30 days; decided ones are kept 90 days | Purged automatically |
-| Search and AI indexes | Same as the source object | Updated or removed whenever the source is edited, deleted or has its access changed. |
+| Search and AI indexes | Same as the source object | Updated or removed whenever the source is edited, deleted or has its access changed. The AI index is built only while the assistant is enabled, and an owner can delete it. |
 
 **Platform recovery windows.** Cloudflare keeps point-in-time recovery data for up to 30 days: D1 Time Travel, Durable Object point-in-time recovery, and R2 noncurrent versions if the customer enables versioning. So purged data can remain recoverable by the account owner for up to 30 days after purge. Officebox documents this rather than promising instant permanent erasure.
 
@@ -619,7 +645,7 @@ Customers store their own model-provider API keys in Cloudflare AI Gateway's BYO
 
 Potential providers: OpenAI, Anthropic, Google Gemini, Workers AI, and optional local models through a compatible runtime.
 
-Different model choices may be configured for assistant responses, summarisation and embeddings.
+The assistant works with Workers AI straight after deploy. An owner can move each model role (chat, summaries, speech, vision) to their own provider through AI Gateway, where AI Gateway supports that role. Embeddings use Workers AI.
 
 ### AI safety and governance
 
@@ -627,19 +653,30 @@ Different model choices may be configured for assistant responses, summarisation
 - Provider keys are stored in Secrets Store and referenced only via AI Gateway.
 - Retrieval enforces the same permissions as normal application access.
 - Users do not receive answers based on documents or messages they cannot access.
-- Retrieved workspace content is untrusted input, not trusted instruction. Prompt-injection attempts in documents, messages and files must not override system policy or grant tool authority.
+- Retrieved workspace content is untrusted input, not trusted instruction. Prompt-injection attempts in documents, messages and files must not override system policy or grant tool authority. The same applies to transcripts, pasted text and the member's own stored history and memory.
+- The assistant has no access of its own. It acts as the person asking, or, in shared conversations, for the audience (§5.9).
+- AI Gateway request logging and caching are turned off for assistant traffic **(default)**.
 - Tool access is permission-checked server-side.
 - Mutating or sensitive actions require confirmation where appropriate.
 - Important AI actions and tool invocations are auditable.
 - AI interaction and audit retention is defined and configurable.
 - **Visibility of AI logs:**
-  - Each user can see and delete their own assistant conversation history.
+  - Each user can see and delete their own assistant conversation history and memory.
   - Owners and admins can see *metadata* for every AI interaction: who, when, which model, which tools ran, which workspace objects were read or changed, and the outcome.
-  - Owners and admins **cannot** see prompt or response content, which follows the same rule as private content (§10.1).
+  - Owners and admins **cannot** see prompt, response or memory content, which follows the same rule as private content (§10.1).
   - Tool actions that changed data are also recorded in the audit log.
 - AI outages do not disable core collaboration.
 
-The initial AI release (Phase 3) includes a permission-aware team assistant. Personal assistant memory is deferred.
+The initial AI release (Phase 3, PLAN M9) is a personal assistant with private memory for every member (§5.9, [specs/assistant.md](specs/assistant.md)).
+
+**What the privacy guarantee covers:**
+- **Within Officebox.** The guarantee holds inside the application.
+- **Model provider.** Prompts and audio go to the configured model provider: Workers AI by default, or a BYOK provider an owner chooses.
+- **Cloudflare account access.** Anyone with direct access to the customer's Cloudflare account (for example Durable Object storage) is outside Officebox's control.
+- **Logging.** Officebox turns off AI Gateway request logging and caching for assistant calls.
+- **Other members' data.** Memory may hold things a member said about other people. Those stay in the member's memory until it's deleted or retention expires, even if the other person's account is deleted.
+
+The privacy statement ([permissions §6](specs/permissions.md)) says all of this.
 
 ## 12. Open-source reuse and integration strategy
 
@@ -715,7 +752,7 @@ Officebox does not claim that a backup exists or is healthy unless it has reliab
 All persistent application data lives in the customer's Cloudflare account:
 
 - D1: users, groups, permissions, channel and document metadata, a searchable copy of messages, projects, issues, inbox records, audit logs.
-- Durable Object SQLite: authoritative message history per channel, Yjs CRDT state per document/whiteboard. Presence is held in memory only and is not persisted.
+- Durable Object SQLite: authoritative message history per channel, Yjs CRDT state per document/whiteboard, and each member's assistant conversations and memory. Presence is held in memory only and is not persisted.
 - R2: files and attachments.
 - Vectorize: embeddings for AI retrieval.
 
@@ -733,9 +770,11 @@ D1 Time Travel provides point-in-time recovery to any minute within the last 30 
 
   **Excluded:** sessions, sign-in tokens, passkeys (members register again after a restore to a new domain), MFA secrets, ICS feed tokens and the URLs of subscribed external calendars, which are secrets. Full coverage is in [platform §6](specs/platform.md).
 
+  **Assistant data:** the export includes assistant interaction metadata, and call notes and transcripts within retention. It **excludes** assistant conversations and memory **(default)**, because admins can't read them, and personal reminders. Members download these themselves with "Download my assistant data" ([specs/assistant.md](specs/assistant.md) §13).
+
   The format is documented and stable across versions, so other tools can read it.
 - **Running exports:** an export can be started on demand or on a schedule (for example, weekly). Each export is internally consistent per object, recording each channel's message position and each document's state. It is not one instant across the whole workspace. For a fully consistent export, the owner can put the workspace in read-only maintenance mode while the export runs.
-- **Restore:** a fresh Officebox installation offers **Restore from export** as an alternative to first-run setup. It imports everything into the new installation, which is also how a workspace moves to a different Cloudflare account. A command-line restore tool covers very large exports.
+- **Restore:** a fresh Officebox installation offers **Restore from export** as an alternative to first-run setup. It imports everything into the new installation, which is also how a workspace moves to a different Cloudflare account. A command-line restore tool covers very large exports. Assistant memory is not part of a restore, and the AI index is rebuilt by back-fill.
 - **Testing:** restore is tested on every release.
 
 Data ownership is the customer's. They can export, delete or migrate their data at any time. Deletion follows the rules in §10.2, including Cloudflare's recovery windows of up to 30 days. Officebox does not hold customer data outside the customer's Cloudflare account.
@@ -769,7 +808,6 @@ Officebox monitors each store against its real limit and never silently discards
 - Enterprise-scale compliance and administration features before customer need is demonstrated.
 - Recording calls, remote control of shared screens, and annotation on shared screens.
 - Malware scanning of uploaded files.
-- A separate personal AI memory system in the first AI release.
 
 ## 15. Phased delivery
 
@@ -822,13 +860,16 @@ Delivered in the milestones in [PLAN.md](PLAN.md): foundation → identity → r
 
 ### Phase 3 — Workspace intelligence
 
-- BYOK team AI assistant via AI Gateway.
-- Permission-aware semantic search and embeddings using Vectorize + Workers AI.
-- AI-assisted document and issue/task actions.
+Delivered as PLAN M9 (M9a–M9d), after the Personal Inbox. Detail is in [specs/assistant.md](specs/assistant.md).
+
+- A personal assistant for every member, with private memory (§5.9). Workers AI by default; BYOK via AI Gateway optional.
+- Permission-aware semantic search and embeddings using Vectorize + Workers AI, indexed only while the assistant is enabled.
+- AI-assisted document, message, calendar and reminder actions, each confirmed by the member. Task and issue actions arrive with projects.
+- Audience-safe `@mentions` of the assistant in conversations.
 - AI tool audit trail and configurable retention.
-- Summaries and action-item extraction from conversations and meetings.
-- Optional meeting transcription and summaries, subject to consent and retention controls.
-- Further Personal Inbox intelligence, such as suggested follow-ups and extracted commitments, with user review and clear provenance.
+- Summaries of conversations, documents, files and calls, with action items from call notes.
+- Push-to-talk, call notes and live captions (M9c), and live voice (M9d), with the notes rules in §5.8.
+- Daily brief, meeting prep and commitment nudges, each opt-in, with personal reminders in the Personal Inbox (§5.3).
 
 The exact sequencing should be validated against user research, component evaluations and implementation capacity. The calendar ships in its own milestone after calls (§5.10, PLAN M5).
 
@@ -911,7 +952,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 
 | Area | Requirement |
 |---|---|
-| Accessibility | WCAG 2.2 AA for all core flows. Full keyboard operation, screen-reader labels and support for reduced motion. Call captions arrive with transcription (Phase 3). Single-key shortcuts can be turned off or remapped, and drag actions have keyboard and single-pointer alternatives. |
+| Accessibility | WCAG 2.2 AA for all core flows. Full keyboard operation, screen-reader labels and support for reduced motion. Live call captions arrive with the assistant's call features (PLAN M9c), separate from call notes. Single-key shortcuts can be turned off or remapped, and drag actions have keyboard and single-pointer alternatives. |
 | Browsers | The latest two major versions of Chrome, Edge, Firefox and Safari on desktop. Safari on iOS 16.4+ and Chrome on Android for the PWA. Web push on iOS requires installing to the home screen. Screen sharing needs a desktop browser. |
 | Languages | English at launch. All interface text is externalised for translation. Dates, times and numbers follow the user's locale. Right-to-left languages come later. |
 | Availability | Inherits Cloudflare's platform availability; Officebox offers no separate uptime SLA (support plans cover response times). Chat and documents keep working when optional services (AI, email, calls) are unavailable. |
@@ -953,7 +994,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Vector search | Vectorize + Workers AI embeddings | Agreed |
 | Media | Cloudflare Realtime SFU (SFU + TURN) | Agreed |
 | File storage | R2 | Agreed |
-| AI | BYOK via AI Gateway | Agreed |
+| AI | Workers AI by default; BYOK via AI Gateway optional, per model role | Agreed ([assistant](specs/assistant.md)) |
 | Authentication | Built-in local accounts: password, magic link and passkeys at launch; owners keep a password; TOTP after launch | Agreed |
 | First-run setup | Protected by a one-time setup token; disabled after use | Agreed |
 | Role model | Owner/admin/member workspace roles; channel, drive and calendar roles; union inheritance; admins cannot read or join private content; only owners act on admins and owners | Agreed ([permissions](specs/permissions.md)) |
@@ -964,7 +1005,14 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Notifications | Central service with multiple delivery adapters; All/Mentions/Mute/Nothing; DND holds banners, email and rings; "Notify anyway"; no text in DM and private-channel emails unless opted in | Agreed ([notifications](specs/notifications.md)) |
 | Web push | Phase 2 | Agreed |
 | Tasks/projects | Phase 2 | Agreed |
-| Personal AI memory | Deferred pending separate privacy and retention design | Deferred |
+| Personal AI memory | In the first AI release: private to each member, never used for anyone else, not readable by admins; view, delete, incognito and an owner-set retention window | Agreed ([assistant](specs/assistant.md)) |
+| Assistant name | Admin-set display name, default "Butler"; code and tables say `assistant` | Agreed (AGENTS §8 exception) |
+| Assistant mentions | Audience-safe: shared replies use only sources the whole audience can open, never the asker's memory or private material | Agreed |
+| Assistant voice | Push-to-talk and call notes (M9c); live voice (M9d) | Agreed |
+| Call notes | Visible and stoppable: banner naming who started them and who can read them; mandatory notice on joining; anyone can stop; captions separate and never stored | Agreed |
+| AI Gateway logging | Off for assistant traffic (default) | Agreed |
+| AI privacy scope | The guarantee holds within Officebox; content goes to the configured model provider; Cloudflare account access is outside Officebox's control; memory may hold what a member said about others (§11) | Agreed |
+| AI task and issue actions | Arrive with projects, not in the first AI release | Agreed |
 | Guest accounts | Guest role in Phase 2 with access to explicitly shared channels and documents only | Agreed |
 | Editor licensing | MIT Tiptap packages only; no paid Tiptap cloud dependency | Agreed |
 | Board UI | dnd-kit on Officebox's own data model | Agreed |
@@ -991,7 +1039,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 ## Appendix B — Related documents
 
 - [Technical Design Document (TDD)](TDD.md): architecture, Durable Object design, D1 schema, Yjs sync, AI pipeline, deployment, upgrades and operations.
-- [Feature specs](specs/): [identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md); cross-cutting [permissions](specs/permissions.md), [notifications](specs/notifications.md) and [platform rules](specs/platform.md).
+- [Feature specs](specs/): [identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md), [assistant](specs/assistant.md); cross-cutting [permissions](specs/permissions.md), [notifications](specs/notifications.md) and [platform rules](specs/platform.md).
 - [Build plan](PLAN.md): milestones, slices and the definition of done.
 - [AGENTS.md](AGENTS.md): how we work, for people and coding agents.
 - Open-Source Component Evaluation Register: candidate projects, licences, maturity, integration model, data ownership and replacement strategy.

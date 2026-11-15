@@ -3,7 +3,7 @@
 **Status:** Draft for review
 **Date:** 14 November 2026
 **Inputs:** [PRD](PRD.md) v1.4, [TDD](TDD.md) v1.4, and findings from the realtime spike ([`spikes/realtime`](spikes/realtime/README.md))
-**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md).
+**Feature specs:** [Identity & Access](specs/identity.md) · [Chat](specs/chat.md) · [Calls](specs/calls.md) · [Calendar](specs/calendar.md) · [Documents, Whiteboards & Files](specs/documents.md) · [Assistant](specs/assistant.md).
 **Cross-cutting specs:** [Permissions](specs/permissions.md) · [Notifications & Attention](specs/notifications.md) · [Platform Rules](specs/platform.md) (lifecycle, cascades, retention, export, settings, limits, timers, schema).
 
 The specs supersede the scope lists in §4 wherever they differ; each spec assigns its features to slices. Working rules are in [AGENTS.md](AGENTS.md).
@@ -73,7 +73,8 @@ officebox/
 | M6 | **Documents** (M6a–M6c) | Drives, docs, whiteboards, sharing, comments, history, files, offline. Document calls and present mode land here. | M2, M4 | L |
 | M7 | **Operations** | Health, storage protection, usage panel, export/restore, upgrades | M1 (grows alongside) | M |
 | M8 | **Personal Inbox** | Today / Upcoming / Assigned / Following views | M3, M5, M6 | M |
-| Later | Projects and issues · MFA and SSO · imports · API and webhooks · AI | PRD Phases 2–3 | — | — |
+| M9 | **Assistant** (M9a–M9d) | Personal assistant with memory, channel mentions, proactive help, push-to-talk, call notes, live voice | M8, M4; voice spike passed (M9c, M9d) | XL (4 slices) |
+| Later | Projects and issues · MFA and SSO · imports · API and webhooks | PRD Phase 2 (Phase 3 is M9; AI actions on tasks and issues arrive with projects) | — | — |
 
 Sizes are relative: M ≈ 1×, L ≈ 2×, XL ≈ 3×.
 
@@ -97,7 +98,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - web unit tests
   - a Playwright smoke test against `wrangler dev`
 - **Deployment:**
-  - `wrangler.jsonc` with the bindings M0 and M1 need; each later milestone adds its bindings and Durable Object migration tags (Vectorize and AI in Phase 3, Workflows in M7, feature DOs and queues with their milestone) (TDD §6.1)
+  - `wrangler.jsonc` with the bindings M0 and M1 need; each later milestone adds its bindings and Durable Object migration tags (Vectorize and AI in M9, Workflows in M7, feature DOs and queues with their milestone) (TDD §6.1)
   - a working Deploy to Cloudflare button
   - the deploy command (preflight, migrations, deploy)
 - **Core platform** (`apps/worker/src/core`):
@@ -297,7 +298,7 @@ Delivered in three slices, each releasable on its own.
 
 **Moved:** event calls ship with M5b, and document calls and present mode with M6 ([specs/calls.md](specs/calls.md)).
 
-**Later:** transcription and summaries (Phase 3); recording stays out of scope.
+**Later:** call notes, transcripts and live captions arrive with the assistant in M9c ([specs/assistant.md](specs/assistant.md) §12.3–§12.4); recording stays out of scope.
 
 **Exit criteria:**
 - `test:media` passes in CI against the production Worker.
@@ -418,7 +419,21 @@ This grows in parallel with the features above. Items are pulled in when a featu
 
 The Today, Upcoming, Inbox, Assigned to me and Following views (PRD §5.3).
 - **Sources:** chat (mentions and DMs), calendar (today's events, reminders, invitations), documents (comments, shares, review requests), and later issues.
+- **Upcoming** also lists personal reminders once they arrive with M9a ([specs/assistant.md](specs/assistant.md) §7.1).
 - **Behaviour:** snooze, grouping and automatic resolution.
+
+### M9 — Assistant
+
+**Spec:** [specs/assistant.md](specs/assistant.md) (Approved). The assistant's display name is an admin setting that defaults to "Butler". It comes after M8, so every data source it reads already exists.
+
+- **M9a: retrieval foundation and text assistant**, delivered as two PRs:
+  - **M9a-1 (retrieval foundation):** the Phase 3 ingestion pipeline (TDD §5.2: chunking, embeddings, Vectorize, invalidation), gated on `assistant_enabled` with back-fill; PDF and Office conversion; permission-aware hybrid retrieval (TDD §5.3); `ModelProvider` interface with a test fake; AI Gateway controls verified.
+  - **M9a-2 (text assistant):** Assistant DO with conversations, private memory and the source-purge pipeline; "What Butler remembers"; incognito; tools with the confirmation state machine and idempotency keys on target services; personal reminders; admin settings, caps and metadata log; BYOK.
+- **M9b: mentions and proactive help.** Audience-safe `@mention` replies in conversations; daily brief, meeting prep and commitment nudges (opt-in).
+- **M9c: voice, call notes and captions.** Push-to-talk; call notetaker with banner, mandatory join notice and stop-by-anyone; per-speaker transcripts and notes posted to the call's context; live captions (separate from notes, with an indicator); image and audio files.
+- **M9d: live voice.** Spoken conversation over the Realtime SFU.
+
+**Gate:** the voice spike (SFU-to-Durable-Object audio path, streaming speech-to-text, latency, and the memory, CPU and wall time of transcribing 25 tracks; [specs/assistant.md](specs/assistant.md) §19) passes before M9c starts. M9d also needs its latency target met.
 
 ## 5. Definition of done (every slice)
 
@@ -450,7 +465,7 @@ When a module has been promoted and its tests pass in the new structure, its spi
 
 ## 7. Documentation updates this plan implies
 
-The feature and cross-cutting specs change several PRD and TDD statements. These include: calendar scope, passkeys and magic links at launch, chat attachments, document defaults, the union permission rule, notifications and DND, retention and export of new objects, schema value lists, the socket budget, and timers. Both documents are being brought in line with the specs (see each spec's notes and platform §14).
+The feature and cross-cutting specs change several PRD and TDD statements. These include: calendar scope, passkeys and magic links at launch, chat attachments, document defaults, the union permission rule, notifications and DND, retention and export of new objects, schema value lists, the socket budget, and timers. Both documents are being brought in line with the specs (see each spec's notes and platform §14). The assistant spec moves personal memory into the first AI release and maps PRD Phase 3 to M9; its §17 lists every PRD, TDD and spec change it made.
 
 ## 8. Decisions
 

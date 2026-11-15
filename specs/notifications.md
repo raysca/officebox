@@ -1,9 +1,9 @@
 # Spec: Notifications & Attention
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices)
+**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
 **Feature name:** Notifications (marketing name to be decided later)
-**Milestone:** M2 core ([PLAN](../PLAN.md)), extended by each feature milestone (§9) · **Related:** PRD §8; TDD §3.5; [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Identity & Access](identity.md), [Platform](platform.md)
+**Milestone:** M2 core ([PLAN](../PLAN.md)), extended by each feature milestone (§9) · **Related:** PRD §8; TDD §3.5; [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Identity & Access](identity.md), [Assistant](assistant.md), [Platform](platform.md)
 
 Decisions marked **(default)** were not discussed; change them on review.
 
@@ -63,6 +63,11 @@ Every notification is an `inbox_items` record (§3.1, §7) with an `event_type`.
 | `access_request_decided` | A request was approved or declined | The requester | In-app; email | `access_request_decided:<objectType>:<objectId>` | The member opens the object (approved) or dismisses it (declined) |
 | `share` | An object was shared with the member, or with a group or channel they belong to | Newly granted members (not whole-workspace general access) | In-app; email for direct shares only **(default)** | `share:<objectType>:<objectId>` | The member opens the object |
 | `poll_closed` | A poll closes (manually or on time) | The poll creator **(default)** | In-app only | `poll_closed:<pollId>` | The member opens the conversation |
+| `assistant_brief` | Daily brief ready (ReminderScheduler `assistant_brief`, [Assistant](assistant.md) §8) | The member, if opted in and with assistant access | In-app; email after the delay, **without content** (§6). `preview = NULL`. | `assistant_brief:<userId>:<date>` | The member opens the assistant DM |
+| `assistant_prep` | Meeting prep ready, 30 minutes **(default)** before an event (ReminderScheduler `assistant_prep`, Assistant §8) | The attending member, if opted in and with assistant access | As `assistant_brief` | `assistant_prep:<eventId>:<occurrence>` | The member opens the assistant DM |
+| `assistant_nudge` | Commitment nudge after the member's own message ("Want a reminder…?", Assistant §8) | The author, if opted in and with assistant access | As `assistant_brief` | `assistant_nudge:<messageId>` | The member opens the assistant DM |
+| `assistant_reply` | A long assistant task finished (for example an audio file is ready, Assistant §9) | The member who asked | As `assistant_brief` | `assistant_reply:<turnId>` | The member opens the assistant DM |
+| `personal_reminder` | A personal reminder is due (ReminderScheduler `personal_reminder`, Assistant §7.1) | The member who owns it | In-app; email after the delay | `personal_reminder:<reminderId>` | The member marks it done or dismisses it |
 | `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected** (Identity §4.4, §4.6, §4.11) | The affected member (and, for passkey clone detection, owners) | In-app **and email (always; to the old address for an email change)**, not affected by levels or DND | `security_notice:<kind>:<id>` | Dismissed |
 
 **Reserved for Phase 2** (projects and issues, PRD §5.6): `assignment`, `review_request`. They're not raised in the first release.
@@ -74,6 +79,9 @@ The `<userId>` is implicit: every record belongs to one recipient (`inbox_items.
 - **Access is checked at delivery.** A recipient who has lost access by then doesn't receive the item.
 - **Grouping and reopening** follow §3.1.
 - **Auto-resolution** follows the "Resolves when" column. A resolved item moves to "Read" (Personal Inbox, PRD §5.3).
+- **Assistant mentions create no inbox item.** `@`-mentioning the assistant in a conversation notifies nobody (Assistant §6, Chat §6).
+- **Assistant items carry no content.** `assistant_brief`, `assistant_prep`, `assistant_nudge` and `assistant_reply` always have `preview = NULL`, their email and push carry no content (§6), and their click target is the assistant DM (Assistant §11).
+- **Assistant proactive items** (`assistant_brief`, `assistant_prep`, `assistant_nudge`) follow DND, focus time and time off (§5): they're held while any of these is active, including the in-app banner during time off, and then included in the summary (Assistant §8).
 
 ### 3.1 Inbox records
 
@@ -85,7 +93,7 @@ This section defines how `inbox_items` (§7) behaves. TDD §2.1 and §3.3 take t
   - On an **open** record: `count` goes up by 1, `preview`, `actor_id`, `source_seq`, `message_id` and `last_event_at` take the new event's values, and the record stays open.
   - On a **resolved** record: the record **reopens**. `state` returns to `unread`, `count` resets to 1, `resolved_at` is cleared, and the other fields take the new event's values **(default)**.
 - **Per-message keys** (mentions) never repeat, so those records never reopen.
-- **Preview:** a plain-text excerpt of the latest event, up to 140 characters, computed from the message's plain-text copy or the comment's text. Previews are for in-app display only; email content follows §6. A preview is **redactable** (set to NULL).
+- **Preview:** a plain-text excerpt of the latest event, up to 140 characters, computed from the message's plain-text copy or the comment's text. Previews are for in-app display only; email content follows §6. A preview is **redactable** (set to NULL). Assistant event types never have one (§3).
 - **Message deletion.** When the D1 copy applies a deletion (TDD §3.3), the projection consumer:
   - deletes per-message records (`mention`, `group_mention`, `channel_mention`, `here_mention`) for that message
   - for grouped records (`dm`, `thread_reply`), **recalculates `count`** from the D1 copy (messages after the recipient's read cursor that aren't deleted, aren't the recipient's own and aren't `call_chat`). It also sets `preview` to the latest remaining unread message's excerpt, or NULL. A record whose count reaches 0 is resolved.
@@ -212,6 +220,8 @@ The UserHub computes each member's **derived availability**: `{ state, until, so
   - **DMs, group DMs and private channels:** **no message text**, only "Ana sent you 2 messages" or "3 new mentions in a private channel", unless the member opts in to message text in their preferences.
   - **Public channels:** the text of the mentioning message **(default)**.
   - **Documents, comments and events:** title, plus the comment text for public-workspace documents only **(default)**.
+  - **Personal reminders** (`personal_reminder`): "You have a reminder due" with a link, **without the reminder text** **(default)**, because it may come from a private assistant conversation. The in-app record shows the text to its owner.
+  - **Assistant items** (`assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`): **no content**, only a fixed line with the assistant's display name ("Butler has your daily brief"), linking to the assistant DM. Push notifications follow the same rule when push exists ([Assistant](assistant.md) §11).
 - **Template:**
   - a fixed Officebox template with the workspace name, a deep link and the reason ("You were mentioned in #design")
   - a footer link "**Change email notifications**" opening preferences (an unsubscribe-style link that signs in normally; [Platform §10](platform.md))
@@ -251,7 +261,7 @@ CREATE TABLE inbox_items (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,                       -- notification | action | schedule | follow (Personal Inbox, PRD §5.3)
   event_type TEXT NOT NULL,                 -- §3 catalogue (Zod-validated)
-  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security
+  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder
   source_id TEXT NOT NULL,
   source_seq INTEGER,                       -- latest channel seq contributing (chat)
   message_id TEXT,                          -- latest message contributing (chat)
@@ -322,6 +332,9 @@ What ships in each milestone. Later slices extend earlier ones; nothing ships be
 | **M5a** | — | Time off in availability (`away_until`), "away until", time off holding rings and email | `time_off_start`, `time_off_end` |
 | **M5b** | `event_invite`, `event_update`, `event_cancel`, `rsvp_response`, `reminder`, `call_starting` | Focus time acting as DND | `reminder`, `event_start`, `focus_start`, `focus_end`; hourly RSVP batch |
 | **M6** | `doc_mention`, `doc_comment`, `comment_reply`, `access_request`, `access_request_decided`, `share` | — | — |
+| **M9a** | `personal_reminder` | — | ReminderScheduler kind `personal_reminder` |
+| **M9b** | `assistant_brief`, `assistant_prep`, `assistant_nudge` | Assistant mentions create no inbox item; proactive items held during DND, focus time and time off, then summarised | `assistant_brief`, `assistant_prep` |
+| **M9c** | `assistant_reply` (audio files ready) | — | — |
 
 ## 10. API
 

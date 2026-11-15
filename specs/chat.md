@@ -1,7 +1,7 @@
 # Spec: Chat
 
 **Status:** Draft for review
-**Revision:** Revised after independent review (14 Nov 2026); revised after the second review (channel config in the DO, unread definition, message size caps, in-call chat kind)
+**Revision:** Revised after independent review (14 Nov 2026); revised after the second review (channel config in the DO, unread definition, message size caps, in-call chat kind); updated for the [Assistant](assistant.md) spec (15 Nov 2026: assistant DM, `assistant` sender and message kinds, assistant mentions)
 **Feature name:** Chat (marketing name to be decided later)
 **Milestone:** M3 ([PLAN](../PLAN.md)), in slices M3a–M3c (§18) · **Related:** PRD §5.4, §8; TDD §2.2, §3.3–3.5; [Identity & Access](identity.md), [Permissions](permissions.md), [Notifications](notifications.md), [Platform](platform.md)
 
@@ -41,9 +41,10 @@ Real-time team conversation:
 | Forward | **Live reference**, no content copies |
 | Create from message / reply privately | **Copies the text**, at the user's choice; later changes to the source don't affect the copy |
 | Polls | **Multiple choice, anonymous option (truly anonymous), closing time** |
-| Unread | **Top-level messages and "also send to channel" copies** after the read cursor, excluding your own, system and deleted messages (§7) |
+| Unread | **Top-level messages and "also send to channel" copies** after the read cursor, excluding your own, system and deleted messages (§7). Assistant messages count like user messages **(default)**. |
 | Message size | **40 KB of text; the stored message state is capped at 100 KB**, so every message fits the queue's 128 KB limit (§4.1) |
 | In-call chat | Thread replies of kind **`call_chat`**: no follows, notifications, offline email or unread counts (§4.7) |
+| Assistant | A private **assistant DM** for every member, stored only in their Assistant DO, not a channel (§3.1). Mention replies and call notes are messages from the reserved sender **`assistant`**, kinds `assistant` and `call_notes` (§4.6). Behaviour is defined in [Assistant](assistant.md). |
 
 ## 3. Conversations
 
@@ -65,6 +66,7 @@ Real-time team conversation:
   - asks for a channel name, then **re-types the conversation in place**: `type` becomes `private`, `dm_key` is cleared, the name is set, and the current participants become members. The first converter becomes channel admin.
   - history is kept, because the participants already had it
   - **(default):** re-type rather than copy, so links and threads keep working.
+- **Assistant DM** ([Assistant §3](assistant.md), M9a): every member with assistant access has a private conversation with the assistant, **pinned at the top of their Direct messages section** (§3.3). It is **stored only in the member's Assistant DO** **(default)**: it is **not a `channels` row**, has no ChatChannel DO, no D1 message copy, isn't in workspace search (§12), and is never in the owner export. None of the conversation rules in this spec apply to it; [Assistant §4](assistant.md) defines it.
 - **#general** is created at setup (M3a provisioning, [Platform §13](platform.md)). Everyone is in it, and members can't leave it **(default)**.
 - **Read-only #general** is the `general_read_only` setting ([Platform §7](platform.md)), owner-only. Turning it on sets #general's `posting_policy = 'posters'` with **only owners and admins as posters**; turning it off restores `posting_policy = 'everyone'`. It's implemented through the normal posting policy, not a separate mechanism.
 
@@ -97,7 +99,7 @@ The ChatChannel DO enforces posting rights itself, so it needs the channel's cur
 
 ### 3.3 Sidebar
 
-- **Starred** at the top, then **custom sections** (named, collapsible, per member), then the default **Channels** and **Direct messages** sections.
+- **Starred** at the top, then **custom sections** (named, collapsible, per member), then the default **Channels** and **Direct messages** sections. The assistant DM (§3.1) is pinned at the top of **Direct messages** while the assistant is on and the member has access.
 - **Reordering sections and moving conversations:**
   - drag and drop, **or** a single-pointer alternative: a "Move to…" menu on each conversation and "Move up / Move down" on each section (WCAG 2.5.7)
   - keyboard reordering with Alt+Arrow keys **(default)**.
@@ -116,10 +118,12 @@ The ChatChannel DO enforces posting rights itself, so it needs the channel's cur
 - **Content format:** stored as structured rich text (ProseMirror JSON) plus a plain-text copy for search and notifications. The server never renders HTML (TDD §8.2).
 - **Mentions** with autocomplete:
   - `@person`, `@group`, `@channel` and `@here`
+  - the **`assistant` mention token** (`@Butler`, shown with the current assistant display name), offered only when the assistant and `assistant_mentions` are on and the member has assistant access (§6; [Assistant §6](assistant.md))
   - `#channel` references
   - pasted Officebox links become rich references.
 
   Mentions are stored by ID. The plain-text copy holds the handle at send time and is refreshed when a handle changes or a member is deleted ([Platform §3](platform.md)).
+- **Client-ID dedupe:** every send carries a `clientId`, and ChatChannel stores one message per `(sender, clientId)`; a repeat re-acknowledges the existing message (TDD §3.3). Assistant mention replies use `clientId = 'assistant:' + mentionMessageId`, so concurrent or repeated deliveries post one reply ([Assistant §6](assistant.md)).
 - **Emoji:** picker and `:shortcode:` autocomplete. Standard Unicode emoji only; custom emoji come later.
 - **Attachments:** button, drag-and-drop or paste. Uploads show progress, and a message can be sent while they finish (§10).
 - **Drafts** are saved per conversation (and per thread) on the device. Syncing across devices comes later.
@@ -142,6 +146,7 @@ The ChatChannel DO enforces posting rights itself, so it needs the channel's cur
 
 - Authors can **edit anytime**. Edited messages show "(edited)", and no history is visible.
 - Authors can **delete anytime**. Channel admins, and workspace admins **in public channels and in private channels they're a member of**, can delete any message in their scope. That is audited, and the author gets a `message_removed` notification ([Notifications §3](notifications.md)) **(default)**.
+- **Assistant replies** (sender `assistant`, §4.6) can be deleted by **the asker** (`system_payload.invoked_by`), and by channel admins and workspace admins within the scope above ([Assistant §6](assistant.md)).
 - Deleting leaves a "This message was deleted" placeholder if the message has thread replies; otherwise it disappears.
 - The content is redacted from the replay log, the D1 copy and search (TDD §2.2). The message's **files are deleted with it** (§10).
 - **Notifications are retracted:** matching inbox previews are cleared, counts are recalculated, and pending offline emails and toasts for the message are cancelled ([Notifications §3.1](notifications.md)).
@@ -179,10 +184,19 @@ System messages are messages with `sender_id = 'system'` and a `kind`:
 | `missed_call` | `{ huddleId, callerId }` | Calls (DMs) |
 | `poll_closed` | `{ pollId, results }` | Polls |
 | `message_pinned` | `{ messageId, byUserId }` | Pins |
+| `notes_started` / `notes_stopped` | `{ huddleId, byUserId }` | Call notes started or stopped, posted in the call's in-call chat ([Assistant](assistant.md) §12.3) **(default)** |
 
 - System messages may be posted into announcement channels, read-only #general and archived channels; posting policy doesn't apply to them.
 - `call_started` is the thread root for in-call chat (Calls §6.4). The HuddleRoom DO posts it through a typed ChatChannel RPC that returns a result, not a thrown denial (AGENTS §4.1).
-- **Message kinds:** `messages.kind` is `user`, `call_chat` (§4.7) or one of the system kinds above.
+- **Assistant messages** use the reserved non-user sender **`sender_id = 'assistant'`**, handled like `'system'`: it isn't a member and bypasses posting policy. Their `system_payload` holds `{ invoked_by, sources }` ([Assistant §14.2](assistant.md)). Two kinds:
+
+  | `kind` | Payload | Posted by |
+  |---|---|---|
+  | `assistant` | `{ invoked_by, sources }` | A reply to an `assistant` mention, in a thread under the mention **(default)** ([Assistant §6](assistant.md)) |
+  | `call_notes` | `{ invoked_by, sources }` | Call notes for a channel or DM call, linking to the transcript ([Assistant §12.3](assistant.md); Calls §6.1) |
+
+  Unlike system messages, assistant messages count as unread (§7).
+- **Message kinds:** `messages.kind` is `user`, `call_chat` (§4.7), `assistant`, `call_notes`, or one of the system kinds above.
 
 ### 4.7 In-call chat messages
 
@@ -217,6 +231,7 @@ Recipients, levels, DND and email follow [Notifications](notifications.md) §3�
 | `@group` | Group members who can read the conversation (in public channels, all group members; in private channels, members only) |
 | `@channel` | All channel members |
 | `@here` | Channel members online when it's sent |
+| `assistant` token (`@Butler`) | **Nobody.** It creates **no inbox item** and never offers "Add to the channel?". It queues an audience-safe reply from the assistant ([Assistant §6](assistant.md)). Typed `@Butler` text from a member without the token is plain text. |
 
 - **Editing to add a mention:** an edit that adds `@person`, `@group`, `@channel` or `@here` notifies **only the newly mentioned** people **(default)**. Removing a mention doesn't retract an existing notification.
 
@@ -229,7 +244,7 @@ Recipients, levels, DND and email follow [Notifications](notifications.md) §3�
 - **What counts as unread:** messages with `seq > last_read_seq` that are
   - **top-level messages**, or thread replies posted with **"also send to channel"** (counted once, in the channel)
   - **not** the member's own
-  - **not** system messages (no system kind counts as unread, including `member_joined`) **(default)**
+  - **not** system messages (no system kind counts as unread, including `member_joined`) **(default)**. Assistant messages (kinds `assistant` and `call_notes`, §4.6) are not system messages and **count like user messages** **(default)**
   - **not** deleted
   - **not** thread replies (those are counted per followed thread, below) or `call_chat` messages.
 - **Unread counts** come from the D1 copy (TDD §3.5). The copy lags the DO by a few seconds, so acceptance tests either wait for the copy to converge (projected seq ≥ the last sent seq) or compute the count from the DO's history **(default)**.
@@ -332,7 +347,7 @@ Recipients, levels, DND and email follow [Notifications](notifications.md) §3�
 - `preview.attached` / `preview.removed`
 
 Message state adds:
-- `kind` (`user`, `call_chat` or a system `kind`, §4.6), `format` (rich-text JSON, at most 100 KB) plus `text` (plain)
+- `kind` (`user`, `call_chat`, `assistant`, `call_notes` or a system `kind`, §4.6), `format` (rich-text JSON, at most 100 KB) plus `text` (plain)
 - `reply_count`, `last_reply_at`, `thread_participants`
 - `also_in_channel`
 - `forwarded_from` (message reference: `{ channelId, messageId }`)
@@ -356,13 +371,14 @@ ALTER TABLE channel_members ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;
 --   DMs and group DMs accept only 'default','all','nothing'. There is no per-conversation email delay (Notifications §6).
 
 -- messages (D1 copy, TDD §2.1): add
-ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';  -- 'user' | 'call_chat' | system kinds (§4.6)
+ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'user';  -- 'user' | 'call_chat' | 'assistant' | 'call_notes' | system kinds (§4.6)
 ALTER TABLE messages ADD COLUMN format TEXT;            -- rich-text JSON; body becomes the plain-text copy ("text")
 ALTER TABLE messages ADD COLUMN reply_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE messages ADD COLUMN previews TEXT;          -- JSON array of url_hash
 ALTER TABLE messages ADD COLUMN forwarded_from TEXT;    -- JSON { channelId, messageId }
 ALTER TABLE messages ADD COLUMN also_in_channel INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE messages ADD COLUMN system_payload TEXT;   -- JSON payload for system messages (§4.6); NULL for user messages
+ALTER TABLE messages ADD COLUMN system_payload TEXT;   -- JSON payload for system and assistant messages (§4.6); NULL for user messages
+-- sender_id is 'system' or 'assistant' for the reserved non-user senders (§4.6; Identity)
 
 -- thread follows: replaces the TDD `follows` table for threads (follows remains for other object types)
 -- muted = 1: the thread stays in the Threads view with its unread count, but raises no thread_reply notifications
@@ -493,6 +509,7 @@ Message send, `@channel`/`@here`, uploads, polls, link preview fetches and Notif
 - **Size caps:** a message whose rich-text JSON exceeds 100 KB is rejected; a 51st distinct reaction is refused; the largest allowed message passes through the queue to the D1 copy.
 - **Deletion and notifications:** deleting a mentioning message removes the mention from the recipient's inbox and cancels their pending offline email.
 - **In-call chat:** `call_chat` messages create no thread follows, no `thread_reply` records, no offline email and no unread counts.
+- **Assistant (M9, [Assistant §16](assistant.md)):** the assistant DM creates no `channels` row and no D1 message copy; an `assistant` mention creates no inbox item and no "Add to channel?" prompt; two deliveries of the same mention post one reply; the asker and admins can delete the reply; assistant messages count as unread.
 - **Search:** each filter (`from:`, `in:`, `with:`, `has:file`, `has:link`, `is:thread`, dates) returns only matching messages from conversations the searcher can read, as an automated test per filter.
 - **Performance:**
   - p95 message round trip under 300 ms in-region (TDD §9.2), measured by the Playwright harness running in the same region as the Worker over 1,000 messages **(default)**
