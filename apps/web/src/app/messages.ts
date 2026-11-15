@@ -4,6 +4,23 @@
  *
  * Feature names stay generic ("Chat", "Calendar", "Documents"); marketing names come later (AGENTS §8).
  */
+import type { ErrorCode } from "@officebox/shared";
+
+/** What people see for each server error code. Generic copy for now (default). */
+const errorByCode: Record<ErrorCode, string> = {
+  validation_failed: "Some details need fixing. Check the highlighted fields and try again.",
+  unauthenticated: "Your session has ended. Sign in again to continue.",
+  forbidden: "You don't have permission to do that.",
+  not_found: "We couldn't find that. It may have been moved or deleted.",
+  conflict: "Someone else changed this at the same time. Refresh and try again.",
+  gone: "That's no longer available.",
+  payload_too_large: "That's too large to upload or save.",
+  rate_limited: "That's happening too often. Wait a moment and try again.",
+  read_only: "The workspace is read-only right now, so changes can't be saved.",
+  unavailable: "This service isn't available right now. Try again later.",
+  internal: "Something went wrong on our side. Try again in a moment.",
+};
+
 export const messages = {
   appName: "Officebox",
   /** Placeholder until the workspace name comes from admin settings (M1). */
@@ -51,6 +68,17 @@ export const messages = {
       label: "Admin",
       description: "Members, settings and workspace health.",
     },
+  },
+  errors: {
+    byCode: errorByCode,
+    generic: "Something went wrong. Try again in a moment.",
+    server: "The server had a problem. Try again in a moment.",
+    invalidResponse: "The server sent an unexpected response. Try again in a moment.",
+    network: "Can't reach the server. Check your connection and try again.",
+    timeout: "The server took too long to respond. Try again.",
+    /** A change that timed out or lost its connection may still have gone through. */
+    outcomeUnknown: "We couldn't confirm this went through. Check before trying again.",
+    aborted: "The request was cancelled.",
   },
   notFound: {
     title: "Page not found",

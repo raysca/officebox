@@ -1,10 +1,22 @@
-import { healthResponseSchema } from "@officebox/shared";
+import { ERROR_CODES, healthResponseSchema } from "@officebox/shared";
+import type { QueryClient } from "@tanstack/react-query";
+import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { jsonResponse } from "../../test/render-app";
+import { messages } from "../../app/messages";
+import { Toaster } from "../ui/Toaster";
 import { toastStore } from "../ui/toast-store";
-import { ApiRequestError, apiRequest, CSRF_HEADER, describeApiError, unwrap, type ApiClientError } from "./client";
-import { createQueryClient, shouldRetry } from "./query-client";
+import {
+  ApiRequestError,
+  apiRequest,
+  CSRF_HEADER,
+  describeApiError,
+  parseRetryAfter,
+  unwrap,
+  type ApiClientError,
+} from "./client";
+import { createQueryClient, MAX_RETRY_DELAY_MS, retryDelay, shouldRetry } from "./query-client";
 
 function fetchReturning(response: Response | (() => Promise<Response>)) {
   return vi.fn<typeof fetch>(() => (typeof response === "function" ? response() : Promise.resolve(response)));
@@ -122,6 +134,31 @@ describe("apiRequest", () => {
   });
 });
 
+describe("Retry-After", () => {
+  it("is read from the header, as seconds or an HTTP date", () => {
+    expect(parseRetryAfter(null)).toBeUndefined();
+    expect(parseRetryAfter("")).toBeUndefined();
+    expect(parseRetryAfter("120")).toBe(120);
+    expect(parseRetryAfter("soon")).toBeUndefined();
+    const now = Date.parse("2026-11-15T10:00:00Z");
+    expect(parseRetryAfter("Sun, 15 Nov 2026 10:00:30 GMT", now)).toBe(30);
+    expect(parseRetryAfter("Sun, 15 Nov 2026 09:00:00 GMT", now)).toBe(0);
+  });
+
+  it("is carried on http and api errors, the body's value winning", async () => {
+    const headers = { "Retry-After": "7", "Content-Type": "application/json" };
+    const plain = new Response("", { status: 429, headers });
+    expect(await apiRequest("/api/x", { fetch: fetchReturning(plain) })).toEqual({
+      ok: false,
+      error: { kind: "http", status: 429, retryAfterSeconds: 7 },
+    });
+    const body = JSON.stringify({ error: { code: "rate_limited", message: "x", retryAfterSeconds: 3 } });
+    const withBody = new Response(body, { status: 429, headers });
+    const result = await apiRequest("/api/x", { fetch: fetchReturning(withBody) });
+    expect(!result.ok && result.error.kind === "api" && result.error.retryAfterSeconds).toBe(3);
+  });
+});
+
 describe("unwrap and describeApiError", () => {
   it("returns the value or throws an ApiRequestError carrying the typed error", () => {
     expect(unwrap({ ok: true, value: 1 })).toBe(1);
@@ -133,17 +170,36 @@ describe("unwrap and describeApiError", () => {
       expect(error).toBeInstanceOf(ApiRequestError);
       expect((error as ApiRequestError).detail).toEqual(detail);
       expect((error as ApiRequestError).status).toBe(404);
-      expect((error as ApiRequestError).message).toBe("Gone fishing.");
+      // The Error message is a developer summary for logs.
+      expect((error as ApiRequestError).message).toBe("API error 404 not_found: Gone fishing.");
+    }
+  });
+
+  it("describes server errors by code, never with the server's message", () => {
+    for (const code of ERROR_CODES) {
+      const text = describeApiError({ kind: "api", status: 400, error: { code, message: "internal detail" } });
+      expect(text).toBe(messages.errors.byCode[code]);
+      expect(text).not.toContain("internal detail");
     }
   });
 
   it("gives a safe message for every kind", () => {
-    expect(describeApiError({ kind: "network" })).toMatch(/Can't reach the server/);
-    expect(describeApiError({ kind: "timeout", timeoutMs: 1 })).toMatch(/too long/);
-    expect(describeApiError({ kind: "http", status: 503 })).toMatch(/server had a problem/);
-    expect(describeApiError({ kind: "http", status: 400 })).toBe("The request failed (HTTP 400).");
-    expect(describeApiError({ kind: "invalid_response", status: 200 })).toMatch(/unexpected response/);
-    expect(describeApiError({ kind: "aborted" })).toMatch(/cancelled/);
+    expect(describeApiError({ kind: "network" })).toBe(messages.errors.network);
+    expect(describeApiError({ kind: "timeout", timeoutMs: 1 })).toBe(messages.errors.timeout);
+    expect(describeApiError({ kind: "http", status: 503 })).toBe(messages.errors.server);
+    expect(describeApiError({ kind: "http", status: 400 })).toBe(messages.errors.generic);
+    expect(describeApiError({ kind: "http", status: 401 })).toBe(messages.errors.byCode.unauthenticated);
+    expect(describeApiError({ kind: "http", status: 403 })).toBe(messages.errors.byCode.forbidden);
+    expect(describeApiError({ kind: "http", status: 404 })).toBe(messages.errors.byCode.not_found);
+    expect(describeApiError({ kind: "http", status: 429 })).toBe(messages.errors.byCode.rate_limited);
+    expect(describeApiError({ kind: "invalid_response", status: 200 })).toBe(messages.errors.invalidResponse);
+    expect(describeApiError({ kind: "aborted" })).toBe(messages.errors.aborted);
+  });
+
+  it("says a mutation's outcome is unknown after a timeout or a lost connection", () => {
+    expect(describeApiError({ kind: "network" }, "mutation")).toBe(messages.errors.outcomeUnknown);
+    expect(describeApiError({ kind: "timeout", timeoutMs: 1 }, "mutation")).toBe(messages.errors.outcomeUnknown);
+    expect(messages.errors.outcomeUnknown).toMatch(/couldn't confirm/);
   });
 });
 
@@ -152,15 +208,19 @@ describe("query retries", () => {
   const api = (status: number) =>
     e({ kind: "api", status, error: { code: status >= 500 ? "internal" : "forbidden", message: "x" } });
 
-  it("retries network errors, timeouts and 5xx responses", () => {
+  it("retries network errors, timeouts, 5xx, 408 and 429", () => {
     expect(shouldRetry(0, e({ kind: "network" }))).toBe(true);
     expect(shouldRetry(0, e({ kind: "timeout", timeoutMs: 1 }))).toBe(true);
     expect(shouldRetry(0, api(500))).toBe(true);
     expect(shouldRetry(0, e({ kind: "http", status: 503 }))).toBe(true);
+    for (const status of [408, 429]) {
+      expect(shouldRetry(0, api(status))).toBe(true);
+      expect(shouldRetry(0, e({ kind: "http", status }))).toBe(true);
+    }
   });
 
-  it("never retries 4xx responses, invalid responses, cancellations or unknown errors", () => {
-    for (const status of [400, 401, 403, 404, 409, 429]) {
+  it("never retries other 4xx responses, invalid responses, cancellations or unknown errors", () => {
+    for (const status of [400, 401, 403, 404, 409, 413]) {
       expect(shouldRetry(0, api(status))).toBe(false);
       expect(shouldRetry(0, e({ kind: "http", status }))).toBe(false);
     }
@@ -173,28 +233,55 @@ describe("query retries", () => {
     expect(shouldRetry(1, e({ kind: "network" }))).toBe(true);
     expect(shouldRetry(2, e({ kind: "network" }))).toBe(false);
   });
+
+  it("waits for Retry-After, capped, and otherwise backs off exponentially", () => {
+    expect(retryDelay(0, e({ kind: "http", status: 429, retryAfterSeconds: 5 }))).toBe(5_000);
+    expect(retryDelay(0, e({ kind: "http", status: 429, retryAfterSeconds: 3600 }))).toBe(MAX_RETRY_DELAY_MS);
+    expect(retryDelay(0, e({ kind: "network" }))).toBe(1_000);
+    expect(retryDelay(2, e({ kind: "network" }))).toBe(4_000);
+    expect(retryDelay(10, new Error("x"))).toBe(10_000);
+  });
+
+  it("never retries mutations, even on 429", async () => {
+    const client = createQueryClient();
+    const mutationFn = vi.fn(() => Promise.reject(e({ kind: "http", status: 429, retryAfterSeconds: 0 })));
+    await client
+      .getMutationCache()
+      .build(client, { mutationFn })
+      .execute(undefined)
+      .catch(() => undefined);
+    expect(mutationFn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("error toasts", () => {
   const failure = () =>
     Promise.reject(new ApiRequestError({ kind: "api", status: 409, error: { code: "conflict", message: "Taken." } }));
 
+  async function runMutation(client: QueryClient, mutationFn: () => Promise<unknown>, meta?: { errorToast?: boolean }) {
+    await client
+      .getMutationCache()
+      .build(client, { mutationFn, meta })
+      .execute(undefined)
+      .catch(() => undefined);
+  }
+
   it("shows a toast when a mutation fails, unless it opts out", async () => {
     const client = createQueryClient();
-    await client
-      .getMutationCache()
-      .build(client, { mutationFn: failure })
-      .execute(undefined)
-      .catch(() => undefined);
-    expect(toastStore.getSnapshot().map((t) => [t.tone, t.message])).toEqual([["error", "Taken."]]);
+    await runMutation(client, failure);
+    expect(toastStore.getSnapshot().map((t) => [t.tone, t.message])).toEqual([
+      ["error", messages.errors.byCode.conflict],
+    ]);
 
     toastStore.clear();
-    await client
-      .getMutationCache()
-      .build(client, { mutationFn: failure, meta: { errorToast: false } })
-      .execute(undefined)
-      .catch(() => undefined);
+    await runMutation(client, failure, { errorToast: false });
     expect(toastStore.getSnapshot()).toEqual([]);
+  });
+
+  it("says a timed-out mutation may have gone through", async () => {
+    const client = createQueryClient();
+    await runMutation(client, () => Promise.reject(new ApiRequestError({ kind: "timeout", timeoutMs: 1 })));
+    expect(toastStore.getSnapshot().map((t) => t.message)).toEqual([messages.errors.outcomeUnknown]);
   });
 
   it("shows query errors inline by default, and as a toast only when asked", async () => {
@@ -205,6 +292,52 @@ describe("error toasts", () => {
     await client
       .fetchQuery({ queryKey: ["b"], queryFn: failure, retry: false, meta: { errorToast: true } })
       .catch(() => undefined);
-    expect(toastStore.getSnapshot().map((t) => t.message)).toEqual(["Taken."]);
+    expect(toastStore.getSnapshot().map((t) => t.message)).toEqual([messages.errors.byCode.conflict]);
+  });
+
+  it("never puts raw error text on the screen", async () => {
+    render(<Toaster />);
+    const client = createQueryClient();
+    const leak = () => Promise.reject(new Error("secret stack detail"));
+    const serverLeak = () =>
+      Promise.reject(new ApiRequestError({ kind: "api", status: 500, error: { code: "internal", message: "secret" } }));
+
+    await act(async () => {
+      await runMutation(client, leak);
+      await client
+        .fetchQuery({ queryKey: ["leak"], queryFn: leak, retry: false, meta: { errorToast: true } })
+        .catch(() => undefined);
+      await runMutation(client, serverLeak);
+    });
+
+    expect(screen.getAllByText(messages.errors.generic)).toHaveLength(1);
+    expect(screen.getByText(messages.errors.byCode.internal)).toBeDefined();
+    expect(document.body.textContent).not.toContain("secret");
+  });
+});
+
+describe("unauthorized hook", () => {
+  it("is called for 401 and unauthenticated failures from queries and mutations, and nothing else", async () => {
+    const onUnauthorized = vi.fn();
+    const client = createQueryClient({ onUnauthorized });
+    const reject = (detail: ApiClientError) => () => Promise.reject(new ApiRequestError(detail));
+
+    await client
+      .fetchQuery({ queryKey: ["u1"], queryFn: reject({ kind: "http", status: 401 }), retry: false })
+      .catch(() => undefined);
+    await client
+      .getMutationCache()
+      .build(client, {
+        mutationFn: reject({ kind: "api", status: 401, error: { code: "unauthenticated", message: "x" } }),
+        meta: { errorToast: false },
+      })
+      .execute(undefined)
+      .catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(2);
+
+    await client
+      .fetchQuery({ queryKey: ["u2"], queryFn: reject({ kind: "http", status: 403 }), retry: false })
+      .catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(2);
   });
 });

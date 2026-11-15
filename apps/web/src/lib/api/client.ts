@@ -1,5 +1,6 @@
 import { apiErrorBodySchema, err, ok, type ApiError, type Result } from "@officebox/shared";
 import type { z } from "zod";
+import { messages } from "../../app/messages";
 
 /**
  * Typed fetch wrapper for the Officebox API.
@@ -19,9 +20,9 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export type ApiClientError =
   /** The server answered with the standard error body (`{ error: { code, message } }`). */
-  | { kind: "api"; status: number; error: ApiError }
+  | { kind: "api"; status: number; error: ApiError; retryAfterSeconds?: number }
   /** A non-2xx response without a valid error body (a proxy page, an empty 502, ...). */
-  | { kind: "http"; status: number }
+  | { kind: "http"; status: number; retryAfterSeconds?: number }
   /** A 2xx response whose body didn't match the expected schema. */
   | { kind: "invalid_response"; status: number }
   /** The request never got a response: offline, DNS, connection reset, CORS. */
@@ -90,8 +91,13 @@ export async function apiRequest<S extends z.ZodType>(
     if (!response.ok) {
       const body = await readJson(response);
       const parsed = apiErrorBodySchema.safeParse(body);
-      if (parsed.success) return err({ kind: "api", status: response.status, error: parsed.data.error });
-      return err({ kind: "http", status: response.status });
+      // The body's retryAfterSeconds wins over the Retry-After header when both are present.
+      const retryAfterSeconds =
+        (parsed.success ? parsed.data.error.retryAfterSeconds : undefined) ??
+        parseRetryAfter(response.headers.get("Retry-After"));
+      const extra = retryAfterSeconds === undefined ? {} : { retryAfterSeconds };
+      if (parsed.success) return err({ kind: "api", status: response.status, error: parsed.data.error, ...extra });
+      return err({ kind: "http", status: response.status, ...extra });
     }
 
     if (!options.schema) return ok(undefined as Output<S>);
@@ -111,6 +117,15 @@ export async function apiRequest<S extends z.ZodType>(
   }
 }
 
+/** Seconds from a Retry-After header: either delay-seconds or an HTTP date. */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
+  if (value === null || value.trim() === "") return undefined;
+  if (/^\d+$/.test(value.trim())) return Number(value.trim());
+  const date = Date.parse(value);
+  if (Number.isNaN(date)) return undefined;
+  return Math.max(0, Math.ceil((date - now) / 1000));
+}
+
 /** Parses a JSON body, or returns undefined when the body is empty or not JSON. */
 async function readJson(response: Response): Promise<unknown> {
   const text = await response.text();
@@ -127,7 +142,8 @@ export class ApiRequestError extends Error {
   readonly detail: ApiClientError;
 
   constructor(detail: ApiClientError) {
-    super(describeApiError(detail));
+    // A developer-facing summary for logs. Show people describeApiError(detail) instead.
+    super(developerSummary(detail));
     this.name = "ApiRequestError";
     this.detail = detail;
   }
@@ -138,28 +154,61 @@ export class ApiRequestError extends Error {
   }
 }
 
+function developerSummary(detail: ApiClientError): string {
+  switch (detail.kind) {
+    case "api":
+      return `API error ${detail.status} ${detail.error.code}: ${detail.error.message}`;
+    case "http":
+    case "invalid_response":
+      return `${detail.kind} (HTTP ${detail.status})`;
+    case "timeout":
+      return `timeout after ${detail.timeoutMs} ms`;
+    case "network":
+    case "aborted":
+      return detail.kind;
+  }
+}
+
+/** Whether a failure means the session is missing or expired (M1 handles it centrally). */
+export function isUnauthorized(error: ApiClientError): boolean {
+  if (error.kind === "api" && error.error.code === "unauthenticated") return true;
+  return "status" in error && error.status === 401;
+}
+
 /** Returns the value or throws an `ApiRequestError`. Use inside query and mutation functions only. */
 export function unwrap<T>(result: Result<T, ApiClientError>): T {
   if (result.ok) return result.value;
   throw new ApiRequestError(result.error);
 }
 
-/** A short message that is safe to show to the person. */
-export function describeApiError(error: ApiClientError): string {
+/**
+ * Whether the failed request was a query (reading) or a mutation (changing something). For a
+ * mutation that timed out or lost its connection, the change may or may not have happened.
+ */
+export type RequestOperation = "query" | "mutation";
+
+/**
+ * A short message that is safe to show to the person. Server errors are described by their code,
+ * never by the server's `message`, which is for logs and developers (packages/shared errors.ts).
+ */
+export function describeApiError(error: ApiClientError, operation: RequestOperation = "query"): string {
+  const copy = messages.errors;
   switch (error.kind) {
     case "api":
-      return error.error.message;
+      return copy.byCode[error.error.code] ?? copy.generic;
     case "http":
-      return error.status >= 500
-        ? "The server had a problem. Try again in a moment."
-        : `The request failed (HTTP ${error.status}).`;
+      if (error.status === 401) return copy.byCode.unauthenticated;
+      if (error.status === 403) return copy.byCode.forbidden;
+      if (error.status === 404) return copy.byCode.not_found;
+      if (error.status === 429) return copy.byCode.rate_limited;
+      return error.status >= 500 ? copy.server : copy.generic;
     case "invalid_response":
-      return "The server sent an unexpected response.";
+      return copy.invalidResponse;
     case "network":
-      return "Can't reach the server. Check your connection and try again.";
+      return operation === "mutation" ? copy.outcomeUnknown : copy.network;
     case "timeout":
-      return "The server took too long to respond. Try again.";
+      return operation === "mutation" ? copy.outcomeUnknown : copy.timeout;
     case "aborted":
-      return "The request was cancelled.";
+      return copy.aborted;
   }
 }
