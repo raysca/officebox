@@ -1,34 +1,103 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { createRootRouteWithContext, createRoute, createRouter, type RouterHistory } from "@tanstack/react-router";
+import {
+  createRootRouteWithContext,
+  createRoute,
+  createRouter,
+  Outlet,
+  redirect,
+  type RouterHistory,
+} from "@tanstack/react-router";
+import { ApiRequestError, errorCodeOf } from "../lib/api/client";
+import { meQuery, meQueryKey } from "../lib/api/identity";
+import { Toaster } from "../lib/ui/Toaster";
 import { RootErrorPage, RouteErrorPage } from "./ErrorPage";
 import { AppShell } from "./layout/AppShell";
+import { PublicLayout } from "./layout/PublicLayout";
+import { DevicesPage } from "./routes/devices";
 import { AdminPage, CalendarPage, ChatPage, DocumentsPage, HomePage, NotFoundPage } from "./routes/pages";
+import { SetupPage } from "./routes/setup";
+import { SignInPage, signInSearchSchema } from "./routes/sign-in";
 
 /**
  * Routes are **code-based** (default): declared here with createRoute rather than generated from a
  * routes/ folder. That needs no code generator in the build or the typecheck, keeps the whole route
- * tree readable in one file, and is fully typed all the same. Features add their routes under the
- * root as they land; if the tree outgrows this file we can switch to file-based routing then.
+ * tree readable in one file, and is fully typed all the same.
+ *
+ * Two layouts sit under the root:
+ * - **public** (`/setup`, `/sign-in`): no shell, no session needed.
+ * - **app** (everything else): the shell. Its `beforeLoad` loads `GET /api/me` and redirects to
+ *   `/setup` before first-run setup (TDD §6.8) or to `/sign-in` without a session, remembering where
+ *   the person was going.
  */
 
 export interface RouterContext {
   queryClient: QueryClient;
 }
 
+function RootLayout() {
+  return (
+    <>
+      <Outlet />
+      <Toaster />
+    </>
+  );
+}
+
 const rootRoute = createRootRouteWithContext<RouterContext>()({
-  component: AppShell,
+  component: RootLayout,
   errorComponent: RootErrorPage,
-  // Rendered inside the shell for any path no route matches.
-  notFoundComponent: NotFoundPage,
 });
 
-const homeRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: HomePage });
-const chatRoute = createRoute({ getParentRoute: () => rootRoute, path: "/chat", component: ChatPage });
-const calendarRoute = createRoute({ getParentRoute: () => rootRoute, path: "/calendar", component: CalendarPage });
-const documentsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/documents", component: DocumentsPage });
-const adminRoute = createRoute({ getParentRoute: () => rootRoute, path: "/admin", component: AdminPage });
+const publicRoute = createRoute({ getParentRoute: () => rootRoute, id: "public", component: PublicLayout });
 
-export const routeTree = rootRoute.addChildren([homeRoute, chatRoute, calendarRoute, documentsRoute, adminRoute]);
+const setupRoute = createRoute({ getParentRoute: () => publicRoute, path: "/setup", component: SetupPage });
+
+const signInRoute = createRoute({
+  getParentRoute: () => publicRoute,
+  path: "/sign-in",
+  validateSearch: signInSearchSchema,
+  component: function SignInRoute() {
+    return <SignInPage search={signInRoute.useSearch()} />;
+  },
+});
+
+const appRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  id: "app",
+  component: AppShell,
+  notFoundComponent: NotFoundPage,
+  beforeLoad: async ({ context, location }) => {
+    try {
+      await context.queryClient.ensureQueryData(meQuery);
+    } catch (error) {
+      const code = errorCodeOf(error);
+      // TanStack Router's redirects are thrown values by design, not Errors.
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      if (code === "setup_required") throw redirect({ to: "/setup" });
+      if (code === "unauthenticated" || (error instanceof ApiRequestError && error.status === 401)) {
+        context.queryClient.removeQueries({ queryKey: meQueryKey });
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw redirect({ to: "/sign-in", search: { redirect: location.href } });
+      }
+      throw error;
+    }
+  },
+});
+
+const homeRoute = createRoute({ getParentRoute: () => appRoute, path: "/", component: HomePage });
+const chatRoute = createRoute({ getParentRoute: () => appRoute, path: "/chat", component: ChatPage });
+const calendarRoute = createRoute({ getParentRoute: () => appRoute, path: "/calendar", component: CalendarPage });
+const documentsRoute = createRoute({ getParentRoute: () => appRoute, path: "/documents", component: DocumentsPage });
+const adminRoute = createRoute({ getParentRoute: () => appRoute, path: "/admin", component: AdminPage });
+const devicesRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings/devices", component: DevicesPage });
+// Any other path: the not-found page inside the shell, behind the same session check. A splat route
+// rather than the root's notFoundComponent, which would render outside the shell.
+const notFoundRoute = createRoute({ getParentRoute: () => appRoute, path: "$", component: NotFoundPage });
+
+export const routeTree = rootRoute.addChildren([
+  publicRoute.addChildren([setupRoute, signInRoute]),
+  appRoute.addChildren([homeRoute, chatRoute, calendarRoute, documentsRoute, adminRoute, devicesRoute, notFoundRoute]),
+]);
 
 export interface CreateAppRouterOptions {
   queryClient: QueryClient;

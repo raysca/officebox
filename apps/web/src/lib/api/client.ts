@@ -5,9 +5,15 @@ import { messages } from "../../app/messages";
 /**
  * Typed fetch wrapper for the Officebox API.
  *
- * - Same-origin cookies are always sent (`credentials: "same-origin"`); the session cookie arrives in M1.
+ * - Same-origin cookies are always sent (`credentials: "same-origin"`): the `HttpOnly` session cookies
+ *   (TDD §3.1), which this code never sees.
  * - State-changing requests carry `X-Officebox-Request: 1`, which the Worker requires as part of its
- *   CSRF defence (TDD §8).
+ *   CSRF defence (TDD §8.2); the browser adds `Origin`.
+ * - **Session refresh:** the access cookie lasts 15 minutes. When a request is refused as
+ *   `unauthenticated`, the client calls `POST /api/auth/refresh` once (shared by every request that
+ *   failed at the same moment, so the refresh token rotates once) and retries the request. If the
+ *   refresh fails too, the original 401 is returned and the query client's `onUnauthorized` sends the
+ *   person to sign-in.
  * - Every outcome is a typed `Result`; nothing here throws for an expected failure (AGENTS §4.1).
  *   TanStack Query wants query functions that throw, so `unwrap` converts a failed result into an
  *   `ApiRequestError` at that boundary only.
@@ -43,13 +49,49 @@ export interface ApiRequestOptions<S extends z.ZodType> {
   headers?: Record<string, string>;
   /** Injected in tests; defaults to the global fetch. */
   fetch?: typeof fetch;
+  /** Try a session refresh and one retry on `unauthenticated` (default true; auth endpoints never do). */
+  refresh?: boolean;
 }
 
 type Output<S> = S extends z.ZodType ? z.output<S> : undefined;
 
+export const REFRESH_PATH = "/api/auth/refresh";
+
+/** Paths whose 401 means "not signed in" by design, so a refresh would never help. */
+function refreshable(path: string): boolean {
+  return !path.startsWith("/api/auth/") && !path.startsWith("/api/setup");
+}
+
+// One refresh at a time per page: concurrent 401s wait for the same attempt.
+let refreshing: Promise<boolean> | null = null;
+
+function refreshSession(doFetch: typeof fetch): Promise<boolean> {
+  refreshing ??= send(REFRESH_PATH, { method: "POST", fetch: doFetch })
+    .then((result) => result.ok)
+    .finally(() => {
+      refreshing = null;
+    });
+  return refreshing;
+}
+
+function isSessionExpired(error: ApiClientError): boolean {
+  return error.kind === "api" && error.error.code === "unauthenticated";
+}
+
 export async function apiRequest<S extends z.ZodType>(
   path: string,
   options: ApiRequestOptions<S> = {},
+): Promise<Result<Output<S>, ApiClientError>> {
+  const first = await send(path, options);
+  if (first.ok || options.refresh === false || !refreshable(path) || !isSessionExpired(first.error)) return first;
+  const doFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+  if (!(await refreshSession(doFetch))) return first;
+  return send(path, options);
+}
+
+async function send<S extends z.ZodType>(
+  path: string,
+  options: ApiRequestOptions<S>,
 ): Promise<Result<Output<S>, ApiClientError>> {
   if (options.signal?.aborted) return err({ kind: "aborted" });
 
@@ -229,10 +271,19 @@ function developerSummary(detail: ApiClientError): string {
   }
 }
 
-/** Whether a failure means the session is missing or expired (M1 handles it centrally). */
+/**
+ * Whether a failure means the session is missing or expired, so the person must sign in again. A
+ * wrong password at sign-in (`invalid_credentials`, also a 401) is not.
+ */
 export function isUnauthorized(error: ApiClientError): boolean {
-  if (error.kind === "api" && error.error.code === "unauthenticated") return true;
+  if (error.kind === "api") return error.error.code === "unauthenticated";
   return "status" in error && error.status === 401;
+}
+
+/** The API error code of a failure, when the server sent one. */
+export function errorCodeOf(error: unknown): ApiError["code"] | undefined {
+  const detail = error instanceof ApiRequestError ? error.detail : null;
+  return detail?.kind === "api" ? detail.error.code : undefined;
 }
 
 /** Returns the value or throws an `ApiRequestError`. Use inside query and mutation functions only. */

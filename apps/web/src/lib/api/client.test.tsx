@@ -365,3 +365,40 @@ describe("unauthorized hook", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("session refresh", () => {
+  const unauthenticated = () => jsonResponse({ error: { code: "unauthenticated", message: "x" } }, 401);
+
+  it("refreshes once for concurrent 401s and retries each request", async () => {
+    let refreshed = false;
+    const fetch = vi.fn<typeof globalThis.fetch>((input) => {
+      const url = typeof input === "string" ? input : "";
+      if (url === "/api/auth/refresh") {
+        refreshed = true;
+        return Promise.resolve(jsonResponse(null));
+      }
+      return Promise.resolve(refreshed ? jsonResponse({ ok: true }) : unauthenticated());
+    });
+    const schema = z.object({ ok: z.boolean() });
+    const [a, b] = await Promise.all([
+      apiRequest("/api/one", { schema, fetch }),
+      apiRequest("/api/two", { schema, fetch }),
+    ]);
+    expect(a).toEqual({ ok: true, value: { ok: true } });
+    expect(b).toEqual({ ok: true, value: { ok: true } });
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/auth/refresh")).toHaveLength(1);
+    const [, init] = fetch.mock.calls.find(([url]) => url === "/api/auth/refresh") ?? [];
+    expect((init?.headers as Record<string, string>)[CSRF_HEADER]).toBe("1");
+  });
+
+  it("returns the original 401 when the refresh fails, and never refreshes for auth endpoints", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(() => Promise.resolve(unauthenticated()));
+    const result = await apiRequest("/api/me", { fetch });
+    expect(!result.ok && result.error).toMatchObject({ kind: "api", status: 401 });
+    expect(fetch).toHaveBeenCalledTimes(2); // the request and one refresh
+
+    const signIn = fetchReturning(jsonResponse({ error: { code: "invalid_credentials", message: "x" } }, 401));
+    await apiRequest("/api/auth/password", { method: "POST", fetch: signIn });
+    expect(signIn).toHaveBeenCalledTimes(1);
+  });
+});

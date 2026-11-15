@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { renderApp } from "../test/render-app";
+import { healthyFetch, renderApp } from "../test/render-app";
 
 const AREAS = [
   { path: "/", label: "Home" },
@@ -78,7 +78,9 @@ describe("routing", () => {
   });
 
   it("shows the service as unavailable when /health fails", async () => {
-    const failing = () => Promise.resolve(new Response("", { status: 404 }));
+    const failing = healthyFetch({
+      routes: [(url) => (url.endsWith("/health") ? new Response("", { status: 404 }) : undefined)],
+    });
     await renderApp("/", { fetch: failing });
     expect(await screen.findByText("Service status: Unavailable")).toBeDefined();
   });
