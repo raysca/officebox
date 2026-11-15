@@ -19,6 +19,37 @@ R2 must be enabled on the Cloudflare account (dashboard → R2) before the first
 
 To deploy by hand instead: `npx wrangler login`, create the database with `npx wrangler d1 create officebox` and add its `database_id` to `wrangler.jsonc`, then run `npm run build && npm run deploy`.
 
+### Deploy from GitHub Actions
+
+Instead of the Deploy button's Workers Builds, this repository can deploy itself from GitHub Actions (`.github/workflows/deploy.yml`). Pushes to `main` deploy once CI passes, and you can run it by hand: Actions → Deploy → Run workflow.
+
+**Use one deploy path, not both.** If your copy came from the Deploy button, Workers Builds already deploys every push. Disconnect it (dashboard → your Worker → Settings → Builds → Disconnect) before adding the secrets below, or two deploys race on every push. Until both secrets exist, the workflow skips with a notice and the run shows as green.
+
+1. **Enable R2** on the Cloudflare account (dashboard → R2; it needs a payment method). If the account has never had a `workers.dev` subdomain, register one (dashboard → Workers & Pages).
+2. **Create an API token.** In the dashboard go to My Profile → API Tokens → Create Token → Create Custom Token. An account-owned token (Manage Account → Account API Tokens) also works. Scope it to the account you deploy to, with these **Account** permissions:
+   - Workers Scripts: Edit
+   - D1: Edit
+   - Workers R2 Storage: Edit
+   - Queues: Edit
+   - Account Settings: Read
+
+   If a deploy fails with an authorisation error naming another product, add that permission. Please tell us too, so we can update this list.
+3. **Find your account ID**: dashboard → Workers & Pages → Account details.
+4. **Add both to GitHub.** In the repository go to Settings → Environments → New environment and name it `production`.
+   - Under **Deployment branches**, choose *Selected branches* and add `main`.
+   - Add two environment secrets: `CLOUDFLARE_API_TOKEN` (the token) and `CLOUDFLARE_ACCOUNT_ID` (the account ID).
+   - Optionally add yourself under **Required reviewers**, so every deploy waits for your approval.
+
+Each run checks out the commit CI tested, and deploys only if it is still the tip of `main`. It builds, then `npm run deploy:ci` runs these steps in order:
+- **Preflight checks.**
+- **Database.** Creates the `officebox` D1 database if the account has none by that name. It's found by name, so no ID is committed.
+- **Migrations.** Applies D1 migrations.
+- **Deploy.** `wrangler deploy` creates the R2 bucket and queues on first use.
+
+If a step fails, the run stops and the previous Worker version stays live. Migrations that already ran stay applied, which is safe by design (expand/contract, TDD §6.5).
+
+Only the deploy step can read the token. Never paste it into an issue, pull request or chat; it belongs only in the GitHub secret.
+
 ## Develop
 
 Requires Node 22.22 or later.
