@@ -396,9 +396,11 @@ The Today, Upcoming, Inbox, Assigned to me and Following views (PRD §5.3).
 
 **Spec:** [specs/assistant.md](specs/assistant.md) (Draft for review). The assistant's display name is an admin setting that defaults to "Butler". It comes after M8, so every data source it reads already exists.
 
-- **M9a: text assistant.** The Phase 3 ingestion pipeline (TDD §5.2: chunking, embeddings, Vectorize, invalidation); Assistant DO per member with conversations and private memory; "What Butler remembers"; incognito; permission-aware retrieval (TDD §5.3); tools with confirm cards (search, summarise, find a time, events, documents, drafts, reminders, status); PDF and Office conversion; admin settings, caps and metadata log; Workers AI defaults with BYOK via AI Gateway.
+- **M9a: retrieval foundation and text assistant**, delivered as two PRs:
+  - **M9a-1 (retrieval foundation):** the Phase 3 ingestion pipeline (TDD §5.2: chunking, embeddings, Vectorize, invalidation), gated on `assistant_enabled` with back-fill; PDF and Office conversion; permission-aware hybrid retrieval (TDD §5.3); `ModelProvider` interface with a test fake; AI Gateway controls verified.
+  - **M9a-2 (text assistant):** Assistant DO with conversations, private memory and the source-purge pipeline; "What Butler remembers"; incognito; tools with the confirmation state machine and idempotency keys on target services; personal reminders; admin settings, caps and metadata log; BYOK.
 - **M9b: mentions and proactive help.** Audience-safe `@mention` replies in conversations; daily brief, meeting prep and commitment nudges (opt-in).
-- **M9c: voice and call notes.** Push-to-talk; call notetaker with banner, pre-join notice and stop-by-anyone; per-speaker transcripts and notes posted to the call's context; live captions (separate from notes); image and audio files.
+- **M9c: voice and call notes.** Push-to-talk; call notetaker with banner, mandatory join notice and stop-by-anyone; per-speaker transcripts and notes posted to the call's context; live captions (separate from notes, with an indicator); image and audio files.
 - **M9d: live voice.** Spoken conversation over the Realtime SFU.
 
 **Gate:** the voice spike (SFU-to-Durable-Object audio path, streaming speech-to-text, latency and cost) passes before M9c starts. M9d also needs its latency target met.
