@@ -60,7 +60,15 @@ function setup(dlqFails = false) {
   return { consume, handled, dlq };
 }
 
-const msg = (id: string, body: unknown, attempts = 1) => ({ id, timestamp: Date.now(), attempts, body });
+const T0 = 1_790_000_000_000;
+const msg = (id: string, body: unknown, attempts = 1) => ({ id, timestamp: T0, attempts, body });
+const wrapped = (original: unknown, reason: string, attempts = 1) => ({
+  original,
+  reason,
+  queue: "test-queue",
+  attempts,
+  firstSeenAt: T0,
+});
 
 describe("queue consumer", () => {
   it("validates and dispatches by type, acking each message", async () => {
@@ -88,7 +96,11 @@ describe("queue consumer", () => {
     const result = await getQueueResult(batch, ctx);
     expect(result.explicitAcks.sort()).toEqual(["g", "i", "u"]);
     expect(result.retryMessages).toEqual([]);
-    expect(dlq.sent).toEqual([unknown, invalid, garbage]);
+    expect(dlq.sent).toEqual([
+      wrapped(unknown, "unknown_type"),
+      wrapped(invalid, "invalid_payload"),
+      wrapped(garbage, "invalid_envelope"),
+    ]);
     expect(handled).toEqual([]);
   });
 
@@ -104,7 +116,7 @@ describe("queue consumer", () => {
     const result = await getQueueResult(batch, ctx);
     expect(result.retryMessages.map((m) => m.msgId)).toEqual(["t", "r"]);
     expect(result.explicitAcks).toEqual(["d"]);
-    expect(dlq.sent).toEqual([{ type: "test.flaky", mode: "dead" }]);
+    expect(dlq.sent).toEqual([wrapped({ type: "test.flaky", mode: "dead" }, "permanent")]);
   });
 
   it("passes the retry delay: exponential for failures, the handler's own otherwise", async () => {
@@ -193,6 +205,52 @@ describe("cron dispatcher", () => {
 
     const unknown = await dispatch(createScheduledController({ cron: "1 1 1 1 1" }), env);
     expect(unknown).toEqual({ cron: "1 1 1 1 1", schedule: null, jobs: [] });
+  });
+
+  it("times out a job that runs too long and still runs the next", async () => {
+    const ran: string[] = [];
+    const dispatch = createCronDispatcher(
+      [
+        defineJob({ name: "test.hangs", schedule: "hourly", timeoutMs: 30, run: () => new Promise<void>(() => {}) }),
+        defineJob({ name: "test.after", schedule: "hourly", run: () => (ran.push("after"), Promise.resolve()) }),
+      ],
+      quiet,
+    );
+    const report = await dispatch(createScheduledController({ cron: "0 * * * *" }), env);
+    expect(report.jobs.map((j) => [j.name, j.ok, j.timedOut ?? false])).toEqual([
+      ["test.hangs", false, true],
+      ["test.after", true, false],
+    ]);
+    expect(ran).toEqual(["after"]);
+  });
+
+  it("skips a trigger while the previous run of the same schedule holds the lease", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const runs: string[] = [];
+    const dispatch = createCronDispatcher(
+      [defineJob({ name: "test.slow", schedule: "five_minutes", run: () => (runs.push("slow"), gate) })],
+      quiet,
+    );
+    const first = dispatch(createScheduledController({ cron: "*/5 * * * *" }), env);
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await dispatch(createScheduledController({ cron: "*/5 * * * *" }), env);
+    expect(second).toMatchObject({ skipped: true, jobs: [] });
+    release();
+    expect((await first).jobs.map((j) => j.ok)).toEqual([true]);
+    // Released: the next trigger runs.
+    expect((await dispatch(createScheduledController({ cron: "*/5 * * * *" }), env)).skipped).toBeUndefined();
+    expect(runs).toEqual(["slow", "slow"]);
+  });
+
+  it("takes over an expired lease", async () => {
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO cron_leases (schedule, holder, expires_at) VALUES ('daily', 'crashed', ?)",
+    )
+      .bind(Date.now() - 1)
+      .run();
+    const dispatch = createCronDispatcher([], quiet);
+    expect((await dispatch(createScheduledController({ cron: "17 3 * * *" }), env)).skipped).toBeUndefined();
   });
 
   it("refuses duplicate or malformed job names", () => {

@@ -35,7 +35,7 @@ describe("GET /health", () => {
     const body = healthResponseSchema.parse(JSON.parse(text));
     expect(body.status).toBe("error");
     expect(body.checks.d1).toMatchObject({ ok: false, detail: "unreachable" });
-    expect(body.checks.queues).toEqual({ ok: false, detail: "missing" });
+    expect(body.checks.queues).toEqual({ ok: false, detail: "binding missing" });
     expect(body.checks.durableObjects?.ok).toBe(true);
   });
 
@@ -46,6 +46,24 @@ describe("GET /health", () => {
     const body = await checkHealth({ ...env, DB: hangingDb }, quiet, 50);
     expect(body.status).toBe("error");
     expect(body.checks.d1).toMatchObject({ ok: false, detail: "timed out" });
+  });
+});
+
+describe("health cache", () => {
+  it("reuses a result for a few seconds per isolate", async () => {
+    let queries = 0;
+    const countingDb = {
+      prepare: () => ({
+        first: () => {
+          queries += 1;
+          return Promise.resolve({ ok: 1 });
+        },
+      }),
+    } as unknown as D1Database;
+    const e = { ...env, DB: countingDb };
+    await checkHealth(e, quiet);
+    await checkHealth(e, quiet);
+    expect(queries).toBe(1);
   });
 });
 

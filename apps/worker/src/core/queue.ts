@@ -17,6 +17,16 @@ import { rootLogger, type Logger } from "./log";
  * - **Unknown or invalid messages go straight to the dead-letter queue** and are acked, so they are
  *   never retried forever. Only the message type, ID and reason are logged, never the body.
  * - Handlers must be **idempotent**: delivery is at least once.
+ * - **Retries count towards `max_retries`.** A `retry` outcome and a thrown error each use one of
+ *   the queue's retries; when they run out, the runtime moves the raw message to the queue's DLQ.
+ *   `dead_letter` sends the message to the DLQ (wrapped, below) and acks it, using no retry, unless
+ *   the DLQ send fails, in which case the message is retried and that retry counts.
+ *
+ * **Dead-letter payload.** Messages this framework dead-letters are wrapped as `DeadLetter`:
+ * `{ original, reason, queue, attempts, firstSeenAt }`. `original` is the message body unchanged,
+ * `reason` is `invalid_json | too_large | invalid_envelope | unknown_type | invalid_payload` or the
+ * handler's own reason, and `firstSeenAt` is the message's enqueue time (epoch ms). Messages the
+ * runtime dead-letters after `max_retries` arrive unwrapped. A re-drive tool unwraps `original`.
  *
  * DLQ depth is reported by admin health in M7 (TDD §7.1).
  */
@@ -101,7 +111,7 @@ export function createQueueConsumer(registry: QueueRegistry, log: Logger = rootL
           reason: parsed.error.reason,
           type: parsed.error.type,
         });
-        await deadLetter(entry, env, message, msgLog);
+        await deadLetter(entry, env, message, parsed.error.reason, msgLog);
         continue;
       }
 
@@ -109,7 +119,7 @@ export function createQueueConsumer(registry: QueueRegistry, log: Logger = rootL
       const handler = entry.handlers.get(type);
       if (!handler) {
         // Unreachable: the message set and the handler map are built from the same list.
-        await deadLetter(entry, env, message, msgLog);
+        await deadLetter(entry, env, message, "unknown_type", msgLog);
         continue;
       }
 
@@ -132,7 +142,7 @@ export function createQueueConsumer(registry: QueueRegistry, log: Logger = rootL
           msgLog.info("queue message will be retried", { type, durationMs });
         } else {
           msgLog.warn("handler sent queue message to the dead-letter queue", { type, reason: outcome.reason });
-          await deadLetter(entry, env, message, msgLog);
+          await deadLetter(entry, env, message, outcome.reason, msgLog);
         }
       } catch (error) {
         msgLog.error("queue handler failed; will retry", { type, error, durationMs: Date.now() - started });
@@ -142,9 +152,31 @@ export function createQueueConsumer(registry: QueueRegistry, log: Logger = rootL
   };
 }
 
-async function deadLetter(entry: CompiledQueue, env: Env, message: Message, log: Logger): Promise<void> {
+/** Body of a message this framework sends to a dead-letter queue. */
+export interface DeadLetter {
+  original: unknown;
+  reason: string;
+  queue: string;
+  attempts: number;
+  firstSeenAt: number;
+}
+
+async function deadLetter(
+  entry: CompiledQueue,
+  env: Env,
+  message: Message,
+  reason: string,
+  log: Logger,
+): Promise<void> {
+  const body: DeadLetter = {
+    original: message.body,
+    reason,
+    queue: entry.definition.queue,
+    attempts: message.attempts,
+    firstSeenAt: message.timestamp.getTime(),
+  };
   try {
-    await entry.definition.deadLetter(env).send(message.body, { contentType: "json" });
+    await entry.definition.deadLetter(env).send(body, { contentType: "json" });
     message.ack();
   } catch (error) {
     // Couldn't reach the DLQ: retry, and the runtime's own DLQ handling takes over after max_retries.

@@ -43,7 +43,13 @@ export interface CounterLimit {
 export type LimitDefinition = BindingLimit | CounterLimit;
 
 export interface CheckOptions {
-  /** IANA time zone for `day` windows; defaults to UTC. */
+  /**
+   * IANA time zone for `day` windows; defaults to UTC, and an unknown zone falls back to UTC.
+   *
+   * Pass the member's **stored** zone, never one from the request. Windows are keyed by their UTC
+   * start, so a member who changes zone mid-day starts a new window and can get up to one extra
+   * day's quota per change. M1 bounds this by rate-limiting time-zone changes **(default)**.
+   */
   timeZone?: string;
 }
 
@@ -78,43 +84,68 @@ function rateLimited(retryAfterSeconds: number): ApiError {
   });
 }
 
-/** Offset of `timeZone` from UTC at `at`, in ms (local = utc + offset). */
-function zoneOffset(at: number, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(new Date(at));
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function formatter(timeZone: string): Intl.DateTimeFormat {
+  let f = formatters.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    formatters.set(timeZone, f);
+  }
+  return f;
+}
+
+/** Whether `timeZone` is an IANA zone this runtime knows. */
+export function isValidTimeZone(timeZone: string): boolean {
+  try {
+    formatter(timeZone);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The local calendar date of `at` in `timeZone`, as a sortable number `yyyymmdd`. */
+function localDate(at: number, timeZone: string): number {
+  const parts = formatter(timeZone).formatToParts(new Date(at));
   const get = (type: string): number => Number(parts.find((p) => p.type === type)?.value ?? 0);
-  const local = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
-  return local - Math.floor(at / 1000) * 1000;
+  return get("year") * 10_000 + get("month") * 100 + get("day");
 }
 
-/** UTC ms of local midnight that starts the day containing `at` in `timeZone`. */
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * UTC ms of the first instant of the local day containing `at` in `timeZone`. Found by binary search
+ * on the local date rather than by offset arithmetic, so it is exact on DST days of any length (23,
+ * 24.5 or 25 hours) and where midnight doesn't exist (the day then starts at 01:00).
+ */
 export function startOfDay(at: number, timeZone: string): number {
-  const local = new Date(at + zoneOffset(at, timeZone));
-  const midnightLocal = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
-  // Use the offset in force at midnight itself, which differs from `at`'s on a DST change day.
-  let start = midnightLocal - zoneOffset(midnightLocal, timeZone);
-  start = midnightLocal - zoneOffset(start, timeZone);
-  return start > at ? start - 24 * 60 * 60 * 1000 : start;
+  const day = localDate(at, timeZone);
+  // Days are at most 25 hours long, so 27 hours earlier is always on an earlier local date.
+  let lo = at - 27 * HOUR_MS; // local date < day
+  let hi = at; // local date === day
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (localDate(mid, timeZone) < day) lo = mid;
+    else hi = mid;
+  }
+  return hi;
 }
 
-/** The `[start, end)` window containing `now`. */
+/**
+ * The `[start, end)` window containing `now`. Day windows use `timeZone`; an unknown zone falls back
+ * to UTC (`checkLimit` logs it).
+ */
 export function windowFor(window: CounterWindow, now: number, timeZone = "UTC"): { start: number; end: number } {
   if (window.kind === "fixed") {
     const size = window.seconds * 1000;
     const start = Math.floor(now / size) * size;
     return { start, end: start + size };
   }
-  const start = startOfDay(now, timeZone);
-  // Next local midnight: 36 h later always lands in the next local day, whatever DST does.
-  return { start, end: startOfDay(start + 36 * 60 * 60 * 1000, timeZone) };
+  const zone = isValidTimeZone(timeZone) ? timeZone : "UTC";
+  const start = startOfDay(now, zone);
+  // The next day starts 23–25 hours later, so 36 hours on is always inside it.
+  return { start, end: startOfDay(start + 36 * HOUR_MS, zone) };
 }
 
 async function checkCounter(
@@ -124,6 +155,9 @@ async function checkCounter(
   options: CheckOptions,
 ): Promise<Result<void, ApiError>> {
   const now = ctx.now();
+  if (options.timeZone !== undefined && !isValidTimeZone(options.timeZone)) {
+    ctx.log.warn("unknown time zone for a daily limit; using UTC", { limit: limit.name });
+  }
   const { start, end } = windowFor(limit.window, now, options.timeZone);
   // One atomic statement: insert the first hit, or count another while under the limit. When the
   // limit is reached the conflict update's WHERE fails, nothing is returned, and the count stays put.

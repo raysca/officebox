@@ -100,6 +100,48 @@ describe("day windows", () => {
   });
 });
 
+describe("day windows across time-zone rules", () => {
+  const day = (at: number, tz: string) => windowFor({ kind: "day" }, at, tz);
+
+  it("handles a 25-hour fall-back day", () => {
+    // New York falls back on 1 November 2026.
+    const { start, end } = day(Date.UTC(2026, 10, 1, 17), "America/New_York");
+    expect(start).toBe(Date.UTC(2026, 10, 1, 4));
+    expect(end).toBe(Date.UTC(2026, 10, 2, 5));
+    expect(end - start).toBe(25 * HOUR);
+  });
+
+  it("starts the day at 01:00 where midnight doesn't exist", () => {
+    // Cuba springs forward at 00:00 on 8 March 2026: the day starts at 01:00 CDT (UTC-4).
+    const havana = day(Date.UTC(2026, 2, 8, 16), "America/Havana");
+    expect(havana.start).toBe(Date.UTC(2026, 2, 8, 5));
+    expect(havana.end - havana.start).toBe(23 * HOUR);
+    // São Paulo sprang forward at 00:00 on 4 November 2018 (UTC-3 to UTC-2).
+    const saoPaulo = day(Date.UTC(2018, 10, 4, 15), "America/Sao_Paulo");
+    expect(saoPaulo.start).toBe(Date.UTC(2018, 10, 4, 3));
+  });
+
+  it("handles Lord Howe's half-hour DST change", () => {
+    // Lord Howe goes from UTC+11 to UTC+10:30 at 02:00 on 5 April 2026: a 24.5-hour day.
+    const { start, end } = day(Date.UTC(2026, 3, 5, 0), "Australia/Lord_Howe");
+    expect(start).toBe(Date.UTC(2026, 3, 4, 13));
+    expect(end).toBe(Date.UTC(2026, 3, 5, 13, 30));
+  });
+
+  it("falls back to UTC for an unknown zone", async () => {
+    expect(day(Date.UTC(2026, 0, 1, 12), "Mars/Olympus_Mons")).toEqual({
+      start: Date.UTC(2026, 0, 1),
+      end: Date.UTC(2026, 0, 2),
+    });
+    const daily = defineLimit({ mechanism: "d1", name: "test_bad_zone", limit: 1, window: { kind: "day" } });
+    const lines: string[] = [];
+    const log = createLogger({}, (_l, line) => lines.push(line));
+    const result = await checkLimit({ env, log, now: () => Date.now() }, daily, key(), { timeZone: "Not/AZone" });
+    expect(result.ok).toBe(true);
+    expect(lines.join("")).toContain("unknown time zone");
+  });
+});
+
 describe("Rate Limiting binding", () => {
   it("allows 5 sign-in attempts per minute per key, then refuses", async () => {
     const k = key();
