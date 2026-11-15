@@ -1,6 +1,6 @@
 # Spec: Admin & Operations
 
-**Status:** Draft for review
+**Status:** Approved (product owner, 15 Nov 2026)
 **Revision:**
 - First draft written after four rounds of product-owner questions (15 Nov 2026).
 - Revised after the independent review (see below), the product-owner decisions, then the second and final reviews:
@@ -802,7 +802,7 @@ Timing criteria use an injectable clock and drive the cron dispatcher directly.
 
 ## 19. Changes to other documents
 
-These edits are made in the PR that approves this spec.
+All rows were **applied in the PR that approved this spec** (AGENTS §2). Keep this section as the index of those changes.
 
 | Document | Change |
 |---|---|
