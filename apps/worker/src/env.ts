@@ -14,8 +14,8 @@ export interface Env {
 
   SYSTEM: DurableObjectNamespace<SystemObject>;
 
-  EMAIL_QUEUE: Queue<unknown>;
-  EMAIL_DLQ: Queue<unknown>;
+  EMAIL_QUEUE: Queue;
+  EMAIL_DLQ: Queue;
 
   /** 5 requests per 60 s, keyed per IP: sign-in, setup, recovery, invitation acceptance (Platform §8). */
   AUTH_RATE_LIMITER: RateLimit;
@@ -24,4 +24,9 @@ export interface Env {
 
   /** Optional first-run setup token (TDD §6.8). Read from M1. */
   SETUP_TOKEN?: string;
+  /**
+   * HMAC key for stored token hashes (Platform §16). Required from M1; until then audit metadata masks
+   * email addresses instead of hashing them.
+   */
+  TOKEN_HASH_KEY?: string;
 }
