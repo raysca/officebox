@@ -89,6 +89,8 @@ export const SETTINGS_CACHE_TTL_MS = 30_000;
 
 interface CacheEntry {
   stored: Record<string, unknown>;
+  /** The column held something other than a JSON object; the next write repairs it. */
+  malformed: boolean;
   /** Whether the installation row exists (setup has run). */
   installed: boolean;
   expiresAt: number;
@@ -96,6 +98,17 @@ interface CacheEntry {
 
 // Per isolate, per D1 binding (tests use one binding; production has one installation).
 const cache = new WeakMap<D1Database, CacheEntry>();
+// Bumped on every invalidation, so a read that started before a write can't repopulate the cache
+// with the value from before the write.
+const generations = new WeakMap<D1Database, number>();
+
+function invalidate(db: D1Database): void {
+  cache.delete(db);
+  generations.set(db, (generations.get(db) ?? 0) + 1);
+}
+
+/** Attempts at a guarded write before reporting a conflict (another writer changed the key between). */
+const WRITE_ATTEMPTS = 2;
 
 export class SettingsStore<R extends SettingsRegistry> {
   constructor(
@@ -103,24 +116,29 @@ export class SettingsStore<R extends SettingsRegistry> {
     private readonly registry: R,
   ) {}
 
-  private async load(): Promise<CacheEntry> {
+  private async load(fresh = false): Promise<CacheEntry> {
+    const db = this.ctx.env.DB;
     const now = this.ctx.now();
-    const hit = cache.get(this.ctx.env.DB);
-    if (hit && hit.expiresAt > now) return hit;
+    const hit = cache.get(db);
+    if (!fresh && hit && hit.expiresAt > now) return hit;
+    const generation = generations.get(db) ?? 0;
     const row = expectOk(
-      await new Database(this.ctx.env.DB).first<{ settings: string }>("SELECT settings FROM installation WHERE id = 1"),
+      await new Database(db).first<{ settings: string }>("SELECT settings FROM installation WHERE id = 1"),
     );
     let stored: Record<string, unknown> = {};
+    let malformed = false;
     if (row) {
       try {
         const parsed: unknown = JSON.parse(row.settings);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stored = parsed as Record<string, unknown>;
+        else malformed = true;
       } catch {
-        this.ctx.log.error("installation.settings is not valid JSON; using defaults");
+        malformed = true;
       }
+      if (malformed) this.ctx.log.error("installation.settings is not a JSON object; using defaults until repaired");
     }
-    const entry = { stored, installed: row !== null, expiresAt: now + SETTINGS_CACHE_TTL_MS };
-    cache.set(this.ctx.env.DB, entry);
+    const entry = { stored, malformed, installed: row !== null, expiresAt: now + SETTINGS_CACHE_TTL_MS };
+    if ((generations.get(db) ?? 0) === generation) cache.set(db, entry);
     return entry;
   }
 
@@ -130,7 +148,7 @@ export class SettingsStore<R extends SettingsRegistry> {
 
   private resolve(definition: SettingDefinition<unknown>, stored: Record<string, unknown>): SettingEntry {
     const base = { key: definition.key, changeableBy: definition.changeableBy };
-    if (!(definition.key in stored)) return { ...base, value: definition.default, isDefault: true };
+    if (!Object.hasOwn(stored, definition.key)) return { ...base, value: definition.default, isDefault: true };
     const parsed = definition.schema.safeParse(stored[definition.key]);
     if (!parsed.success) {
       this.ctx.log.warn("stored setting doesn't match its schema; using the default", { key: definition.key });
@@ -153,42 +171,71 @@ export class SettingsStore<R extends SettingsRegistry> {
   /**
    * Validates and stores a value, auditing the change. Untyped input (for example a PATCH body) is
    * validated against the key's schema; a value equal to the current one is a no-op without audit.
+   *
+   * The write is guarded on the value it read (compare-and-set), so the audited `old` value is exact
+   * even with concurrent writers; if another writer got in between, it re-reads and tries once more,
+   * then returns `conflict`. A malformed column is replaced with a fresh object holding only this key,
+   * and the audit entry says so (`repaired: true`).
    */
   async set(key: string, value: unknown, actor: string | null): Promise<Result<SettingEntry, ApiError>> {
     const definition = Object.hasOwn(this.registry, key) ? this.registry[key] : undefined;
     if (!definition) return err(apiError("not_found", "No such setting."));
     const parsed = definition.schema.safeParse(value);
     if (!parsed.success) return err(validationError(parsed.error, "The setting value is not valid."));
-
-    // Read fresh, not from the cache, so the audited old value is current.
-    cache.delete(this.ctx.env.DB);
-    const current = await this.load();
-    if (!current.installed) return err(apiError("unavailable", "Settings can be changed once setup is complete."));
-    const before = this.resolve(definition, current.stored);
     const next = parsed.data;
-    if (!before.isDefault && JSON.stringify(before.value) === JSON.stringify(next)) return ok(before);
-
+    const db = new Database(this.ctx.env.DB);
     const auditValue = async (v: unknown): Promise<unknown> =>
       definition.personal ? await hashPersonal(this.ctx.env, "value", JSON.stringify(v)) : v;
-    const db = new Database(this.ctx.env.DB);
     // The key is checked against SETTING_KEY_PATTERN by defineSetting, so it is safe in the JSON path.
-    const update = db.statement(
-      `UPDATE installation SET settings = json_set(settings, '$.${definition.key}', json(?)) WHERE id = 1`,
-      JSON.stringify(next),
-    );
-    const entry = await auditStatement(this.ctx, {
-      action: definition.auditAction,
-      actor,
-      target: { type: "setting", id: definition.key },
-      metadata: { old: await auditValue(before.value), new: await auditValue(next) },
-    });
-    expectOk(await db.batch([update, entry]));
-    cache.delete(this.ctx.env.DB);
-    return ok({ key: definition.key, value: next, isDefault: false, changeableBy: definition.changeableBy });
+    const path = `$.${definition.key}`;
+
+    for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+      invalidate(this.ctx.env.DB);
+      const current = await this.load(true);
+      if (!current.installed) return err(apiError("unavailable", "Settings can be changed once setup is complete."));
+      const before = this.resolve(definition, current.stored);
+      if (!current.malformed && !before.isDefault && JSON.stringify(before.value) === JSON.stringify(next)) {
+        return ok(before);
+      }
+
+      const update = current.malformed
+        ? db.statement(
+            `UPDATE installation SET settings = json_set('{}', '${path}', json(?))
+             WHERE id = 1 AND (json_valid(settings) = 0 OR json_type(settings) <> 'object')`,
+            JSON.stringify(next),
+          )
+        : db.statement(
+            `UPDATE installation SET settings = json_set(settings, '${path}', json(?))
+             WHERE id = 1 AND json_extract(settings, '${path}') IS json_extract(?, '$')`,
+            JSON.stringify(next),
+            JSON.stringify(current.stored[definition.key] ?? null),
+          );
+      const entry = await auditStatement(
+        this.ctx,
+        {
+          action: definition.auditAction,
+          actor,
+          target: { type: "setting", id: definition.key },
+          metadata: {
+            old: await auditValue(before.value),
+            new: await auditValue(next),
+            ...(current.malformed ? { repaired: true } : {}),
+          },
+        },
+        { onlyIfPreviousChanged: true },
+      );
+      const [result] = expectOk(await db.batchRun([update, entry]));
+      invalidate(this.ctx.env.DB);
+      if ((result?.changes ?? 0) > 0) {
+        return ok({ key: definition.key, value: next, isDefault: false, changeableBy: definition.changeableBy });
+      }
+      this.ctx.log.info("setting changed concurrently; retrying", { key: definition.key, attempt });
+    }
+    return err(apiError("conflict", "The setting was changed at the same time. Try again."));
   }
 }
 
 /** Clears this isolate's settings cache (tests, and after a restore). */
 export function clearSettingsCache(db: D1Database): void {
-  cache.delete(db);
+  invalidate(db);
 }

@@ -47,6 +47,22 @@ export default defineConfig(
   },
 
   {
+    // Logger.unredacted bypasses log redaction. Only the first-run setup token may use it (TDD §6.8);
+    // M1 adds that file to `ignores` here. Any other caller needs review.
+    files: ["apps/worker/src/**/*.ts"],
+    ignores: [],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.property.name='unredacted']",
+          message: "Logger.unredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
+        },
+      ],
+    },
+  },
+
+  {
     files: ["apps/web/src/**/*.{ts,tsx}"],
     extends: [reactHooks.configs.flat["recommended-latest"]],
     languageOptions: { globals: globals.browser },

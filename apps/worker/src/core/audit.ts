@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import type { CoreContext } from "./context";
 import { Database } from "./db";
 import { ulid } from "./ids";
-import { collectEmails, redact, type Redacted } from "./redact";
+import { collectEmails, redact, REDACT_DEFAULTS, redactString, type Redacted } from "./redact";
 
 /**
  * Audit-log writer (AGENTS §4.1: administrative and destructive actions write to `audit_log`).
@@ -31,18 +31,37 @@ export interface AuditEntry {
 
 const encoder = new TextEncoder();
 
-async function hmacHex(secret: string, value: string): Promise<string> {
+const BASE32 = "0123456789abcdefghjkmnpqrstvwxyz";
+
+/**
+ * HMAC-SHA-256, first 128 bits, as 26 lower-case base32 characters. Base32 rather than hex so the
+ * pseudonym isn't itself redacted as a token-like hex run.
+ */
+async function hmacBase32(secret: string, value: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
     "sign",
   ]);
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(value)));
-  return [...sig.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  let bits = 0;
+  let acc = 0;
+  let out = "";
+  for (const byte of sig.slice(0, 16)) {
+    acc = (acc << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += BASE32.charAt((acc >>> (bits - 5)) & 31);
+      bits -= 5;
+    }
+    acc &= (1 << bits) - 1;
+  }
+  if (bits > 0) out += BASE32.charAt((acc << (5 - bits)) & 31);
+  return out;
 }
 
 /** Pseudonymises a personal value for storage, or masks it when no hash key is configured yet. */
 export async function hashPersonal(env: Pick<Env, "TOKEN_HASH_KEY">, kind: string, value: string): Promise<string> {
   if (!env.TOKEN_HASH_KEY) return `[${kind}]`;
-  return `${kind}:${await hmacHex(env.TOKEN_HASH_KEY, `audit:${kind}:${value.trim().toLowerCase()}`)}`;
+  return `${kind}:${await hmacBase32(env.TOKEN_HASH_KEY, `audit:${kind}:${value.trim().toLowerCase()}`)}`;
 }
 
 /** Returns sanitised metadata as JSON text, or null when there is none. */
@@ -57,32 +76,56 @@ export async function sanitiseMetadata(
   }
   const clean: Redacted = redact(metadata, {
     email: (address) => hashes.get(address) ?? "[email]",
-    maxDepth: 5,
+    maxDepth: REDACT_DEFAULTS.maxDepth,
     maxString: 500,
   });
   const json = JSON.stringify(clean);
   return encoder.encode(json).byteLength > MAX_METADATA_BYTES ? JSON.stringify({ truncated: true }) : json;
 }
 
+export interface AuditStatementOptions {
+  /**
+   * Write the entry only if the statement just before it in the same batch changed a row (SQLite
+   * `changes()`), so a guarded update that matched nothing leaves no audit entry.
+   */
+  onlyIfPreviousChanged?: boolean;
+}
+
+/** Target type and ID are IDs by convention; they are still redacted in case one carries an email. */
+async function sanitiseTarget(env: Pick<Env, "TOKEN_HASH_KEY">, value: string | undefined): Promise<string | null> {
+  if (value === undefined) return null;
+  const hashes = new Map<string, string>();
+  for (const email of collectEmails(value)) hashes.set(email, await hashPersonal(env, "email", email));
+  return redactString(value, { email: (a) => hashes.get(a) ?? "[email]", maxString: 200 });
+}
+
 /**
  * Builds the INSERT for an audit entry without running it, so a caller can put it in the same D1
  * batch as the change it records (the entry and the change commit together).
  */
-export async function auditStatement(ctx: CoreContext, entry: AuditEntry): Promise<D1PreparedStatement> {
+export async function auditStatement(
+  ctx: CoreContext,
+  entry: AuditEntry,
+  options: AuditStatementOptions = {},
+): Promise<D1PreparedStatement> {
   if (!AUDIT_ACTION_PATTERN.test(entry.action)) {
     throw new Error(`Invalid audit action: ${entry.action}`);
   }
   const metadata = await sanitiseMetadata(ctx.env, entry.metadata);
-  return new Database(ctx.env.DB).statement(
-    "INSERT INTO audit_log (id, actor_id, action, target_type, target_id, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  const values = [
     ulid(),
     entry.actor,
     entry.action,
-    entry.target?.type ?? null,
-    entry.target?.id ?? null,
+    await sanitiseTarget(ctx.env, entry.target?.type),
+    await sanitiseTarget(ctx.env, entry.target?.id),
     metadata,
     ctx.now(),
-  );
+  ];
+  const columns = "INSERT INTO audit_log (id, actor_id, action, target_type, target_id, metadata, created_at)";
+  const sql = options.onlyIfPreviousChanged
+    ? `${columns} SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0`
+    : `${columns} VALUES (?, ?, ?, ?, ?, ?, ?)`;
+  return new Database(ctx.env.DB).statement(sql, ...values);
 }
 
 /** Writes an audit entry on its own. A failure to write is a real failure and throws. */

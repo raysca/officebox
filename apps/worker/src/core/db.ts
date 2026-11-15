@@ -29,7 +29,14 @@ export interface RunMeta {
   lastRowId: number | null;
 }
 
-/** Recognises a SQLite constraint failure in a D1 error and maps it to a typed error, or returns null. */
+/**
+ * Recognises a SQLite constraint failure in a D1 error and maps it to a typed error, or returns null.
+ *
+ * D1 reports constraint failures only as message text (`D1_ERROR: UNIQUE constraint failed: t.c:
+ * SQLITE_CONSTRAINT`), so this matches SQLite's wording. That wording has been stable for many years,
+ * but if D1 changes it, violations would surface as thrown errors (500s), not silent successes; the
+ * tests in `test/db.test.ts` pin the behaviour against the runtime in use.
+ */
 export function constraintError(error: unknown): DbError | null {
   const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : "";
   const message = error instanceof Error ? `${error.message} ${cause}` : String(error);
@@ -45,7 +52,7 @@ export function constraintError(error: unknown): DbError | null {
     };
   }
   if (/FOREIGN KEY constraint failed/.test(message)) {
-    return { kind: "foreign_key", columns: [], error: apiError("conflict", "A referenced item doesn't exist.") };
+    return { kind: "foreign_key", columns: [], error: apiError("conflict", "This conflicts with related data.") };
   }
   if (/CHECK constraint failed/.test(message)) {
     return { kind: "check", columns: [], error: apiError("validation_failed", "A value is not allowed.") };
@@ -98,6 +105,12 @@ export class Database {
   async batch<T extends object = Record<string, unknown>>(statements: D1PreparedStatement[]): Promise<DbResult<T[][]>> {
     if (statements.length === 0) return ok([]);
     return attempt(async () => (await this.d1.batch<T>(statements)).map((r) => r.results));
+  }
+
+  /** Runs write statements atomically, in order. Returns each statement's changes. */
+  async batchRun(statements: D1PreparedStatement[]): Promise<DbResult<RunMeta[]>> {
+    if (statements.length === 0) return ok([]);
+    return attempt(async () => (await this.d1.batch(statements)).map((r) => toMeta(r.meta)));
   }
 }
 

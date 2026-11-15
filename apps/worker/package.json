@@ -8,7 +8,7 @@
     "dev": "wrangler dev --config ../../wrangler.jsonc",
     "build": "wrangler deploy --dry-run --config ../../wrangler.jsonc",
     "typecheck": "tsc --noEmit -p .",
-    "test": "vitest run"
+    "test": "vitest run && vitest run -c vitest.node.config.ts"
   },
   "dependencies": {
     "@officebox/shared": "0.1.0",

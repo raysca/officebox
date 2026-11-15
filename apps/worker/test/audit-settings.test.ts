@@ -81,7 +81,7 @@ describe("audit log", () => {
       (await sanitiseMetadata({ TOKEN_HASH_KEY: "test-key" }, { a: "alice@example.com", b: "ALICE@example.com" })) ??
         "{}",
     ) as { a: string; b: string };
-    expect(hashed.a).toMatch(/^email:[0-9a-f]{32}$/);
+    expect(hashed.a).toMatch(/^email:[0-9a-z]{26}$/);
     expect(hashed.b).toBe(hashed.a);
     expect(JSON.stringify(hashed)).not.toContain("alice");
   });
@@ -164,6 +164,41 @@ describe("settings store", () => {
     expect(list.find((e) => e.key === "welcome_post_enabled")).toMatchObject({ value: true, isDefault: true });
   });
 
+  it("audits exact old values under concurrent writes", async () => {
+    const store = () => new SettingsStore(ctx(), registry);
+    const results = await Promise.all(
+      [1, 2, 3].map((n) => store().set("upload_max_bytes", 1_000_000 + n, "01HZADMIN")),
+    );
+    // Each write either lands (with its exact old value audited) or reports a conflict.
+    expect(results.every((r) => r.ok || r.error.code === "conflict")).toBe(true);
+    const rows = (await auditRows("upload_max_bytes")).slice(1); // after the earlier test's entry
+    const chain = rows.map((r) => JSON.parse(r.metadata ?? "{}") as { old: number; new: number });
+    for (let i = 1; i < chain.length; i++) expect(chain[i]?.old).toBe(chain[i - 1]?.new);
+    clearSettingsCache(env.DB);
+    expect(await store().get("upload_max_bytes")).toBe(chain[chain.length - 1]?.new);
+  });
+
+  it("doesn't let a read that raced a write repopulate the cache with the old value", async () => {
+    clearSettingsCache(env.DB);
+    const reader = new SettingsStore(ctx(), registry);
+    const writer = new SettingsStore(ctx(), registry);
+    const [, written] = await Promise.all([reader.get("upload_max_bytes"), writer.set("upload_max_bytes", 4242, null)]);
+    expect(written.ok).toBe(true);
+    expect(await reader.get("upload_max_bytes")).toBe(4242);
+  });
+
+  it("repairs a malformed settings column on the next write, and audits the repair", async () => {
+    await env.DB.prepare("UPDATE installation SET settings = 'not json' WHERE id = 1").run();
+    clearSettingsCache(env.DB);
+    const store = new SettingsStore(ctx(), registry);
+    expect(await store.get("welcome_post_enabled")).toBe(true);
+    expect((await store.set("welcome_post_enabled", false, "01HZADMIN")).ok).toBe(true);
+    expect(await store.get("welcome_post_enabled")).toBe(false);
+    expect(await store.get("upload_max_bytes")).toBe(2 * 1024 ** 3);
+    const rows = await auditRows("welcome_post_enabled");
+    expect(JSON.parse(rows[rows.length - 1]?.metadata ?? "{}")).toEqual({ old: true, new: false, repaired: true });
+  });
+
   it("validates values and refuses unknown keys", async () => {
     const store = new SettingsStore(ctx(), registry);
     const invalid = await store.set("upload_max_bytes", -5, null);
@@ -181,13 +216,14 @@ describe("settings store", () => {
     const [row] = await auditRows("contact_email");
     expect(row?.metadata).not.toContain("owner@example.com");
     expect(JSON.parse(row?.metadata ?? "{}")).toMatchObject({
-      new: expect.stringMatching(/^value:[0-9a-f]{32}$/) as string,
+      new: expect.stringMatching(/^value:[0-9a-z]{26}$/) as string,
     });
   });
 
   it("caches per isolate for the TTL and falls back to the default for an incompatible stored value", async () => {
     let now = Date.now();
     const store = new SettingsStore(ctx({ now: () => now }), registry);
+    await env.DB.prepare("UPDATE installation SET settings = '{}' WHERE id = 1").run();
     clearSettingsCache(env.DB);
     expect(await store.get("welcome_post_enabled")).toBe(true);
 
