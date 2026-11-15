@@ -279,7 +279,7 @@ effective role(user, item) = max(
 | Export one member's data for a data-protection request (`member.export`; [Admin](admin.md) §12) | Members only | ✓ (required when the subject is, or has since become, an admin or owner) |
 | Maintenance mode ([Admin](admin.md) §13) | — (view only) | ✓ |
 
-**Step-up** ([Identity](identity.md) §4.5): these powers also need a **fresh passkey assertion within the last 10 minutes** on the acting session, otherwise the typed error `reauth_required`: changing a role (including promotion to admin or owner), changing an email address, issuing a recovery link, moving the domain, and adding or removing one's own passkeys. The permission engine decides *whether* the actor may act; the step-up check runs after it and decides *whether this session may act now*. Both are tested, allowed and denied.
+**Step-up** ([Identity](identity.md) §4.5): these powers also need a **fresh passkey assertion within the last 10 minutes** on the acting session, otherwise the typed error `reauth_required`: changing a role (including promotion to admin or owner), changing an email address, issuing a recovery link, moving the domain, and adding or removing one's own passkeys. Acknowledging one's own security-notice banner uses the same check (`security_notice.ack`, Identity §4.6a), so a stolen session can't dismiss a notice. The permission engine decides *whether* the actor may act; the step-up check runs after it and decides *whether this session may act now*. Both are tested, allowed and denied.
 
 **Notification and token revocation:**
 - When anyone issues a **recovery link** for a person or **changes their email**:
