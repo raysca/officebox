@@ -45,7 +45,9 @@ export function isAllowedAuthRoute(method: string, rawPath: string): boolean {
 }
 
 export function isPasskeyOptionsRoute(path: string): boolean {
-  return path === "/api/auth/passkey/generate-authenticate-options" || path === "/api/auth/passkey/generate-register-options";
+  return (
+    path === "/api/auth/passkey/generate-authenticate-options" || path === "/api/auth/passkey/generate-register-options"
+  );
 }
 
 export function isRegistrationRoute(path: string): boolean {

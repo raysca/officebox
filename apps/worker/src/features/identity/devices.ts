@@ -25,7 +25,7 @@ function ms(value: Date | string): number {
 }
 
 async function sessionsOf(auth: Auth, headers: Headers): Promise<BetterAuthSession[]> {
-  return (await auth.api.listSessions({ headers })) as unknown as BetterAuthSession[];
+  return await auth.api.listSessions({ headers });
 }
 
 export async function listDevices(

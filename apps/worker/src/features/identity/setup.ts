@@ -1,12 +1,4 @@
-import {
-  apiError,
-  err,
-  ok,
-  type ApiError,
-  type Result,
-  type SetupBody,
-  type SetupStatus,
-} from "@officebox/shared";
+import { apiError, err, ok, type ApiError, type Result, type SetupBody, type SetupStatus } from "@officebox/shared";
 import { audit, auditStatement } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
@@ -117,7 +109,12 @@ interface ClaimedOwner {
 
 async function claimedOwner(ctx: CoreContext, claim: string): Promise<ClaimedOwner | null> {
   const row = expectOk(
-    await new Database(ctx.env.DB).first<{ id: string; email: string; passkeys: number; first_signed_in_at: number | null }>(
+    await new Database(ctx.env.DB).first<{
+      id: string;
+      email: string;
+      passkeys: number;
+      first_signed_in_at: number | null;
+    }>(
       `SELECT u.id, u.email, u.first_signed_in_at, (SELECT count(*) FROM passkeys p WHERE p.user_id = u.id) AS passkeys
          FROM users u WHERE u.created_attempt_id = ? AND u.role = 'owner'`,
       claim,
@@ -148,7 +145,10 @@ export async function claimSetup(
   const claimed = expectOk(
     await db.batchRun([
       // Secret mode may reach here before any row exists.
-      db.statement("INSERT INTO installation (id, installation_id, name) VALUES (1, ?, '') ON CONFLICT (id) DO NOTHING", ulid()),
+      db.statement(
+        "INSERT INTO installation (id, installation_id, name) VALUES (1, ?, '') ON CONFLICT (id) DO NOTHING",
+        ulid(),
+      ),
       db.statement(
         `UPDATE installation
             SET setup_claim = ?, setup_claimed_at = ?, canonical_origin = ?, allowed_hosts = ?, name = ?
@@ -206,9 +206,15 @@ async function createOwner(
 ): Promise<Result<string, ApiError>> {
   const auth = authFor(ctx.env, secrets, { canonicalOrigin: origin, workspaceName: body.workspaceName });
   const internal = (await auth.$context).internalAdapter;
-  const store = { ...(currentStore() ?? {}), create: { kind: "setup" as const, attemptId: nonce, role: "owner" as const, handle: body.ownerHandle } };
+  const store = {
+    ...(currentStore() ?? {}),
+    create: { kind: "setup" as const, attemptId: nonce, role: "owner" as const, handle: body.ownerHandle },
+  };
   const user = await runWithStore(store, () =>
-    internal.createUser({ email: body.ownerEmail, name: body.ownerName, emailVerified: true }, { method: "officebox-setup" }),
+    internal.createUser(
+      { email: body.ownerEmail, name: body.ownerName, emailVerified: true },
+      { method: "officebox-setup" },
+    ),
   );
   if (!user) {
     ctx.log.error("setup: owner creation refused");

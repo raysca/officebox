@@ -30,9 +30,19 @@ const installation = () =>
     setup_token_hash: string | null;
   }>();
 const ownerOf = (email: string) =>
-  env.DB.prepare("SELECT id, role, status, handle, email_normalised, email_verified, created_attempt_id FROM users WHERE email = ?")
+  env.DB.prepare(
+    "SELECT id, role, status, handle, email_normalised, email_verified, created_attempt_id FROM users WHERE email = ?",
+  )
     .bind(email)
-    .first<{ id: string; role: string; status: string; handle: string; email_normalised: string; email_verified: number; created_attempt_id: string }>();
+    .first<{
+      id: string;
+      role: string;
+      status: string;
+      handle: string;
+      email_normalised: string;
+      email_verified: number;
+      created_attempt_id: string;
+    }>();
 const silent = createLogger({}, () => {});
 const ctx = () => ({ env, log: silent, now: Date.now });
 
@@ -53,7 +63,9 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
     const owner = ownerDetails();
     const wrong = await claim(browser, owner, "not-the-token-0123456789abcdefghijklmnop");
     expect(wrong.status).toBe(403);
-    const invalid = await browser.json("/api/setup", { body: { token: SETUP_TOKEN, workspaceName: "", ownerName: "x", ownerHandle: "!", ownerEmail: "nope" } });
+    const invalid = await browser.json("/api/setup", {
+      body: { token: SETUP_TOKEN, workspaceName: "", ownerName: "x", ownerHandle: "!", ownerEmail: "nope" },
+    });
     expect(invalid.status).toBe(400);
     expect((await installation())?.setup_claim).toBeNull();
     expect(await ownerOf(owner.email)).toBeNull();
@@ -72,9 +84,17 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
     expect(row?.name).toBe(owner.workspace);
     expect(row?.setup_completed_at).toBeNull();
     const user = await ownerOf(owner.email);
-    expect(user).toMatchObject({ role: "owner", status: "active", handle: owner.handle, email_verified: 1, created_attempt_id: row!.setup_claim });
+    expect(user).toMatchObject({
+      role: "owner",
+      status: "active",
+      handle: owner.handle,
+      email_verified: 1,
+      created_attempt_id: row!.setup_claim,
+    });
     expect(user!.email_normalised).toBe(owner.email.toLowerCase());
-    const handle = await env.DB.prepare("SELECT owner_id FROM handles WHERE handle = ?").bind(owner.handle).first<{ owner_id: string }>();
+    const handle = await env.DB.prepare("SELECT owner_id FROM handles WHERE handle = ?")
+      .bind(owner.handle)
+      .first<{ owner_id: string }>();
     expect(handle?.owner_id).toBe(user!.id);
     // The ticket is only in the cookie: HttpOnly, Secure, SameSite=Strict, __Host-, Path=/.
     expect(JSON.stringify(result.body)).not.toContain(browser.cookies.get("__Host-officebox-enrol"));
@@ -83,7 +103,13 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
   it("the ticket cookie has the __Host- attributes", async () => {
     const owner = ownerDetails();
     const response = await new Browser().call("/api/setup", {
-      body: { token: SETUP_TOKEN, workspaceName: owner.workspace, ownerName: owner.name, ownerHandle: owner.handle, ownerEmail: owner.email },
+      body: {
+        token: SETUP_TOKEN,
+        workspaceName: owner.workspace,
+        ownerName: owner.name,
+        ownerHandle: owner.handle,
+        ownerEmail: owner.email,
+      },
     });
     const cookie = response.headers.getSetCookie().find((c) => c.startsWith("__Host-officebox-enrol="))!;
     expect(cookie).toMatch(/; Path=\//);
@@ -117,7 +143,9 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
     const browser = new Browser();
     await claim(browser);
     await registerPasskey(browser, new SoftAuthenticator());
-    const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{ name: string }>();
+    const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all<{
+      name: string;
+    }>();
     const tables = results.map((r) => r.name);
     for (const later of ["channels", "channel_members", "calendars", "drives", "folders", "invitations"]) {
       expect(tables).not.toContain(later);
@@ -146,7 +174,10 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
     expect(resumed.body).toMatchObject({ ownerEmail: owner.email });
     expect(other.cookies.get("__Host-officebox-enrol")).toBeTruthy();
     // A wrong token can't resume.
-    expect((await new Browser().json("/api/setup/resume", { body: { token: "wrong-token-0123456789abcdefghijklmnopq" } })).status).toBe(403);
+    expect(
+      (await new Browser().json("/api/setup/resume", { body: { token: "wrong-token-0123456789abcdefghijklmnopq" } }))
+        .status,
+    ).toBe(403);
     // Registering on the other device completes setup; resume then answers 410 (setup is 404 once complete).
     await registerPasskey(other, new SoftAuthenticator());
     expect((await new Browser().json("/api/setup/resume", { body: { token: SETUP_TOKEN } })).status).toBe(404);
@@ -175,7 +206,9 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
 
   it("the claim's generated token stays valid for resume past its own expiry, while the claim is open", async () => {
     await claim(new Browser());
-    await env.DB.prepare("UPDATE installation SET setup_token_expires_at = ?").bind(Date.now() - 1000).run();
+    await env.DB.prepare("UPDATE installation SET setup_token_expires_at = ?")
+      .bind(Date.now() - 1000)
+      .run();
     expect((await new Browser().json("/api/setup/resume", { body: { token: SETUP_TOKEN } })).status).toBe(201);
   });
 
@@ -186,16 +219,34 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
     const status = await browser.json("/api/setup", { env: { SETUP_TOKEN: secret } });
     expect(status.body).toMatchObject({ tokenSource: "secret" });
     const owner = ownerDetails();
-    const body = { token: secret, workspaceName: owner.workspace, ownerName: owner.name, ownerHandle: owner.handle, ownerEmail: owner.email };
-    expect((await browser.json("/api/setup", { body: { ...body, token: SETUP_TOKEN }, env: { SETUP_TOKEN: secret } })).status).toBe(403);
-    const short = await new Browser().json("/api/setup", { body: { ...body, token: "short" }, env: { SETUP_TOKEN: "short" } });
+    const body = {
+      token: secret,
+      workspaceName: owner.workspace,
+      ownerName: owner.name,
+      ownerHandle: owner.handle,
+      ownerEmail: owner.email,
+    };
+    expect(
+      (await browser.json("/api/setup", { body: { ...body, token: SETUP_TOKEN }, env: { SETUP_TOKEN: secret } }))
+        .status,
+    ).toBe(403);
+    const short = await new Browser().json("/api/setup", {
+      body: { ...body, token: "short" },
+      env: { SETUP_TOKEN: "short" },
+    });
     expect(short.status).toBe(503);
     expect((await browser.json("/api/setup", { body, env: { SETUP_TOKEN: secret } })).status).toBe(201);
   });
 
   it("answers unavailable (/not-configured) without BETTER_AUTH_SECRET or TOKEN_HASH_KEY", async () => {
     const owner = ownerDetails();
-    const body = { token: SETUP_TOKEN, workspaceName: owner.workspace, ownerName: owner.name, ownerHandle: owner.handle, ownerEmail: owner.email };
+    const body = {
+      token: SETUP_TOKEN,
+      workspaceName: owner.workspace,
+      ownerName: owner.name,
+      ownerHandle: owner.handle,
+      ownerEmail: owner.email,
+    };
     for (const missing of [{ BETTER_AUTH_SECRET: "" }, { TOKEN_HASH_KEY: "" }, { BETTER_AUTH_SECRET: "too-short" }]) {
       const result = await new Browser().json("/api/setup", { body, env: missing });
       expect(result.status).toBe(503);
@@ -224,7 +275,10 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
 });
 
 describe("claim expiry and repair (Identity §4.1, §9 'Setup expiry and repair')", () => {
-  const age = (ms: number) => env.DB.prepare("UPDATE installation SET setup_claimed_at = ?").bind(Date.now() - ms).run();
+  const age = (ms: number) =>
+    env.DB.prepare("UPDATE installation SET setup_claimed_at = ?")
+      .bind(Date.now() - ms)
+      .run();
 
   it("an expired claim with no passkey and no session is deleted and cleared in one batch", async () => {
     const owner = ownerDetails();
@@ -232,9 +286,18 @@ describe("claim expiry and repair (Identity §4.1, §9 'Setup expiry and repair'
     await age(SETUP_CLAIM_TTL_MS + 1000);
     expect(await expireStaleClaim(ctx())).toBe(true);
     expect(await ownerOf(owner.email)).toBeNull();
-    expect(await env.DB.prepare("SELECT count(*) AS n FROM handles WHERE handle = ?").bind(owner.handle).first<{ n: number }>()).toEqual({ n: 0 });
+    expect(
+      await env.DB.prepare("SELECT count(*) AS n FROM handles WHERE handle = ?")
+        .bind(owner.handle)
+        .first<{ n: number }>(),
+    ).toEqual({ n: 0 });
     const row = await installation();
-    expect(row).toMatchObject({ setup_claim: null, setup_claimed_at: null, canonical_origin: null, allowed_hosts: null });
+    expect(row).toMatchObject({
+      setup_claim: null,
+      setup_claimed_at: null,
+      canonical_origin: null,
+      allowed_hosts: null,
+    });
     // Setup reopens: with a generated token, a new one is generated on the next visit.
     expect((await new Browser().json("/api/setup")).body).toMatchObject({ claimed: false });
   });
@@ -262,7 +325,9 @@ describe("claim expiry and repair (Identity §4.1, §9 'Setup expiry and repair'
     await seedSetupToken();
     const second = ownerDetails();
     await claim(new Browser(), second);
-    await env.DB.prepare("UPDATE users SET first_signed_in_at = ? WHERE email = ?").bind(Date.now(), second.email).run();
+    await env.DB.prepare("UPDATE users SET first_signed_in_at = ? WHERE email = ?")
+      .bind(Date.now(), second.email)
+      .run();
     await age(SETUP_CLAIM_TTL_MS + 1000);
     expect(await expireStaleClaim(ctx())).toBe(false);
     expect(await ownerOf(second.email)).not.toBeNull();
@@ -292,7 +357,7 @@ describe("claim expiry and repair (Identity §4.1, §9 'Setup expiry and repair'
     const { clearSetupCache } = await import("../../src/features/identity/setup-state");
     clearSetupCache(env.DB);
     const job = IDENTITY_JOBS.find((j) => j.name === "identity.repair")!;
-    await job.run({ ...ctx(), signal: new AbortController().signal } as Parameters<typeof job.run>[0]);
+    await job.run({ ...ctx(), scheduledTime: Date.now() });
     expect((await installation())?.setup_completed_at).not.toBeNull();
   });
 

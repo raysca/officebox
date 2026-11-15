@@ -57,7 +57,7 @@ class D1Connection implements DatabaseConnection {
     };
   }
 
-  // eslint-disable-next-line require-yield -- D1 has no streaming; Kysely requires the method.
+  // eslint-disable-next-line require-yield, @typescript-eslint/require-await -- D1 has no streaming; Kysely requires the method.
   async *streamQuery<R>(): AsyncIterableIterator<QueryResult<R>> {
     throw new Error("D1 does not stream query results");
   }
@@ -71,8 +71,8 @@ class D1Driver implements Driver {
   }
 
   async init(): Promise<void> {}
-  async acquireConnection(): Promise<DatabaseConnection> {
-    return this.connection;
+  acquireConnection(): Promise<DatabaseConnection> {
+    return Promise.resolve(this.connection);
   }
   beginTransaction(): Promise<void> {
     return Promise.reject(new Error("D1 has no interactive transactions"));
@@ -151,7 +151,7 @@ class EpochMsTransformer extends OperationNodeTransformer {
       }
       return row;
     });
-    return { ...out, values: { ...values, values: rows } as unknown as OperationNode } as InsertQueryNode;
+    return { ...out, values: { ...values, values: rows } as unknown as OperationNode };
   }
 
   // UPDATE … SET col = ?

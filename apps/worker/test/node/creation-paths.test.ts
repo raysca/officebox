@@ -13,7 +13,9 @@ import { describe, expect, it } from "vitest";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const nodeModules = resolve(here, "../../../../node_modules");
-const roots = ["better-auth/dist", "@better-auth/core/dist", "@better-auth/passkey/dist"].map((r) => join(nodeModules, r));
+const roots = ["better-auth/dist", "@better-auth/core/dist", "@better-auth/passkey/dist"].map((r) =>
+  join(nodeModules, r),
+);
 
 /** Plugins we load. Everything under better-auth's plugins/ other than these is never imported. */
 const LOADED_PLUGINS = new Set<string>([]); // @better-auth/passkey is scanned as its own package

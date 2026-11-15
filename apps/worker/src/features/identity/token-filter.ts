@@ -18,7 +18,8 @@ import { SESSION_COOKIE } from "./auth";
 
 /** Removes `token` fields and any string in `tokens`, at any depth. */
 export function stripTokens(value: unknown, tokens: ReadonlySet<string>): unknown {
-  if (Array.isArray(value)) return value.filter((v) => !(typeof v === "string" && tokens.has(v))).map((v) => stripTokens(v, tokens));
+  if (Array.isArray(value))
+    return value.filter((v) => !(typeof v === "string" && tokens.has(v))).map((v) => stripTokens(v, tokens));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
@@ -86,7 +87,11 @@ export async function filterAuthResponse(response: Response, requestId: string):
     const code = reason && FORBIDDEN_REASONS.has(reason) ? "forbidden" : codeForStatus(response.status);
     const status = code === "forbidden" ? 403 : response.status;
     const error: ApiErrorBody = {
-      error: apiError(code, typeof raw.message === "string" ? raw.message : "The request was refused.", reason ? { reason } : {}),
+      error: apiError(
+        code,
+        typeof raw.message === "string" ? raw.message : "The request was refused.",
+        reason ? { reason } : {},
+      ),
       requestId,
     };
     return new Response(JSON.stringify(error), { status, headers });

@@ -25,8 +25,7 @@ export interface CreateMarker {
 
 /** How a passkey registration request is authorised, decided by our mount before better-auth runs. */
 export type RegistrationMode =
-  | { kind: "signed_in"; userId: string; sessionId: string }
-  | { kind: "ticket"; ticketHash: string };
+  { kind: "signed_in"; userId: string; sessionId: string } | { kind: "ticket"; ticketHash: string };
 
 /** What an enrolment ticket said once it was consumed at registration verify. */
 export interface ConsumedTicket {

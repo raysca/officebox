@@ -15,12 +15,12 @@ export function b64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function fromB64url(value: string): Uint8Array {
+function fromB64url(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4));
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }
 
-function concat(...parts: Uint8Array[]): Uint8Array {
+function concat(...parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let offset = 0;
   for (const part of parts) {
@@ -34,14 +34,14 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 
 type Cbor = number | string | Uint8Array | Map<Cbor, Cbor>;
 
-function head(major: number, length: number): Uint8Array {
+function head(major: number, length: number): Uint8Array<ArrayBuffer> {
   if (length < 24) return Uint8Array.of((major << 5) | length);
   if (length < 256) return Uint8Array.of((major << 5) | 24, length);
   if (length < 65536) return Uint8Array.of((major << 5) | 25, length >> 8, length & 255);
   throw new Error("CBOR value too long for this encoder");
 }
 
-function cbor(value: Cbor): Uint8Array {
+function cbor(value: Cbor): Uint8Array<ArrayBuffer> {
   if (typeof value === "number") return value >= 0 ? head(0, value) : head(1, -1 - value);
   if (typeof value === "string") {
     const bytes = encoder.encode(value);
@@ -66,7 +66,8 @@ function derSignature(raw: Uint8Array): Uint8Array {
   return concat(Uint8Array.of(0x30, body.length), body);
 }
 
-async function sha256(data: Uint8Array): Promise<Uint8Array> {
+async function sha256(input: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
+  const data = new Uint8Array(input);
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
 }
 
@@ -155,7 +156,12 @@ export class SoftAuthenticator {
       cose,
     );
     const clientData = encoder.encode(
-      JSON.stringify({ type: "webauthn.create", challenge: options.challenge, origin: overrides.origin ?? origin, crossOrigin: false }),
+      JSON.stringify({
+        type: "webauthn.create",
+        challenge: options.challenge,
+        origin: overrides.origin ?? origin,
+        crossOrigin: false,
+      }),
     );
     const attestationObject = cbor(
       new Map<Cbor, Cbor>([
@@ -170,14 +176,14 @@ export class SoftAuthenticator {
       response: {
         id: b64url(id),
         rawId: b64url(id),
-        type: "public-key",
+        type: "public-key" as const,
         response: {
           clientDataJSON: b64url(clientData),
           attestationObject: b64url(attestationObject),
           transports: ["internal"],
         },
         clientExtensionResults: {},
-        authenticatorAttachment: "platform",
+        authenticatorAttachment: "platform" as const,
       },
     };
   }
@@ -199,7 +205,12 @@ export class SoftAuthenticator {
       Uint8Array.of(counter >>> 24, (counter >>> 16) & 255, (counter >>> 8) & 255, counter & 255),
     );
     const clientData = encoder.encode(
-      JSON.stringify({ type: "webauthn.get", challenge: options.challenge, origin: overrides.origin ?? origin, crossOrigin: false }),
+      JSON.stringify({
+        type: "webauthn.get",
+        challenge: options.challenge,
+        origin: overrides.origin ?? origin,
+        crossOrigin: false,
+      }),
     );
     const signed = concat(authData, await sha256(clientData));
     const raw = new Uint8Array(
@@ -208,7 +219,7 @@ export class SoftAuthenticator {
     return {
       id: b64url(credential.id),
       rawId: b64url(credential.id),
-      type: "public-key",
+      type: "public-key" as const,
       response: {
         clientDataJSON: b64url(clientData),
         authenticatorData: b64url(authData),
@@ -216,7 +227,7 @@ export class SoftAuthenticator {
         userHandle: credential.userHandle,
       },
       clientExtensionResults: {},
-      authenticatorAttachment: "platform",
+      authenticatorAttachment: "platform" as const,
     };
   }
 }

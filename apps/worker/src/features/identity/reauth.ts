@@ -41,7 +41,10 @@ export async function reauthenticate(
   me: AuthContext,
   body: ReauthBody,
 ): Promise<Result<{ freshAuthAt: number }, ApiError>> {
-  const store = { ...(currentStore() ?? {}), reauth: { userId: me.userId } as { userId: string; verifiedUserId?: string } };
+  const store = {
+    ...(currentStore() ?? {}),
+    reauth: { userId: me.userId } as { userId: string; verifiedUserId?: string },
+  };
   let refusal: string | null = null;
   await runWithStore(store, async () => {
     try {

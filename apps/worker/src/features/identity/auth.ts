@@ -104,7 +104,13 @@ function errorCode(value: unknown): string | undefined {
 }
 
 /** Workaround 4: re-verify a refused assertion; true when it is a genuine assertion with a regressed counter. */
-async function detectClone(env: Env, origin: string, rpID: string, response: AuthenticationResponseJSON, challenge: string) {
+async function detectClone(
+  env: Env,
+  origin: string,
+  rpID: string,
+  response: AuthenticationResponseJSON,
+  challenge: string,
+) {
   const row = expectOk(
     await new Database(env.DB).first<{ id: string; user_id: string; public_key: string; sign_count: number }>(
       "SELECT id, user_id, public_key, sign_count FROM passkeys WHERE credential_id = ?",
@@ -285,7 +291,9 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
       enabled: true,
       window: 60,
       max: 100,
-      customStorage: { consume: (key: string, rule: { window: number; max: number }) => consumeRateLimit(env.DB, key, rule) },
+      customStorage: {
+        consume: (key: string, rule: { window: number; max: number }) => consumeRateLimit(env.DB, key, rule),
+      },
     },
     plugins: [
       passkey({
@@ -303,7 +311,8 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
             if (!raw) throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_REQUIRED", "An enrolment ticket is required.");
             const key = secrets.tokenHashKey;
             const ticket = await findValidTicket(env.DB, await tokenHash(key, raw), Date.now());
-            if (!ticket) throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "The enrolment ticket isn't valid.");
+            if (!ticket)
+              throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "The enrolment ticket isn't valid.");
             return { id: ticket.userId, name: ticket.email, displayName: ticket.displayName };
           },
           afterVerification: async ({ verification, user, clientData }) => {
@@ -313,15 +322,19 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
             }
             const store = currentStore();
             const mode = store?.registration;
-            if (!store || !mode) throw apiError("UNAUTHORIZED", "REGISTRATION_REFUSED", "Registration isn't allowed here.");
+            if (!store || !mode)
+              throw apiError("UNAUTHORIZED", "REGISTRATION_REFUSED", "Registration isn't allowed here.");
             if (mode.kind === "signed_in") {
               if (mode.userId !== user.id) throw apiError("UNAUTHORIZED", "REGISTRATION_REFUSED", "Wrong user.");
               return;
             }
             // Workaround 6: consume the ticket at verify, by compare-and-set, before any write.
             const challenge = clientChallenge(clientData.response.clientDataJSON);
-            const payload = challenge ? await consumeTicket(env.DB, mode.ticketHash, user.id, challenge, Date.now()) : null;
-            if (!payload) throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "The enrolment ticket isn't valid.");
+            const payload = challenge
+              ? await consumeTicket(env.DB, mode.ticketHash, user.id, challenge, Date.now())
+              : null;
+            if (!payload)
+              throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "The enrolment ticket isn't valid.");
             store.consumedTicket = { userId: user.id, via: payload.via, claim: payload.claim };
           },
         },
@@ -383,7 +396,10 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
             }
             // No better-auth path signs in anyone who isn't active (Identity §4.4).
             const user = expectOk(
-              await new Database(env.DB).first<{ status: string }>("SELECT status FROM users WHERE id = ?", session.userId),
+              await new Database(env.DB).first<{ status: string }>(
+                "SELECT status FROM users WHERE id = ?",
+                session.userId,
+              ),
             );
             if (user?.status !== "active") return false;
             const path = ctx?.path;
@@ -455,7 +471,12 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
         if (ctx.path === PATH_VERIFY_REGISTRATION) {
           const result = returnedObject(returned);
           if (result && typeof result.id === "string" && typeof result.userId === "string") {
-            await afterRegistration(env, result.id, result.userId, typeof result.name === "string" ? result.name : null);
+            await afterRegistration(
+              env,
+              result.id,
+              result.userId,
+              typeof result.name === "string" ? result.name : null,
+            );
           }
           return;
         }

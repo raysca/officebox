@@ -28,7 +28,10 @@ export interface IdentitySecrets {
   tokenHashKey: string;
 }
 
-const UNAVAILABLE: ApiError = apiError("unavailable", "Sign-in isn't configured yet. An owner must set the Worker secrets.");
+const UNAVAILABLE: ApiError = apiError(
+  "unavailable",
+  "Sign-in isn't configured yet. An owner must set the Worker secrets.",
+);
 
 /** The same problems are logged at most once a minute per isolate, not on every request. */
 export const SECRETS_LOG_INTERVAL_MS = 60_000;

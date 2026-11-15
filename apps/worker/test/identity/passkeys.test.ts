@@ -15,7 +15,9 @@ import {
 } from "./helpers";
 
 const count = async (sql: string, ...params: unknown[]) =>
-  (await env.DB.prepare(sql).bind(...params).first<{ n: number }>())!.n;
+  (await env.DB.prepare(sql)
+    .bind(...params)
+    .first<{ n: number }>())!.n;
 const sessionsOf = (userId: string) => count("SELECT count(*) AS n FROM sessions WHERE user_id = ?", userId);
 const passkeysOf = (userId: string) => count("SELECT count(*) AS n FROM passkeys WHERE user_id = ?", userId);
 
@@ -74,7 +76,10 @@ describe("passkey sign-in (Identity §4.4)", () => {
   it("refuses an unknown credential", async () => {
     const browser = new Browser();
     const stranger = new SoftAuthenticator();
-    await stranger.register({ challenge: "x", rp: { id: "officebox.test", name: "x" }, user: { id: "u", name: "u" } }, ORIGIN);
+    await stranger.register(
+      { challenge: "x", rp: { id: "officebox.test", name: "x" }, user: { id: "u", name: "u" } },
+      ORIGIN,
+    );
     const { verify } = await signInWithPasskey(browser, stranger);
     expect(verify.status).toBe(401);
     expect(browser.sessionCookie).toBeUndefined();
@@ -119,14 +124,20 @@ describe("clone detection (Identity §4.4; M1a-0 decision: re-verify refused ass
 
     // The member and every owner get a notice; it's audited.
     const notices = async (id: string) =>
-      (await env.DB.prepare("SELECT pending_security_notice AS p FROM users WHERE id = ?").bind(id).first<{ p: string }>())!.p;
+      (await env.DB.prepare("SELECT pending_security_notice AS p FROM users WHERE id = ?")
+        .bind(id)
+        .first<{ p: string }>())!.p;
     expect(JSON.parse(await notices(member.id))).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "passkey_clone_detected" })]),
     );
     expect(JSON.parse(await notices(ws.ownerId))).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: "passkey_clone_detected", details: { subjectName: "Pat Doe" } })]),
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "passkey_clone_detected", details: { subjectName: "Pat Doe" } }),
+      ]),
     );
-    expect(await count("SELECT count(*) AS n FROM audit_log WHERE action = 'auth.passkey_clone_detected'")).toBeGreaterThan(0);
+    expect(
+      await count("SELECT count(*) AS n FROM audit_log WHERE action = 'auth.passkey_clone_detected'"),
+    ).toBeGreaterThan(0);
   });
 
   it("a lower counter is a clone too; a forged signature is an ordinary failure, not a clone", async () => {
@@ -140,7 +151,10 @@ describe("clone detection (Identity §4.4; M1a-0 decision: re-verify refused ass
     const browser = new Browser();
     const options = await browser.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
     const forger = new SoftAuthenticator();
-    const fake = await forger.register({ challenge: "x", rp: { id: "officebox.test", name: "x" }, user: { id: "u", name: "u" } }, ORIGIN);
+    const fake = await forger.register(
+      { challenge: "x", rp: { id: "officebox.test", name: "x" }, user: { id: "u", name: "u" } },
+      ORIGIN,
+    );
     const credential = { ...fake.credential, id: member.authenticator.credentials[0]!.id };
     const forged = await forger.authenticate(options.body, ORIGIN, { credential, counter: 1 });
     const verify = await browser.json("/api/auth/passkey/verify-authentication", { body: { response: forged } });
@@ -164,7 +178,9 @@ describe("clone detection (Identity §4.4; M1a-0 decision: re-verify refused ass
       b.json("/api/auth/passkey/verify-authentication", { body: { response: rb } }),
     ]);
     expect(results.some((r) => r.status === 200)).toBe(true);
-    expect(await count("SELECT count(*) AS n FROM audit_log WHERE action = 'auth.passkey_clone_detected'")).toBe(before);
+    expect(await count("SELECT count(*) AS n FROM audit_log WHERE action = 'auth.passkey_clone_detected'")).toBe(
+      before,
+    );
   });
 });
 
@@ -174,7 +190,9 @@ describe("enrolment tickets (Identity §4.4, §9 'Enrolment tickets')", () => {
     const options = await browser.json("/api/auth/passkey/generate-register-options");
     expect(options.status).toBe(403);
     expect(options.body).toMatchObject({ error: { reason: "ENROLMENT_TICKET_REQUIRED" } });
-    const verify = await browser.json("/api/auth/passkey/verify-registration", { body: { response: { id: "x", type: "public-key" } } });
+    const verify = await browser.json("/api/auth/passkey/verify-registration", {
+      body: { response: { id: "x", type: "public-key" } },
+    });
     expect(verify.status).toBe(403);
   });
 
@@ -184,9 +202,11 @@ describe("enrolment tickets (Identity §4.4, §9 'Enrolment tickets')", () => {
     await giveTicket(browser, member.id);
     // Options twice: nothing consumed.
     await browser.json("/api/auth/passkey/generate-register-options");
-    const second = await browser.json<{ challenge: string; rp: { id: string; name: string }; user: { id: string; name: string } }>(
-      "/api/auth/passkey/generate-register-options",
-    );
+    const second = await browser.json<{
+      challenge: string;
+      rp: { id: string; name: string };
+      user: { id: string; name: string };
+    }>("/api/auth/passkey/generate-register-options");
     expect(second.status).toBe(200);
     const ticket = browser.cookies.get("__Host-officebox-enrol")!;
     const authenticator = new SoftAuthenticator();
@@ -204,9 +224,11 @@ describe("enrolment tickets (Identity §4.4, §9 'Enrolment tickets')", () => {
     const member = await addMember();
     const browser = new Browser();
     await giveTicket(browser, member.id);
-    const first = await browser.json<{ challenge: string; rp: { id: string; name: string }; user: { id: string; name: string } }>(
-      "/api/auth/passkey/generate-register-options",
-    );
+    const first = await browser.json<{
+      challenge: string;
+      rp: { id: string; name: string };
+      user: { id: string; name: string };
+    }>("/api/auth/passkey/generate-register-options");
     // A second browser holding the same ticket generates fresh options: the ticket moves to that challenge.
     const other = new Browser();
     other.cookies.set("__Host-officebox-enrol", browser.cookies.get("__Host-officebox-enrol")!);
@@ -222,9 +244,11 @@ describe("enrolment tickets (Identity §4.4, §9 'Enrolment tickets')", () => {
     const before = await passkeysOf(member.id);
     const browser = new Browser();
     await giveTicket(browser, member.id);
-    const options = await browser.json<{ challenge: string; rp: { id: string; name: string }; user: { id: string; name: string } }>(
-      "/api/auth/passkey/generate-register-options",
-    );
+    const options = await browser.json<{
+      challenge: string;
+      rp: { id: string; name: string };
+      user: { id: string; name: string };
+    }>("/api/auth/passkey/generate-register-options");
     const one = await new SoftAuthenticator().register(options.body, ORIGIN);
     const two = await new SoftAuthenticator().register(options.body, ORIGIN);
     const twin = new Browser();
@@ -277,9 +301,16 @@ describe("signed-in passkey management (Identity §4.4, §6)", () => {
 
     const list = await member.browser.json<{ passkeys: { createdVia: string }[] }>("/api/me/passkeys");
     expect(list.body.passkeys.map((p) => p.createdVia).sort()).toEqual(["invitation", "signed_in"]);
-    const me = await member.browser.json<{ securityNotices: { kind: string; details: { createdVia: string } }[] }>("/api/me");
+    const me = await member.browser.json<{ securityNotices: { kind: string; details: { createdVia: string } }[] }>(
+      "/api/me",
+    );
     expect(me.body.securityNotices).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: "passkey_added", details: expect.objectContaining({ createdVia: "signed_in" }) })]),
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "passkey_added",
+          details: expect.objectContaining({ createdVia: "signed_in" }) as unknown,
+        }),
+      ]),
     );
   });
 
@@ -293,7 +324,10 @@ describe("signed-in passkey management (Identity §4.4, §6)", () => {
     const other = await addMember();
     const { body } = await member.browser.json<{ passkeys: { id: string }[] }>("/api/me/passkeys");
     const id = body.passkeys[0]!.id;
-    const renamed = await member.browser.json<{ name: string }>(`/api/me/passkeys/${id}`, { method: "PATCH", body: { name: "Work laptop" } });
+    const renamed = await member.browser.json<{ name: string }>(`/api/me/passkeys/${id}`, {
+      method: "PATCH",
+      body: { name: "Work laptop" },
+    });
     expect(renamed.status).toBe(200);
     expect(renamed.body.name).toBe("Work laptop");
     const foreign = await other.browser.json(`/api/me/passkeys/${id}`, { method: "PATCH", body: { name: "Mine now" } });
@@ -310,7 +344,9 @@ describe("signed-in passkey management (Identity §4.4, §6)", () => {
     const stale = await member.browser.json(`/api/me/passkeys/${body.passkeys[1]!.id}`, { method: "DELETE" });
     expect(stale.body).toMatchObject({ error: { code: "reauth_required" } });
     await reauth(member.browser, member.authenticator);
-    expect((await member.browser.json(`/api/me/passkeys/${body.passkeys[1]!.id}`, { method: "DELETE" })).status).toBe(200);
+    expect((await member.browser.json(`/api/me/passkeys/${body.passkeys[1]!.id}`, { method: "DELETE" })).status).toBe(
+      200,
+    );
     // The engine refuses for the rule before asking for step-up: the last passkey is never removable.
     await staleFreshAuth(member.id);
     const last = await member.browser.json(`/api/me/passkeys/${body.passkeys[0]!.id}`, { method: "DELETE" });
@@ -330,7 +366,9 @@ describe("signed-in passkey management (Identity §4.4, §6)", () => {
     );
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
     expect(await passkeysOf(member.id)).toBe(1);
-    expect(await count("SELECT count(*) AS n FROM audit_log WHERE action = 'passkey.removed' AND actor_id = ?", member.id)).toBe(1);
+    expect(
+      await count("SELECT count(*) AS n FROM audit_log WHERE action = 'passkey.removed' AND actor_id = ?", member.id),
+    ).toBe(1);
   });
 
   it("an owner can never remove their last passkey", async () => {

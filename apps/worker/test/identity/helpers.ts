@@ -18,7 +18,7 @@ export const randomIp = () =>
 /** Calls the real Worker (with optional env overrides) and waits for its `waitUntil` work. */
 export async function callWorker(request: Request, overrides: Partial<Env> = {}): Promise<Response> {
   const ctx = createExecutionContext();
-  const response = await worker.fetch(request, { ...env, ...overrides } as Env, ctx);
+  const response = await worker.fetch(request, { ...env, ...overrides }, ctx);
   await waitOnExecutionContext(ctx);
   return response;
 }
@@ -84,7 +84,10 @@ export class Browser {
     return response;
   }
 
-  async json<T = Record<string, unknown>>(path: string, options: CallOptions = {}): Promise<{ status: number; body: T }> {
+  async json<T = Record<string, unknown>>(
+    path: string,
+    options: CallOptions = {},
+  ): Promise<{ status: number; body: T }> {
     const response = await this.call(path, options);
     const text = await response.text();
     return { status: response.status, body: (text ? JSON.parse(text) : null) as T };
@@ -153,9 +156,11 @@ export async function registerPasskey(
   overrides: Parameters<SoftAuthenticator["register"]>[2] = {},
   verifyBody: Record<string, unknown> = {},
 ) {
-  const options = await browser.json<{ challenge: string; rp: { id: string; name: string }; user: { id: string; name: string } }>(
-    "/api/auth/passkey/generate-register-options",
-  );
+  const options = await browser.json<{
+    challenge: string;
+    rp: { id: string; name: string };
+    user: { id: string; name: string };
+  }>("/api/auth/passkey/generate-register-options");
   if (options.status !== 200) return { options, verify: null, credentialId: null };
   const { response } = await authenticator.register(options.body, ORIGIN, overrides);
   const verify = await browser.json("/api/auth/passkey/verify-registration", { body: { response, ...verifyBody } });

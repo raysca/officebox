@@ -15,21 +15,25 @@ export function d1Facts(env: Env): PermissionFacts {
   const db = new Database(env.DB);
   return {
     async person(userId) {
-      const row = expectOk(await db.first<{ id: string; role: string; status: string }>(
-        "SELECT id, role, status FROM users WHERE id = ?",
-        userId,
-      ));
+      const row = expectOk(
+        await db.first<{ id: string; role: string; status: string }>(
+          "SELECT id, role, status FROM users WHERE id = ?",
+          userId,
+        ),
+      );
       // Unknown role or status values are parsed (and refused) by `authorize`.
       return row ? ({ userId: row.id, role: row.role, status: row.status } as PersonRef) : null;
     },
     async activeOwnerCount() {
-      const row = expectOk(await db.first<{ n: number }>(
-        "SELECT count(*) AS n FROM users WHERE role = 'owner' AND status = 'active'",
-      ));
+      const row = expectOk(
+        await db.first<{ n: number }>("SELECT count(*) AS n FROM users WHERE role = 'owner' AND status = 'active'"),
+      );
       return row?.n ?? 0;
     },
     async passkeyCount(userId) {
-      const row = expectOk(await db.first<{ n: number }>("SELECT count(*) AS n FROM passkeys WHERE user_id = ?", userId));
+      const row = expectOk(
+        await db.first<{ n: number }>("SELECT count(*) AS n FROM passkeys WHERE user_id = ?", userId),
+      );
       return row?.n ?? 0;
     },
     async recoveryTokenUnconsumed() {
@@ -53,7 +57,9 @@ export async function recoveryTokenUnconsumed(env: Env): Promise<boolean> {
   const key = env.TOKEN_HASH_KEY;
   if (!secret || [...secret].length < MIN_SECRET_BYTES || !key) return false;
   const hash = await tokenHash(key, secret);
-  const rows = expectOk(await new Database(env.DB).all<{ token_hash: string }>("SELECT token_hash FROM recovery_token_uses"));
+  const rows = expectOk(
+    await new Database(env.DB).all<{ token_hash: string }>("SELECT token_hash FROM recovery_token_uses"),
+  );
   const target = new TextEncoder().encode(hash);
   // Constant-time comparison against every recorded use.
   let used = false;

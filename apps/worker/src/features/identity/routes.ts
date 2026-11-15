@@ -104,7 +104,10 @@ const setupRoutes = new Hono<AppEnv>()
 // ---- /api/auth: the better-auth mount ----------------------------------------------------------
 
 /** Rebuilds a JSON request with a changed body (the registration verify's `createSession`). */
-async function withBody(request: Request, change: (body: Record<string, unknown>) => void): Promise<Request | ApiError> {
+async function withBody(
+  request: Request,
+  change: (body: Record<string, unknown>) => void,
+): Promise<Request | ApiError> {
   const text = await readBodyText(request, WEBAUTHN_BODY);
   if (!text.ok) return text.error;
   let body: unknown;
@@ -165,7 +168,10 @@ const authRoutes = new Hono<AppEnv>().all("/*", async (c) => {
       if (raw && store) store.registration = { kind: "ticket", ticketHash: await tokenHash(secrets.tokenHashKey, raw) };
       if (isVerify) {
         if (!raw) {
-          return respond(c, err(apiError("forbidden", "An enrolment ticket is required.", { reason: "ENROLMENT_TICKET_REQUIRED" })));
+          return respond(
+            c,
+            err(apiError("forbidden", "An enrolment ticket is required.", { reason: "ENROLMENT_TICKET_REQUIRED" })),
+          );
         }
         // Workaround 5: a ticket registration always signs the person in.
         const rebuilt = await withBody(request, (body) => {
