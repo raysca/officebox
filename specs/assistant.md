@@ -947,8 +947,8 @@ This section sits outside the AGENTS §3.1 order because it records where this s
 | AGENTS.md §2 | List this spec under feature specs (done in this change). |
 | AGENTS.md §8 | Product-owner exception for the assistant's default display name "Butler" (done in this change). |
 | PRD §5.8 | Replace "with consent" with the visible-and-stoppable rule and the mandatory join notice (§12.3); captions separate from notes (§12.4). |
-| PRD §5.9, §11, §16 (non-goals), Appendix A | Personal memory moves from *deferred* into the first AI release under §4. Add the display-name, audience-safe mention, voice, call-notes and AI Gateway decisions. Tasks and issues stay with projects. Add the privacy scope from §1. |
-| PRD §7 principle 6, §15 (Phase 3), accessibility NFR | Indexing runs only while the assistant is enabled; captions arrive with M9c; Phase 3 maps to M9. |
+| PRD §5.9, §11, §14 (out of scope), Appendix A | Personal memory moves from *deferred* into the first AI release under §4. Add the display-name, audience-safe mention, voice, call-notes and AI Gateway decisions. Tasks and issues stay with projects. Add the privacy scope from §1. |
+| PRD §4 principle 6, §15 (Phase 3), §18 accessibility row | Indexing runs only while the assistant is enabled; captions arrive with M9c; Phase 3 maps to M9. |
 | PRD §10.2 | Assistant memory retention, incognito, `assistant_interaction_retention_days`, call transcripts, personal reminders. Update "Call history: no audio recorded" to mention transcripts. |
 | PRD §13 | Assistant memory excluded from workspace export and restore. |
 | TDD §2.1, §2.3 | New D1 tables; purge jobs for interactions, transcripts, derived text and reminders. `messages.sender_id` references `users(id)`, but `'system'` and `'assistant'` are not users. Add reserved `users` rows with `status = 'system'`, excluded from the directory, seats and sign-in **(default)**. Every deleting pipeline listed in §4.4 also feeds `assistant-purge`. |
