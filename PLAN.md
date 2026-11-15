@@ -73,7 +73,7 @@ officebox/
 | M6 | **Documents** (M6a–M6c) | Drives, docs, whiteboards, sharing, comments, history, files, offline. Document calls and present mode land here. | M2, M4 | L |
 | M7 | **Operations** | Health, storage protection, usage panel, export/restore, upgrades | M1 (grows alongside) | M |
 | M8 | **Personal Inbox** | Today / Upcoming / Assigned / Following views | M3, M5, M6 | M |
-| M9 | **Assistant** (M9a–M9d, spec in draft) | Personal assistant with memory, channel mentions, proactive help, push-to-talk, call notes, live voice | M8, M4; live-voice spike passed (M9d) | XL (4 slices) |
+| M9 | **Assistant** (M9a–M9d, spec in draft) | Personal assistant with memory, channel mentions, proactive help, push-to-talk, call notes, live voice | M8, M4; voice spike passed (M9c, M9d) | XL (4 slices) |
 | Later | Projects and issues · MFA and SSO · imports · API and webhooks | PRD Phases 2–3 | — | — |
 
 Sizes are relative: M ≈ 1×, L ≈ 2×, XL ≈ 3×.
@@ -396,12 +396,12 @@ The Today, Upcoming, Inbox, Assigned to me and Following views (PRD §5.3).
 
 **Spec:** [specs/assistant.md](specs/assistant.md) (Draft for review). The assistant's display name is an admin setting that defaults to "Butler". It comes after M8, so every data source it reads already exists.
 
-- **M9a: text assistant.** Assistant DO per member with conversations and private memory; "What Butler remembers"; incognito; permission-aware retrieval (TDD §5.3); tools with confirm cards (search, summarise, find a time, events, documents, drafts, reminders, status); PDF and Office conversion; admin settings, caps and metadata log; Workers AI defaults with BYOK via AI Gateway.
+- **M9a: text assistant.** The Phase 3 ingestion pipeline (TDD §5.2: chunking, embeddings, Vectorize, invalidation); Assistant DO per member with conversations and private memory; "What Butler remembers"; incognito; permission-aware retrieval (TDD §5.3); tools with confirm cards (search, summarise, find a time, events, documents, drafts, reminders, status); PDF and Office conversion; admin settings, caps and metadata log; Workers AI defaults with BYOK via AI Gateway.
 - **M9b: mentions and proactive help.** Audience-safe `@mention` replies in conversations; daily brief, meeting prep and commitment nudges (opt-in).
-- **M9c: voice and call notes.** Push-to-talk; call notetaker with banner, pre-join notice and stop-by-anyone; per-speaker transcripts, live captions, notes posted to the call's context; image and audio files.
+- **M9c: voice and call notes.** Push-to-talk; call notetaker with banner, pre-join notice and stop-by-anyone; per-speaker transcripts and notes posted to the call's context; live captions (separate from notes); image and audio files.
 - **M9d: live voice.** Spoken conversation over the Realtime SFU.
 
-**Gate:** the live-voice spike (latency and the SFU-to-Durable-Object audio path) passes before M9d starts.
+**Gate:** the voice spike (SFU-to-Durable-Object audio path, streaming speech-to-text, latency and cost) passes before M9c starts. M9d also needs its latency target met.
 
 ## 5. Definition of done (every slice)
 
