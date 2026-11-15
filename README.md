@@ -24,7 +24,7 @@ To deploy by hand instead: `npx wrangler login`, create the database with `npx w
 Requires Node 22.22 or later.
 
 ```sh
-npm install --legacy-peer-deps   # npm 10.9 crashes resolving peer dependencies without the flag
+npm install --legacy-peer-deps   # npm 10.9 crashes resolving peer dependencies without it (.npmrc sets it too)
 cp .dev.vars.example .dev.vars   # local Worker secrets
 npm run dev                      # Worker on :8787, web app with hot reload on http://localhost:5173
 ```
@@ -57,4 +57,4 @@ Read [`AGENTS.md`](AGENTS.md) first: it sets out the workflow, conventions and d
 
 ## Licence
 
-[AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).
+GNU Affero General Public License v3.0 or later. See [`LICENSE`](LICENSE).

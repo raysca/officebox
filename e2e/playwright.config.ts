@@ -20,7 +20,9 @@ export default defineConfig({
   webServer: {
     command: `npx wrangler dev --config ../wrangler.jsonc --ip 127.0.0.1 --port ${PORT} --show-interactive-dev-session=false`,
     url: `${BASE_URL}/health`,
-    reuseExistingServer: !CI,
+    // Always start a fresh server from the current build, never a stale one left running. If the port
+    // is taken, Playwright fails with a clear error; pick another with E2E_PORT.
+    reuseExistingServer: false,
     timeout: 120_000,
     env: { WRANGLER_SEND_METRICS: "false" },
   },

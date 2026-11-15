@@ -97,7 +97,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - web unit tests
   - a Playwright smoke test against `wrangler dev`
 - **Deployment:**
-  - `wrangler.jsonc` with every binding (TDD §6.1)
+  - `wrangler.jsonc` with the bindings M0 and M1 need; each later milestone adds its bindings and Durable Object migration tags (Vectorize and AI in Phase 3, Workflows in M7, feature DOs and queues with their milestone) (TDD §6.1)
   - a working Deploy to Cloudflare button
   - the deploy command (preflight, migrations, deploy)
 - **Core platform** (`apps/worker/src/core`):
