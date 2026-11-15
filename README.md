@@ -54,7 +54,8 @@ npm run dev                      # Worker on :8787, web app with hot reload on h
 
 - **Styling:** Tailwind utilities on the semantic tokens only (`bg-surface`, `text-muted`, `border-border-strong`, …); the default palette is removed. Both themes meet WCAG AA contrast, checked by `src/app/tokens.test.ts`.
 - **Theme:** follows the system by default; the header's Theme control stores Light or Dark on the device (`localStorage`, key `officebox.theme`). `public/theme-init.js` applies it before first paint.
-- **API calls:** use `apiRequest(path, { schema })` and `unwrap()` inside query functions. Writes get the `X-Officebox-Request: 1` header automatically. Queries retry only network errors, timeouts and 5xx; mutation failures show a toast unless `meta.errorToast` is `false`.
+- **API calls:** use `apiRequest(path, { schema })` and `unwrap()` inside query functions. Writes get the `X-Officebox-Request: 1` header automatically. Queries retry network errors, timeouts, 5xx, 408 and 429 (honouring `Retry-After`, capped at 30 s); mutations never retry, and their failures show a toast unless `meta.errorToast` is `false`. People see copy chosen by error code (`messages.errors`), never the server's `message`. `createQueryClient({ onUnauthorized })` is the hook for expired sessions (M1).
+- **CSP:** the app runs under TDD §8.2's `script-src 'self'` (an e2e test serves it with that header): no inline scripts or style attributes, and Zod runs in jitless mode (`src/lib/zod-config.ts`) so it never probes for eval.
 - **Accessibility:** focus moves to the page's `h1` after each navigation, every page sets its document title through `<Page title>`, and Playwright runs axe (WCAG 2.2 AA) on every shell route in both themes.
 
 ## Repository layout

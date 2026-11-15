@@ -92,9 +92,15 @@ test.describe("desktop shell", () => {
 
   test("the footer shows the /health status", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByRole("contentinfo").getByRole("status")).toHaveText(
-      /^Service status: Online \(version \d+\.\d+\.\d+\)$/,
-    );
+    const indicator = page.getByRole("contentinfo").getByTestId("health-status");
+    await expect(indicator).toHaveAttribute("data-state", "ok");
+    await expect(indicator).toContainText(/\d+\.\d+\.\d+/); // the deployed version
+  });
+
+  test("the footer shows the service as down when /health fails", async ({ page }) => {
+    await page.route("**/health", (route) => route.fulfill({ status: 503, body: "" }));
+    await page.goto("/");
+    await expect(page.getByTestId("health-status")).toHaveAttribute("data-state", "down", { timeout: 15_000 });
   });
 
   test("the account menu opens and closes with the keyboard", async ({ page }) => {
@@ -164,7 +170,7 @@ test.describe("axe: WCAG 2.2 AA", () => {
         await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
         await page.goto(path);
         await expect(page.getByRole("heading", { level: 1, name: label })).toBeVisible();
-        await expect(page.getByRole("contentinfo").getByRole("status")).toContainText("Online");
+        await expect(page.getByTestId("health-status")).toHaveAttribute("data-state", "ok");
         expect(await htmlBackground(page)).toBe(BACKGROUND[colorScheme]);
         await expectNoAxeViolations(page);
       });
