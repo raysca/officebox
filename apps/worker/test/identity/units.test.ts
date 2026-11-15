@@ -279,16 +279,16 @@ describe("IP buckets for the per-IP throttle", () => {
 
 describe("known-device marker", () => {
   const key = "device-key-0123456789abcdefghijklmnopqr";
-  const binding = { accountKey: "account-a", sessionEpoch: 2, passwordVersion: "pw-v1" };
+  const binding = { accountKey: "account-a", sessionEpoch: 2, passwordVersion: 1 };
 
   it("is valid only for its account, epoch, password version, key and 400 days", async () => {
     const id = newDeviceId();
     const marker = await signKnownDevice(key, binding, id, 0);
     expect(await knownDeviceId([key], marker, binding, 1000)).toBe(id);
     expect(await knownDeviceId([key], marker, { ...binding, accountKey: "account-b" }, 1000)).toBeNull();
-    // Sign out everywhere (epoch bump) and a password change or re-hash invalidate it.
+    // Sign out everywhere (epoch bump) and a password change (version bump) invalidate it.
     expect(await knownDeviceId([key], marker, { ...binding, sessionEpoch: 3 }, 1000)).toBeNull();
-    expect(await knownDeviceId([key], marker, { ...binding, passwordVersion: "pw-v2" }, 1000)).toBeNull();
+    expect(await knownDeviceId([key], marker, { ...binding, passwordVersion: 2 }, 1000)).toBeNull();
     expect(await knownDeviceId(["other-key-0123456789abcdefghijklmnop"], marker, binding, 1000)).toBeNull();
     expect(await knownDeviceId([key], marker, binding, 400 * 24 * 3600 * 1000)).toBeNull();
     expect(await knownDeviceId([key], `${marker}x`, binding, 1000)).toBeNull();

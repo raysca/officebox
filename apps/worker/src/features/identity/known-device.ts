@@ -10,8 +10,9 @@ import { base64url, fromBase64url, hmacSha256, randomToken, timingSafeEqual } fr
  *   the device too, so others failing from the same IP (a shared NAT) don't delay them.
  * - **What it doesn't do:** it is not a session and never skips the password.
  * - **Bound to:** the account (the HMAC of the email that keys the throttle), the user's
- *   `session_epoch` and a password version (an HMAC of the stored hash). Sign out everywhere, a
- *   password change or re-hash, and disabling the member (status is checked too) all invalidate it.
+ *   `session_epoch` and `users.password_version`, which only a real password change or reset bumps
+ *   (never a pepper or policy re-hash). Sign out everywhere, a password change and disabling the
+ *   member (status is checked too) all invalidate it.
  * - **Signed** with `SESSION_SIGNING_KEY` (the previous key verifies too) under its own context
  *   string. It carries a random device ID and its issue time, and expires after 400 days.
  */
@@ -19,28 +20,23 @@ import { base64url, fromBase64url, hmacSha256, randomToken, timingSafeEqual } fr
 export const KNOWN_DEVICE_COOKIE = "ob_device";
 /** Browsers cap cookie lifetimes at 400 days. */
 export const KNOWN_DEVICE_TTL_MS = 400 * 24 * 60 * 60 * 1000;
-const CONTEXT = "ob_device.v2.";
+const CONTEXT = "ob_device.v3.";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 const payloadSchema = z.strictObject({
-  v: z.literal(2),
+  v: z.literal(3),
   a: z.string().max(100), // account key
   d: z.string().regex(/^[A-Za-z0-9_-]{22}$/), // device ID
   e: z.number().int().nonnegative(), // session_epoch
-  p: z.string().max(100), // password version
+  p: z.number().int(), // users.password_version
   iat: z.number().int(),
 });
 
 export interface DeviceBinding {
   accountKey: string;
   sessionEpoch: number;
-  passwordVersion: string;
-}
-
-/** A short, non-reversible version of the stored password hash: changes whenever the hash does. */
-export async function passwordVersion(tokenHashKey: string, passwordHash: string | null): Promise<string> {
-  return base64url(await hmacSha256(tokenHashKey, `pw-version:${passwordHash ?? ""}`)).slice(0, 22);
+  passwordVersion: number;
 }
 
 export function newDeviceId(): string {
@@ -54,7 +50,7 @@ export async function signKnownDevice(
   now: number,
 ): Promise<string> {
   const payload = {
-    v: 2,
+    v: 3,
     a: binding.accountKey,
     d: deviceId,
     e: binding.sessionEpoch,
@@ -91,7 +87,7 @@ export async function knownDeviceId(
     const valid =
       same(p.a, binding.accountKey) &&
       p.e === binding.sessionEpoch &&
-      same(p.p, binding.passwordVersion) &&
+      p.p === binding.passwordVersion &&
       now - p.iat < KNOWN_DEVICE_TTL_MS;
     return valid ? p.d : null;
   } catch {

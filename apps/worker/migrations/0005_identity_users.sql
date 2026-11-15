@@ -2,6 +2,7 @@
 -- so later slices never rebuild it. M1a uses id, email, display_name, handle, password_hash, role,
 -- status, session_epoch and the timestamps; the profile, onboarding and security-notice columns are
 -- filled by M1c-M1e. Safe to re-run (TDD §6.5).
+-- Edited before its first merge (M1a review added password_version); no deployment ever ran the earlier version.
 --
 -- role: owner | admin | member | guest (guest reserved for Phase 2). Validated with Zod in
 -- packages/shared, not a CHECK, because the list may grow (Platform §14). status is a fixed set.
@@ -11,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT NOT NULL,
   handle TEXT,                             -- copy of the authoritative handles row (Identity §5)
   password_hash TEXT,                      -- pbkdf2-sha256-hmac$<pepperId>$<iterations>$<salt>$<hash>
+  password_version INTEGER NOT NULL DEFAULT 1, -- bumped by a real password change or reset, never a re-hash; binds ob_device
   role TEXT NOT NULL DEFAULT 'member',
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted')),
   session_epoch INTEGER NOT NULL DEFAULT 0, -- increment to invalidate every session (TDD §8.1)

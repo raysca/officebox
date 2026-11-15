@@ -127,9 +127,15 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     call("POST", "/api/auth/password", { email, password }, { ip, env: openBinding, jar });
   /** A clock a minute into an hour, so the hour-based tests don't straddle a boundary. */
   const hourClock = () => new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
-  /** 20 distinct IPs each fail once: the account goes into slow mode. */
-  async function tripSlowMode(call: Call, email: string) {
-    for (let i = 0; i < 20; i++) expect((await attemptFrom(call, email, "guess", uniqueIp())).status).toBe(401);
+  /** 10 distinct IPs each fail once: the account goes into slow mode. Returns those (now dirty) IPs. */
+  async function tripSlowMode(call: Call, email: string): Promise<string[]> {
+    const ips = Array.from({ length: 10 }, () => uniqueIp());
+    for (const ip of ips) expect((await attemptFrom(call, email, "guess", ip)).status).toBe(401);
+    return ips;
+  }
+  /** A dirty IP takes the shared slot (expects the slot to be open). */
+  async function takeSlot(call: Call, email: string, dirtyIp: string) {
+    expect((await attemptFrom(call, email, "guess", dirtyIp)).status).toBe(401);
   }
   /** A jar holding only the known-device marker from a successful sign-in. */
   async function knownDeviceFor(call: Call, user: { email: string; password: string }) {
@@ -227,37 +233,67 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     expect((await attemptFrom(call, user.email, "nope-nope", "2001:db8:1:3::1")).status).toBe(401);
   });
 
-  it("20 distinct failing IPs slow unknown devices to one shared slot per 30 s; they still get in", async () => {
+  it("in slow mode, an attacker taking the slot every 30 s doesn't stop the owner on a clean IP", async () => {
     const user = await createUser();
     const clock = hourClock();
     const { call } = makeApp(clock);
-    await tripSlowMode(call, user.email);
-
-    // The attacker takes the open slot; the owner, on a new browser, waits for the next one.
-    expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401);
-    const owner = uniqueIp();
-    const waiting = await attemptFrom(call, user.email, user.password, owner);
-    expect(waiting.status).toBe(429);
-    expect(waiting.headers.get("Retry-After")).toBe("30");
-    clock.advance(30_000);
-    expect((await attemptFrom(call, user.email, user.password, owner)).status).toBe(200);
+    const dirty = await tripSlowMode(call, user.email);
+    // The attacker retries at every slot opening for ten minutes, from IPs already in the set.
+    for (let i = 0; i < 20; i++) {
+      await takeSlot(call, user.email, dirty[i % dirty.length] ?? "");
+      clock.advance(30_000);
+    }
+    await takeSlot(call, user.email, dirty[0] ?? "");
+    // The owner, on a new browser from their usual (clean) IP, gets in at once.
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp())).status).toBe(200);
   });
 
-  it("after the trip, 200 parallel requests from 200 IPs: exactly one per slot reaches the password check", async () => {
+  it("each attacker IP gets exactly one clean-lane attempt, then queues for the slot", async () => {
     const user = await createUser();
     const clock = hourClock();
     const { call } = makeApp(clock);
-    await tripSlowMode(call, user.email);
-    const results = await Promise.all(
-      Array.from({ length: 200 }, () => attemptFrom(call, user.email, "guess", uniqueIp())),
-    );
-    expect(results.filter((r) => r.status === 401)).toHaveLength(1);
-    expect(results.filter((r) => r.status === 429)).toHaveLength(199);
+    const dirty = await tripSlowMode(call, user.email);
+    await takeSlot(call, user.email, dirty[0] ?? "");
+    const fresh = uniqueIp();
+    expect((await attemptFrom(call, user.email, "guess", fresh)).status).toBe(401); // the clean lane
+    const queued = await attemptFrom(call, user.email, "guess", fresh);
+    expect(queued.status).toBe(429);
+    expect(queued.headers.get("Retry-After")).toBe("30");
+    // Unknown devices on a dirty IP still get in, through the slot.
     clock.advance(30_000);
-    const next = await Promise.all(
-      Array.from({ length: 20 }, () => attemptFrom(call, user.email, "guess", uniqueIp())),
+    expect((await attemptFrom(call, user.email, user.password, dirty[1] ?? "")).status).toBe(200);
+  });
+
+  it("parallel requests from many fresh IPs: one password check per IP, repeats blocked by the slot", async () => {
+    const user = await createUser();
+    const clock = hourClock();
+    const { call } = makeApp(clock);
+    const dirty = await tripSlowMode(call, user.email);
+    await takeSlot(call, user.email, dirty[0] ?? "");
+    const ips = Array.from({ length: 30 }, () => uniqueIp());
+    const results = await Promise.all(
+      ips.flatMap((ip) => [0, 1, 2].map(() => attemptFrom(call, user.email, "guess", ip))),
     );
-    expect(next.filter((r) => r.status === 401)).toHaveLength(1);
+    expect(results.filter((r) => r.status === 401)).toHaveLength(30); // bounded by the number of IPs
+    expect(results.filter((r) => r.status === 429)).toHaveLength(60);
+    // Repeats from dirty IPs share the slot: exactly one gets through when it opens.
+    clock.advance(30_000);
+    const repeats = await Promise.all(dirty.map((ip) => attemptFrom(call, user.email, "guess", ip)));
+    expect(repeats.filter((r) => r.status === 401)).toHaveLength(1);
+  });
+
+  it("a request the per-IP schedule refuses doesn't take the shared slot", async () => {
+    const user = await createUser();
+    const clock = hourClock();
+    const { call } = makeApp(clock);
+    const busy = uniqueIp();
+    for (let i = 0; i < 5; i++) expect((await attemptFrom(call, user.email, "guess", busy)).status).toBe(401);
+    const others = Array.from({ length: 9 }, () => uniqueIp());
+    for (const ip of others) expect((await attemptFrom(call, user.email, "guess", ip)).status).toBe(401);
+    // Slow mode now (10 buckets). The busy IP is still in its per-IP wait: refused there...
+    expect((await attemptFrom(call, user.email, "guess", busy)).status).toBe(429);
+    // ...so the slot is still open for the next queued request.
+    expect((await attemptFrom(call, user.email, user.password, others[0] ?? "")).status).toBe(200);
   });
 
   it("known devices are unaffected by slow mode, and a marker for another account doesn't help", async () => {
@@ -267,44 +303,51 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     const device = await knownDeviceFor(call, user);
     const other = await createUser();
     const otherDevice = await knownDeviceFor(call, other);
-    await tripSlowMode(call, user.email);
-    expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401); // slot taken
+    const dirty = await tripSlowMode(call, user.email);
+    await takeSlot(call, user.email, dirty[0] ?? "");
 
-    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), otherDevice)).status).toBe(429);
-    for (let i = 0; i < 3; i++) {
-      expect((await attemptFrom(call, user.email, user.password, uniqueIp(), device)).status).toBe(200);
+    expect((await attemptFrom(call, user.email, user.password, dirty[1] ?? "", otherDevice)).status).toBe(429);
+    for (const ip of dirty.slice(1, 4)) {
+      expect((await attemptFrom(call, user.email, user.password, ip, device)).status).toBe(200);
     }
   });
 
-  it("sign out everywhere and a password re-hash invalidate the known-device marker", async () => {
+  it("sign out everywhere and a password change invalidate the marker; a re-hash doesn't", async () => {
     const user = await createUser();
     const clock = hourClock();
     const { call } = makeApp(clock);
     const device = await knownDeviceFor(call, user);
-    await tripSlowMode(call, user.email);
-    expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401); // slot taken
+    const dirty = await tripSlowMode(call, user.email);
+    await takeSlot(call, user.email, dirty[0] ?? "");
+    const viaDirtyIp = (jar: CookieJar, env2 = openBinding) =>
+      call(
+        "POST",
+        "/api/auth/password",
+        { email: user.email, password: user.password },
+        { ip: dirty[1], env: env2, jar },
+      );
 
-    await env.DB.prepare("UPDATE users SET session_epoch = session_epoch + 1 WHERE id = ?").bind(user.id).run();
-    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), device)).status).toBe(429);
-
-    clock.advance(30_000);
-    const fresh = await knownDeviceFor(call, user); // takes the open slot and gets a new marker
-    // A sign-in on the known device after a pepper rotation re-hashes the password...
-    const rehash = await attemptFrom(call, user.email, user.password, uniqueIp(), fresh.clone());
-    expect(rehash.status).toBe(200); // known device: no slot needed
-    const rotatedEnv = { ...openBinding, PEPPER_2: "rotated-pepper-two-0123456789abcdefghijklmnop" };
+    // A pepper rotation re-hashes the password on this sign-in; the marker stays valid.
     const before = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(user.id).first();
-    const rotated = await call(
-      "POST",
-      "/api/auth/password",
-      { email: user.email, password: user.password },
-      { ip: uniqueIp(), env: rotatedEnv, jar: fresh.clone() },
-    );
-    expect(rotated.status).toBe(200);
+    const rotated = { ...openBinding, PEPPER_2: "rotated-pepper-two-0123456789abcdefghijklmnop" };
+    expect((await viaDirtyIp(device.clone(), rotated)).status).toBe(200);
     const after = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(user.id).first();
     expect(after).not.toEqual(before);
-    // ...so the marker issued before it no longer counts: back to the shared slot, which is taken.
-    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), fresh)).status).toBe(429);
+    expect((await viaDirtyIp(device.clone(), rotated)).status).toBe(200);
+
+    // A password change (M1c bumps password_version) invalidates it: back to the taken slot.
+    await env.DB.prepare("UPDATE users SET password_version = password_version + 1 WHERE id = ?").bind(user.id).run();
+    expect((await viaDirtyIp(device.clone(), rotated)).status).toBe(429);
+
+    // So does sign out everywhere, for a marker issued after the change.
+    clock.advance(30_000);
+    const signedIn = new CookieJar();
+    expect((await viaDirtyIp(signedIn, rotated)).status).toBe(200); // takes the reopened slot
+    const fresh = new CookieJar();
+    fresh.values.set("ob_device", signedIn.get("ob_device") ?? "");
+    expect((await viaDirtyIp(fresh.clone(), rotated)).status).toBe(200);
+    await env.DB.prepare("UPDATE users SET session_epoch = session_epoch + 1 WHERE id = ?").bind(user.id).run();
+    expect((await viaDirtyIp(fresh.clone(), rotated)).status).toBe(429);
   });
 
   it("a known device behind a shared IP isn't delayed by others failing from that IP", async () => {
@@ -335,9 +378,11 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     expect(perIp).toEqual([401, 401, 401, 401, 401, 429]);
 
     const other = uniqueEmail();
-    await tripSlowMode(call, other);
-    expect((await attemptFrom(call, other, "guess", uniqueIp())).status).toBe(401);
-    const slowed = await attemptFrom(call, other, "guess", uniqueIp());
+    const dirty = await tripSlowMode(call, other);
+    await takeSlot(call, other, dirty[0] ?? "");
+    const fresh = uniqueIp();
+    expect((await attemptFrom(call, other, "guess", fresh)).status).toBe(401); // clean lane
+    const slowed = await attemptFrom(call, other, "guess", fresh);
     expect(slowed.status).toBe(429);
     expect(slowed.headers.get("Retry-After")).toBe("30");
   });

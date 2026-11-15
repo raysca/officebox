@@ -4,7 +4,7 @@ import { Database, expectOk } from "../../core/db";
 import { checkLimit } from "../../core/rate-limit";
 import { base64url, hmacSha256 } from "./crypto";
 import { clientIp, deviceInfo, ipBucket } from "./device";
-import { knownDeviceId, newDeviceId, passwordVersion, signKnownDevice, type DeviceBinding } from "./known-device";
+import { knownDeviceId, newDeviceId, signKnownDevice, type DeviceBinding } from "./known-device";
 import { IDENTITY_LIMITS } from "./limits";
 import { hashPassword, verifyPassword } from "./password";
 import type { IdentitySecrets } from "./secrets";
@@ -21,16 +21,24 @@ import { isSetupComplete } from "./setup-state";
  *    must wait 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s (the cap) after the previous one. An attempt made
  *    too soon is refused with `rate_limited` and a retry-after, without checking the password and
  *    without counting. An attacker's attempts only slow the attacker's own IP for that account.
- * 3. **Slow mode, across IPs:** when 20 distinct IP buckets have had a failed attempt on the account in
- *    the current hour, browsers **without** a valid known-device cookie share one sign-in slot per
- *    account every 30 seconds. The slot is reserved in one guarded upsert, so parallel requests can't
- *    slip through, and refused requests never reach PBKDF2. This bounds distributed guessing at about
- *    120 attempts an hour per account. One IP can never trip it. Known devices are unaffected.
- *    **Limit, stated plainly:** during a distributed attack, sign-in from new browsers can be slowed to
- *    roughly one attempt per 30 seconds per account, shared with the attacker; magic links (M1c) and
- *    admin recovery links aren't throttled this way and remain the way in.
- * 4. **Counting:** only attempts that reach the password check count towards the per-IP schedule (taken
- *    atomically before verification), and only failed ones add an IP bucket.
+ * 3. **Slow mode, across IPs:** when 10 distinct IP buckets have tried the account (and failed) in the
+ *    current hour, the account is in slow mode for the rest of that hour; it re-arms each hour. In slow
+ *    mode a browser without a valid known-device cookie gets in by one of two lanes:
+ *    - **Clean lane:** a bucket that hasn't tried the account this hour goes straight to the password
+ *      check, once. The claim is an atomic insert, so parallel requests from one bucket get one try.
+ *      A failure leaves the bucket in the set; a success releases it. So the owner's usual IP gets in
+ *      at once even while an attacker holds the slot.
+ *    - **Shared slot:** every other request shares one attempt per account every 30 seconds, reserved
+ *      in one guarded upsert; refused requests never reach PBKDF2.
+ *    Known devices skip both.
+ *    **Bounds, stated plainly:** below the threshold, guessing is bounded by the per-IP schedule (about
+ *    130 an hour) times the number of IP buckets, up to 9 of them; above it, by the shared slot (about
+ *    120 an hour) plus one clean-lane attempt per new bucket. **Limits:** an attacker behind the same
+ *    shared IP (NAT, CGNAT) as the owner keeps that bucket out of the clean lane and in the per-IP
+ *    wait; known devices avoid this, and magic links (M1c) will too. M1a has no other way in yet.
+ * 4. **Counting:** the per-IP schedule is reserved first and atomically before verification, so a
+ *    request it refuses never takes the shared slot (it still counts against that IP). Only failures
+ *    (or clean-lane claims) add an IP bucket.
  * 5. **No enumeration:** every key is derived from the submitted email whether or not an account
  *    exists, the user row is read either way, verification costs one full PBKDF2 derivation either way
  *    (`password.ts`), and both failures return the same `invalid_credentials` error. An unknown email
@@ -43,7 +51,7 @@ export const FREE_ATTEMPTS = 5;
 export const MAX_DELAY_MS = 30_000;
 export const THROTTLE_WINDOW_MS = 60 * 60 * 1000;
 /** Distinct failing IP buckets per account per hour that switch on slow mode (default). */
-export const SLOW_MODE_BUCKETS = 20;
+export const SLOW_MODE_BUCKETS = 10;
 /** In slow mode, unknown devices share one attempt per account per this interval (default). */
 export const SLOW_MODE_SLOT_MS = 30_000;
 
@@ -156,17 +164,35 @@ export async function reserveSlot(ctx: CoreContext, account: string): Promise<Re
 }
 
 /**
- * Records that this IP bucket failed on the account in the hour of the attempt. The set only grows
- * within an hour and nothing is refunded on success, so a correct password can never let an extra
- * unknown device through.
+ * Adds this IP bucket to the account's set for the hour of the attempt, and says whether it was new.
+ * Outside slow mode it records a failure (after verification). In slow mode it is also the clean-lane
+ * claim, made atomically **before** verification: only the request that inserts the row gets the
+ * bucket's one clean-lane attempt this hour; every later request from the bucket queues for the slot.
  */
-async function recordFailure(ctx: CoreContext, secrets: IdentitySecrets, account: string, ip: string, at: number) {
-  expectOk(
+async function addBucket(ctx: CoreContext, account: string, bucket: string, at: number): Promise<boolean> {
+  const meta = expectOk(
     await new Database(ctx.env.DB).run(
       "INSERT OR IGNORE INTO sign_in_failure_buckets (account_key, window_start, bucket_key) VALUES (?, ?, ?)",
       account,
       hourStart(at),
-      await hmac(secrets, `sign-in-bucket:${ipBucket(ip)}`),
+      bucket,
+    ),
+  );
+  return meta.changes === 1;
+}
+
+/**
+ * Releases a clean-lane claim after a **successful** sign-in, so the owner's own IP stays clean. The
+ * claim was made in slow mode, which means at least the threshold of other buckets is already in the
+ * set: removing this one can't switch slow mode off or let anyone else through.
+ */
+async function releaseBucket(ctx: CoreContext, account: string, bucket: string, at: number): Promise<void> {
+  expectOk(
+    await new Database(ctx.env.DB).run(
+      "DELETE FROM sign_in_failure_buckets WHERE account_key = ? AND window_start = ? AND bucket_key = ?",
+      account,
+      hourStart(at),
+      bucket,
     ),
   );
 }
@@ -197,6 +223,7 @@ export async function pruneSignInThrottle(ctx: CoreContext): Promise<number> {
 interface SignInUserRow {
   id: string;
   password_hash: string | null;
+  password_version: number;
   status: string;
   session_epoch: number;
 }
@@ -224,32 +251,41 @@ export async function signInWithPassword(
   // Read for every request, account or not, so both paths do the same work before verification.
   const user = expectOk(
     await db.first<SignInUserRow>(
-      "SELECT id, password_hash, status, session_epoch FROM users WHERE email = ? AND status <> 'deleted'",
+      "SELECT id, password_hash, password_version, status, session_epoch FROM users WHERE email = ? AND status <> 'deleted'",
       body.email,
     ),
   );
-  const binding = async (row: SignInUserRow): Promise<DeviceBinding> => ({
+  const binding = (row: SignInUserRow): DeviceBinding => ({
     accountKey: account,
     sessionEpoch: row.session_epoch,
-    passwordVersion: await passwordVersion(secrets.tokenHashKey, row.password_hash),
+    passwordVersion: row.password_version,
   });
   // Checked the same way without an account (a binding nothing can match), so timing doesn't differ.
   const checked = await knownDeviceId(
     secrets.sessionKeys,
     knownDeviceCookie,
-    await binding(user ?? { id: "", password_hash: null, status: "deleted", session_epoch: -1 }),
+    binding(user ?? { id: "", password_hash: null, password_version: -1, status: "deleted", session_epoch: -1 }),
     ctx.now(),
   );
   const deviceId = user?.status === "active" ? checked : null;
 
-  if (!deviceId && (await inSlowMode(ctx, account))) {
-    const slot = await reserveSlot(ctx, account);
-    if (!slot.ok) return slot;
-  }
+  // The per-IP schedule first, so a request it refuses never takes the shared slot.
   const throttleKey = await accountIpKey(secrets, body.email, ip, deviceId);
   const attemptAt = ctx.now();
   const reserved = await reserveAttempt(ctx, throttleKey);
   if (!reserved.ok) return reserved;
+
+  const bucket = await hmac(secrets, `sign-in-bucket:${ipBucket(ip)}`);
+  let claimedCleanLane = false;
+  if (!deviceId && (await inSlowMode(ctx, account))) {
+    // Clean lane: a bucket with no attempt on this account this hour goes straight to the password
+    // check, once. Otherwise the shared 30-second slot.
+    claimedCleanLane = await addBucket(ctx, account, bucket, attemptAt);
+    if (!claimedCleanLane) {
+      const slot = await reserveSlot(ctx, account);
+      if (!slot.ok) return slot;
+    }
+  }
 
   const result = await verifyPassword(user?.password_hash ?? null, body.password, secrets.peppers);
   if (!result.valid || !user) {
@@ -257,31 +293,30 @@ export async function signInWithPassword(
       // A retired pepper's secret was deleted (or a restore lacks it): this account must reset.
       ctx.log.warn("password hash uses a pepper that isn't configured", { userId: user.id });
     }
-    await recordFailure(ctx, secrets, account, ip, attemptAt);
+    if (!claimedCleanLane) await addBucket(ctx, account, bucket, attemptAt);
     return err(INVALID);
   }
   if (user.status !== "active") return err(CANT_SIGN_IN);
 
   await resetAttempts(ctx, throttleKey);
-  let current = user;
+  if (claimedCleanLane) await releaseBucket(ctx, account, bucket, attemptAt);
   if (result.needsRehash && user.password_hash) {
-    // Compare-and-set, so a password changed meanwhile isn't overwritten with the old one.
-    const rehashed = await hashPassword(body.password, secrets.peppers);
-    const meta = expectOk(
+    // Compare-and-set, so a password changed meanwhile isn't overwritten with the old one. A re-hash
+    // keeps password_version: the password itself didn't change, so known devices stay known.
+    expectOk(
       await db.run(
         "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND password_hash = ?",
-        rehashed,
+        await hashPassword(body.password, secrets.peppers),
         ctx.now(),
         user.id,
         user.password_hash,
       ),
     );
-    if (meta.changes === 1) current = { ...user, password_hash: rehashed };
   }
   const signingKey = secrets.sessionKeys[0];
   if (!signingKey) throw new Error("No session signing key");
   return ok({
     session: await createSession(ctx, secrets, { id: user.id, sessionEpoch: user.session_epoch }, deviceInfo(request)),
-    knownDevice: await signKnownDevice(signingKey, await binding(current), deviceId ?? newDeviceId(), ctx.now()),
+    knownDevice: await signKnownDevice(signingKey, binding(user), deviceId ?? newDeviceId(), ctx.now()),
   });
 }
