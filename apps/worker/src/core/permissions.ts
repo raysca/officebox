@@ -167,6 +167,7 @@ async function buildCheck(actor: Actor, request: PermissionRequest, facts: Permi
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":
+    case "security_notice.ack":
       return ok(request);
     case "invitation.create": {
       const [actorPasskeyCount, recoveryTokenUnconsumed] = await Promise.all([
