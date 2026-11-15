@@ -1709,6 +1709,11 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | Job | Schedule | Section |
 |---|---|---|
 | Snooze wake-ups | 5 minutes | PRD §5.3 |
+| Health checks, alert raise and clear (compare-and-set on `health_checks` and `admin_alerts`) | 5 minutes | §7.1, §7.3, Admin §4 |
+| Maintenance: clock transitions, notices and the 24-hour cap | 5 minutes | §7.5, Admin §13 |
+| Scheduled-export slot (claimed with compare-and-set; a missed slot runs within 24 hours) | Hourly | §7.5, Admin §11.1 |
+| Export and member-export expiry; expired download tokens and job previews | Daily | §7.5, Admin §16 |
+| Sending pending CSV invitations (wait while maintenance or protective mode is on) | Daily | Admin §5.1 |
 | Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
 | Purge due objects, time-based retention (audit log, inbox items, sessions, invitations, tickets, huddle records) | Daily | §2.3 |
 | Assistant purge jobs: expired `assistant_interactions`, transcripts past retention and their vectors, `file_derived_text` for purged versions, finished `personal_reminders` (M9) | Daily | §2.3, Assistant §14.3 |
@@ -1720,7 +1725,8 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | RSVP-response batch per organiser | Hourly | Notifications §3 |
 | Hourly and daily email digests (members with an hourly or daily delay) | Hourly | Notifications §6, Platform §11 |
 | Room-registry sweep | Daily | Platform §12 |
-| Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
+
+During maintenance, purges, retention sweeps, ICS refresh, content-creating timers and scheduled exports are **deferred** until it ends; reminders and other notification-only triggers fire on time (Admin §13.3). The audit-log purge uses `audit_retention_days`, keeping `export.*` and `member_export.*` entries for at least 365 days (Admin §7).
 
 Timers that aren't cron jobs (Platform §11):
 - **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry), `email_release` (email holds longer than 24 hours), and from M9 `assistant_brief`, `assistant_prep` and `personal_reminder`.
