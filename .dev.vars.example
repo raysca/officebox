@@ -12,5 +12,13 @@ SETUP_TOKEN=
 # better-auth's secret: signs the session cookie. Required. Changing it signs everyone out.
 BETTER_AUTH_SECRET=
 
-# HMAC key for our stored token hashes (enrolment tickets, later invitation and recovery links). Required.
+# HMAC key for our stored token hashes (enrolment tickets, invitation and sign-in links). Required.
 TOKEN_HASH_KEY=
+
+# Email provider keys (TDD §7.6), only for the service an owner picks in Admin → Settings → Email. The
+# default, Cloudflare Email Service, needs none. Uncomment the one you use:
+# RESEND_API_KEY=
+# POSTMARK_SERVER_TOKEN=
+# SES_ACCESS_KEY_ID=
+# SES_SECRET_ACCESS_KEY=
+# SMTP_PASSWORD=

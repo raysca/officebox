@@ -2,7 +2,7 @@
 
 A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar, documents and files in one deployment. It runs in your own Cloudflare account, is open source under AGPL-3.0, and has no per-seat fees.
 
-> **Status:** early development (milestone M1, Identity). The deployed app has first-run setup with a passkey, passkey sign-in (there are no passwords), "My devices", passkey management and the application shell (navigation, themes, empty areas). Invitations and email arrive next. See [`PLAN.md`](PLAN.md) for the roadmap.
+> **Status:** early development (milestone M1, Identity). The deployed app has first-run setup with a passkey, passkey sign-in (there are no passwords), invitations by link or email, email sign-in links for members, "My devices", passkey management and the application shell (navigation, themes, empty areas). Recovery links and profiles arrive next. See [`PLAN.md`](PLAN.md) for the roadmap.
 
 ## Deploy
 
@@ -58,9 +58,13 @@ Officebox reads these Worker secrets (full inventory and rotation rules: [platfo
 | Secret | Required | Notes |
 |---|---|---|
 | `BETTER_AUTH_SECRET` | Yes | Signs the session cookie (better-auth). **Changing it signs everyone out**: the cookie is signed with the newest secret only. To rotate, set `BETTER_AUTH_SECRETS` to `2:<new>,1:<old>` (newest first), tell members they'll need to sign in again, and after 30 days set `BETTER_AUTH_SECRET` to the new value and delete `BETTER_AUTH_SECRETS`. |
-| `TOKEN_HASH_KEY` | Yes | Keys the stored hashes of our tokens (passkey enrolment tickets now; invitation, recovery and email-change links later). Changing it invalidates outstanding links. |
+| `TOKEN_HASH_KEY` | Yes | Keys the stored hashes of our tokens (passkey enrolment tickets, invitation links, sign-in links and known devices; recovery and email-change links later). Changing it invalidates outstanding links. |
 | `SETUP_TOKEN` | No | First-run setup token (at least 32 characters). Leave it unset to get a one-time token in the logs instead. Delete it after setup. |
 | `RECOVERY_TOKEN` | No | Owner recovery when every owner has lost their passkeys (at least 32 characters; arrives with recovery links). While it's set and unused, it also lets an owner with one passkey invite people. |
+| `RESEND_API_KEY` | No | Only with the Resend email service ([Email](#email)). |
+| `POSTMARK_SERVER_TOKEN` | No | Only with the Postmark email service. |
+| `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY` | No | Only with Amazon SES: an IAM user allowed only `ses:SendEmail`. |
+| `SMTP_PASSWORD` | No | Only with an SMTP server (the username is a setting). |
 
 Deploys from GitHub Actions create the two required secrets if they're missing ([above](#deploy-from-github-actions)). Other deploy paths (the Deploy button, `npm run deploy`) don't: set them yourself. Until both are set, setup and sign-in show "This workspace isn't fully configured yet", and the Worker logs which secret is missing (never its value).
 
@@ -77,6 +81,24 @@ The setup token is either:
 If you leave before creating the passkey, open `/setup` again (on any device) and enter the same token to continue. An unfinished setup is released 24 hours after it started. On a `*.workers.dev` address the workspace usually has no email, so a second passkey matters even more; moving to a custom domain later means adding passkeys again.
 
 Setup is rate-limited and recorded in the audit log. For extra protection while the workspace is unclaimed, you can put Cloudflare Access in front of it until setup is done.
+
+## Inviting people
+
+Owners and admins invite people from **Admin → Invitations**: enter the person's email and a role (admins invite members; only owners invite admins), then share the link that appears. The link works once, only for that email, and expires after 7 days. With email set up, the invitation can be emailed too. Pending invitations can be copied again, resent or revoked. Accepting asks for a name and @handle, then a passkey; there's no password. An owner needs a second passkey (or `RECOVERY_TOKEN` set) before inviting anyone.
+
+## Email
+
+Email is optional: copy-link invitations always work without it. With it, invitations can be emailed, **members** can sign in with an emailed link (owners and admins always use a passkey), and security notices (a passkey added, a sign-in link used from a new device, a copied passkey refused) are emailed as well as shown in the app.
+
+An owner turns it on in **Admin → Settings → Email**: choose the service and enter the **sender address** (Officebox never assumes a domain), then **Send test email**, which goes to your own address.
+
+| Service | Needs |
+|---|---|
+| Cloudflare Email Service (recommended) | The sending domain on Cloudflare DNS and onboarded in Email Service (dashboard → Email), on Workers Paid. No keys: the Worker's `EMAIL` binding is already in `wrangler.jsonc`. Not available on a `*.workers.dev` address alone. |
+| Resend, Postmark or Amazon SES | An account with your sending domain verified, and its key as a Worker secret ([Secrets](#secrets)). SES also needs its region in settings. |
+| SMTP | Your provider's submission server on port 587 (STARTTLS) or 465 (TLS), a username in settings and `SMTP_PASSWORD` as a secret. Port 25 isn't available from Workers. |
+
+Settings shows what's missing (by secret name) until the service can send. Mail goes through the `officebox-email` queue: temporary failures are retried for up to about two hours (8 tries), and mail that still can't be sent lands in the `officebox-email-dlq` queue. **Sign-in links** can be turned off under Admin → Settings, and **allowed invitation domains** limit who can be invited.
 
 ## Develop
 

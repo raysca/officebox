@@ -266,12 +266,15 @@ CREATE TABLE invitations (
   email_normalised TEXT NOT NULL,    -- trim, lowercase, NFKC
   role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member')),
   token_hash TEXT NOT NULL UNIQUE,   -- single-use; raw token only ever in the link
+  token_nonce TEXT NOT NULL,         -- token = HMAC(TOKEN_HASH_KEY, 'invitation-link:' || nonce): "copy again" rebuilds the same link; D1 alone can't (M1b, default)
   invited_by TEXT NOT NULL REFERENCES users(id),
   expires_at INTEGER NOT NULL,
   accepted_at INTEGER,
   accepted_by TEXT REFERENCES users(id),
-  accepted_attempt_id TEXT,          -- set by the accept compare-and-set (repair job, §8.1)
+  accepted_attempt_id TEXT,          -- set by the accept compare-and-set (repair job, §8.1); a ULID, whose time is the consume time
   revoked_at INTEGER,
+  group_ids TEXT,                    -- JSON array (Identity §5); set from M1e
+  last_sent_at INTEGER,              -- when the invitation email was last queued (resend)
   created_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX invitations_pending_email ON invitations(email_normalised)
@@ -577,6 +580,7 @@ CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 | Notifications | `inbox_items` (above); `user_preferences` (email delay, DM text opt-in, DND, reminder defaults, offline cache, shortcuts), `user_availability` (derived-availability sources), `notify_anyway_log`; `notification_preferences` keyed by `user_id, event_type, delivery` | Notifications §3.1, §5.7, §7 |
 | Timers | `scheduled_triggers` and `trigger_outbox` in the ReminderScheduler DO; D1 `pending_emails` | Platform §11 |
 | Platform | `rate_counters` (D1 counters), `ics_opt_outs`, the durable UserHub room registry | Platform §8, §12, §15 |
+| Email (M1b) | New `email_deliveries` (job state, no content); `invitations.token_nonce` and `last_sent_at` (above) | §7.6, Platform §14 |
 | Files | Four kinds: message-owned (`parent_type = 'message'`), document-owned (`parent_type = 'document'`), issue-owned (`parent_type = 'issue'`), drive files (`folder_id` set, versioned) | Platform §14, Documents §6 |
 | Assistant | New `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments`; `messages.kind` adds `assistant` and `call_notes` (sender `'assistant'`); `scheduled_triggers.kind` adds `assistant_brief`, `assistant_prep`, `personal_reminder`; `inbox_items.event_type` adds `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`; `rate_counters` scopes `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes`; reserved handles `assistant` and the display-name handle; reserved `users` rows `'system'` and `'assistant'` (`status = 'system'`, above) | Assistant §14.2 |
 | Admin | New `admin_alerts` (one row per `kind, subject`), `health_checks`, `maintenance_windows` (single-open-window unique index), `admin_jobs` (CSV invites and bulk actions) and `download_tokens` (token hashes only); `exports` columns and states (§7.5), including the partial unique index allowing one running workspace export; the `installation` columns above (the step-up field is `sessions.fresh_auth_at`, Identity §5); `inbox_items.event_type` adds `admin_alert` and `maintenance_scheduled`; shared error codes `reauth_required` and `maintenance` | Admin §16 |
@@ -1718,6 +1722,8 @@ The admin picks the driver and enters the **sender address** (for example `no-re
 - Permanent failures (HTTP 4xx other than 429, SMTP 5xx) are not retried. They are recorded with the provider's error.
 - Messages that exhaust their retries go to the dead-letter queue. Admin health shows failures and DLQ depth.
 - Each email carries an idempotency key (the job ID), passed to providers that support one.
+- **Implemented in M1b** (15 Nov 2026): the job is a row in **`email_deliveries`** (id = job ID, kind, an HMAC of the recipient, state `queued | sent | failed | dead`, attempts, driver, provider message ID, last error; never the address, subject, body or link), kept 30 days **(default)**. The queue message carries the rendered email; a job already `sent`, `failed` or `dead` is acked without sending again, so redelivery is idempotent. The consumer dead-letters a job itself on its 8th failed try; `max_retries` is 8 as the runtime's backstop. The SMTP driver is a **minimal client of our own** on `connect()` rather than a library (AGENTS §4.4: small enough; no dependency to vet): STARTTLS on 587/2525 or TLS on 465, AUTH PLAIN or LOGIN, never authenticating before TLS. SES is the v2 API with SigV4 signing on WebCrypto. Provider keys: `RESEND_API_KEY`, `POSTMARK_SERVER_TOKEN`, `SES_ACCESS_KEY_ID` + `SES_SECRET_ACCESS_KEY`, `SMTP_PASSWORD` (Platform §16). **Send test email** (`POST /admin/email/test`, owners and admins) goes only to the actor's own address and is audited (`email.test_sent`).
+- **Test email sink** (PLAN M1 exit criteria): with `EMAIL_TEST_SINK=1` **and** a loopback canonical origin (`localhost`, `127.0.0.1`), every configured driver is replaced by a sink that writes to a local D1 table the e2e tests read. The table is created on first use, never by a migration, and a deployed Worker can't have a loopback origin, so the variable does nothing in production. Worker integration tests use a fake `EMAIL_QUEUE` and fake drivers.
 - **Send test email** in the admin settings checks the configuration.
 - Invitation links can always be copied manually, so onboarding never depends on email.
 
@@ -1769,7 +1775,7 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | Export and member-export expiry; expired download tokens and job previews | Daily | §7.5, Admin §16 |
 | Sending pending CSV invitations (wait while maintenance or protective mode is on) | Daily | Admin §5.1 |
 | Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
-| Purge due objects, time-based retention (audit log, inbox items, expired sessions and `auth_verifications`, `magic_link_issues` and `auth_tokens` 7 days after use or expiry, `user_devices` unused for 400 days, invitations, tickets, huddle records) | Daily | §2.3 |
+| Purge due objects, time-based retention (audit log, inbox items, expired sessions and `auth_verifications`, `magic_link_issues` and `auth_tokens` 7 days after use or expiry, `user_devices` unused for 400 days, revoked and expired-unconsumed invitations after 30 days **(default)**, `email_deliveries` after 30 days **(default)**, tickets, huddle records) | Daily | §2.3 |
 | Identity repair: complete setup if the owner has a passkey; roll forward or release partial invitation accepts (§8.1); expire setup claims and pending domain moves | Hourly | §6.8, §8.1 |
 | Assistant purge jobs: expired `assistant_interactions`, transcripts past retention and their vectors, `file_derived_text` for purged versions, finished `personal_reminders` (M9) | Daily | §2.3, Assistant §14.3 |
 | ChatChannel event-log trimming, D1 copy reconciliation, version thinning | Daily | §2.2, §3.3, §4.3 |
