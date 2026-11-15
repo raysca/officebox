@@ -21,7 +21,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "npm run test -w @officebox/shared -w @officebox/web -w @officebox/worker",
+    "test": "npm run test -w @officebox/shared -w @officebox/web -w @officebox/worker && node --test scripts/ensure-secrets.test.mjs",
     "e2e": "npm run build && npm run e2e -w @officebox/e2e",
     "preflight": "node scripts/preflight.mjs",
     "deploy": "node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangler deploy",

@@ -44,7 +44,10 @@ Each run checks out the commit CI tested, and deploys only if it is still the ti
 - **Preflight checks.**
 - **Database.** Creates the `officebox` D1 database if the account has none by that name. It's found by name, so no ID is committed.
 - **Migrations.** Applies D1 migrations.
+- **Secrets (default).** Creates any of `SESSION_SIGNING_KEY`, `TOKEN_HASH_KEY` and `PEPPER_1` that the Worker doesn't have yet, each from 32 random bytes, so sign-in works on the first deploy. It never overwrites a secret that exists, never prints a value, and logs only "created NAME" or "NAME already set". It doesn't create `SETUP_TOKEN` (the Worker generates a one-time token into its logs instead), `SESSION_SIGNING_KEY_PREVIOUS` or `PEPPER_2` and up. If this step fails, the deploy stops before the new version goes live.
 - **Deploy.** `wrangler deploy` creates the R2 bucket and queues on first use.
+
+**The generated secrets live only in Cloudflare.** Nobody, including you, ever sees their values. That is fine for the signing and token keys, but **if `PEPPER_1` is ever lost (for example the Worker is deleted, or you restore an export into a new account), every password becomes unusable** and everyone must reset theirs. If you want a backup, set `PEPPER_1` yourself before the first deploy (`openssl rand -base64 32`, then `npx wrangler secret put PEPPER_1`) and keep a copy somewhere safe; the deploy then leaves it alone. To take over a generated value later, you can't read it back: set a new `PEPPER_2` and keep that instead (see [rotating the password pepper](#secrets)).
 
 If a step fails, the run stops and the previous Worker version stays live. Migrations that already ran stay applied, which is safe by design (expand/contract, TDD §6.5).
 
@@ -61,7 +64,7 @@ Officebox reads these Worker secrets (full inventory and rotation rules: [platfo
 | `PEPPER_1` | Yes | Mixed into every password hash and never stored in the database. **Keep a copy somewhere safe:** restoring an export to another installation needs the same `PEPPER_*` secrets, or every password must be reset. |
 | `SETUP_TOKEN` | No | First-run setup token (at least 32 characters). Leave it unset to get a one-time token in the logs instead. Delete it after setup. |
 
-Until the three required secrets are set, setup and sign-in answer "isn't configured yet", and the Worker logs which secret is missing (never its value).
+Deploys from GitHub Actions create the three required secrets if they're missing ([above](#deploy-from-github-actions)). Other deploy paths (the Deploy button, `npm run deploy`) don't: set them yourself. Until the three required secrets are set, setup and sign-in answer "isn't configured yet", and the Worker logs which secret is missing (never its value).
 
 **Rotating the password pepper.** Add `PEPPER_2` (then `PEPPER_3`, …): new and changed passwords use the highest number, and each person's password is re-hashed with it the next time they sign in. Announce a deadline; after it, delete the old pepper. Anyone who hasn't signed in by then can no longer sign in with their password and needs a reset (or a magic link or passkey, once those exist).
 
