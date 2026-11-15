@@ -54,10 +54,9 @@ describe("Q7 the filter", () => {
     const { userId, email } = await createUser();
     const bodies: string[] = [];
     // magic-link request + our confirm POST (better-auth's raw verify body carries the token: see above)
-    const req = await SELF.fetch(`${ORIGIN}/api/auth/sign-in/magic-link`, { method: "POST", headers: apiHeaders(), body: JSON.stringify({ email }) });
-    bodies.push(await req.text());
-    const row = await env.DB.prepare("SELECT token FROM spike_outbox WHERE email = ? ORDER BY id DESC LIMIT 1").bind(email).first<{ token: string }>();
-    const confirm = await SELF.fetch(`${ORIGIN}/api/sign-in/link`, { method: "POST", headers: apiHeaders(), body: JSON.stringify({ token: row!.token }) });
+    const req = await requestMagicLink(email);
+    bodies.push(await req.res.text());
+    const confirm = await SELF.fetch(`${ORIGIN}/api/sign-in/link`, { method: "POST", headers: apiHeaders(), body: JSON.stringify({ token: req.token }) });
     bodies.push(await confirm.text());
     const cookie = (confirm.headers.get("set-cookie") ?? "").split(";")[0]!;
     const t = await tokenOf(userId);

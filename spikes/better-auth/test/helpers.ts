@@ -41,9 +41,18 @@ export async function createUser(email = uniqueEmail(), role = "member"): Promis
 
 /** Requests a magic link and returns the token our sendMagicLink captured. */
 export async function requestMagicLink(email: string): Promise<{ res: Response; token: string | null }> {
+  const started = Date.now();
   const res = await SELF.fetch(`${ORIGIN}/api/auth/sign-in/magic-link`, { method: "POST", headers: apiHeaders(), body: JSON.stringify({ email }) });
-  const row = await env.DB.prepare("SELECT token FROM spike_outbox WHERE email = ? ORDER BY id DESC LIMIT 1").bind(email).first<{ token: string }>();
-  return { res, token: row?.token ?? null };
+  await res.clone().text();
+  // The mail is "sent" in waitUntil: give it a moment to land.
+  for (let i = 0; i < 20; i++) {
+    const row = await env.DB.prepare("SELECT token FROM spike_outbox WHERE email = ? AND created_at >= ? ORDER BY id DESC LIMIT 1")
+      .bind(email, started)
+      .first<{ token: string }>();
+    if (row) return { res, token: row.token };
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return { res, token: null };
 }
 
 /** Full magic-link sign-in through our confirmation POST. Returns the session cookie pair ("name=value"). */

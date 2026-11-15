@@ -6,6 +6,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export type CreateMarker = { kind: "setup" | "accept"; attemptId: string };
 
 export interface RequestStore {
+  /** The request's ExecutionContext.waitUntil, so better-auth callbacks can defer work (mail sending). */
+  waitUntil?: (p: Promise<unknown>) => void;
   /** Set only by our setup / accept routes around their createUser call. */
   create?: CreateMarker;
   /** Set by POST /me/reauth: the current session's user. The session-create hook vetoes the new session. */

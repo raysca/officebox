@@ -203,10 +203,14 @@ export function buildAuthOptions(env: Env, inst: Installation, variant: AuthVari
             .bind(await hmac(env.TOKEN_HASH_KEY, token), norm, eligible ? user.id : null, now + 900_000, now)
             .run();
           if (eligible) {
-            // The real app sends this in waitUntil. better-auth's own `url` (a GET that signs in) is never emailed.
-            await env.DB.prepare("INSERT INTO spike_outbox (email, token, better_auth_url, our_link, created_at) VALUES (?, ?, ?, ?, ?)")
+            // "Sending" (here: capturing) runs in waitUntil, so the response doesn't wait for it.
+            // better-auth's own `url` (a GET that signs in) is never emailed; our link carries the token in the fragment.
+            const send = env.DB.prepare("INSERT INTO spike_outbox (email, token, better_auth_url, our_link, created_at) VALUES (?, ?, ?, ?, ?)")
               .bind(norm, token, url, `${origin}/sign-in/link#t=${token}`, now)
               .run();
+            const wu = store()?.waitUntil;
+            if (wu) wu(send);
+            else await send;
           }
         },
       }),

@@ -90,7 +90,16 @@ export function createApp() {
   const app = new Hono<HonoEnv>();
 
   // Request store for server-set markers (Q4). Every request gets its own.
-  app.use("*", async (c, next) => requestStore.run({}, () => next()));
+  app.use("*", async (c, next) => {
+    let waitUntil: ((p: Promise<unknown>) => void) | undefined;
+    try {
+      const ec = c.executionCtx;
+      waitUntil = (p) => ec.waitUntil(p);
+    } catch {
+      // no ExecutionContext (in-process calls in tests)
+    }
+    return requestStore.run({ waitUntil }, () => next());
+  });
 
   // Installation + canonical origin, then CSRF: X-Officebox-Request and Origin == canonical origin on state changes.
   // The options endpoints are GETs with side effects (challenge cookie + verification row), so they need the header too.
@@ -223,8 +232,38 @@ export function createApp() {
   });
   app.get("/test/notices", async (c) => {
     if (c.env.SPIKE_TEST_ROUTES !== "1") return c.notFound();
-    const { results } = await c.env.DB.prepare("SELECT kind, details FROM security_notices WHERE user_id = ? ORDER BY id").bind(c.req.query("userId") ?? "").all();
+    const { results } = await c.env.DB.prepare("SELECT kind, details FROM security_notices WHERE user_id = ? AND kind != 'spike_session_deleted' ORDER BY id").bind(c.req.query("userId") ?? "").all();
     return c.json(results);
+  });
+  app.post("/test/install", async (c) => {
+    if (c.env.SPIKE_TEST_ROUTES !== "1") return c.notFound();
+    const { origin } = await c.req.json<{ origin: string }>();
+    await c.env.DB.prepare(
+      "INSERT INTO installation (id, workspace_name, canonical_origin) VALUES (1, 'Spike Workspace', ?) ON CONFLICT(id) DO UPDATE SET canonical_origin = excluded.canonical_origin",
+    )
+      .bind(origin)
+      .run();
+    return c.json({ ok: true });
+  });
+  app.post("/test/enrol", async (c) => {
+    if (c.env.SPIKE_TEST_ROUTES !== "1") return c.notFound();
+    const { userId } = await c.req.json<{ userId: string }>();
+    const ticket = crypto.randomUUID() + crypto.randomUUID();
+    await c.env.DB.prepare("INSERT INTO auth_tokens (token_hash, user_id, kind, expires_at, created_at) VALUES (?, ?, 'passkey_enrol', ?, ?)")
+      .bind(await tokenHash(c.env.TOKEN_HASH_KEY, ticket), userId, Date.now() + 900_000, Date.now())
+      .run();
+    c.header("set-cookie", `${ENROL_COOKIE}=${ticket}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=900`);
+    return c.json({ ok: true });
+  });
+  app.get("/test/authlog", async (c) => {
+    if (c.env.SPIKE_TEST_ROUTES !== "1") return c.notFound();
+    const { authLog } = await import("./auth");
+    return c.json(authLog.filter((l) => l.level === "error").map((l) => ({ message: l.message, detail: l.args.map((a) => (a instanceof Error ? a.message : String(a))) })));
+  });
+  app.get("/test/session-tokens", async (c) => {
+    if (c.env.SPIKE_TEST_ROUTES !== "1") return c.notFound();
+    const { results } = await c.env.DB.prepare("SELECT token FROM sessions").all<{ token: string }>();
+    return c.json(results.map((r) => r.token));
   });
 
   // ---- the better-auth mount: default-deny allowlist, then the token filter ----

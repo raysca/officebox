@@ -8,7 +8,11 @@
     "typecheck": "tsc --noEmit",
     "test:e2e": "node scripts/passkey-e2e.mjs",
     "schema": "node scripts/generate-schema.mjs",
-    "bundle-size": "node scripts/bundle-size.mjs"
+    "bundle-size": "node scripts/bundle-size.mjs",
+    "creation-paths": "node scripts/creation-paths.mjs",
+    "nodejs-compat": "node scripts/nodejs-compat.mjs",
+    "cost": "node scripts/cost.mjs",
+    "advisories": "node scripts/advisories.mjs"
   },
   "dependencies": {
     "@better-auth/kysely-adapter": "1.7.15",
