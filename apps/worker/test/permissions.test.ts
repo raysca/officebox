@@ -329,6 +329,124 @@ describe("authorize: facts come from the loaders", () => {
   });
 });
 
+describe("authorize: no existence oracle, no wasted queries", () => {
+  it("a member gets forbidden, not not_found, for a missing target, and nothing is loaded", async () => {
+    const w = world();
+    const { ctx, calls } = setup(w, "member");
+    const missing = crypto.randomUUID();
+    for (const request of [
+      { action: "member.disable", targetId: missing },
+      { action: "member.change_role", targetId: missing, newRole: "admin" },
+      { action: "member.export", subjectId: missing, phase: "start" },
+    ] satisfies PermissionRequest[]) {
+      const result = await authorize(ctx, request);
+      expect(!result.ok && result.error, request.action).toMatchObject({ code: "forbidden", reason: "not_permitted" });
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("an admin changing a role is refused (owner_required) before any target lookup", async () => {
+    const w = world();
+    const { ctx, calls } = setup(w, "admin");
+    const result = await authorize(ctx, {
+      action: "member.change_role",
+      targetId: crypto.randomUUID(),
+      newRole: "admin",
+    });
+    expect(!result.ok && result.error).toMatchObject({ code: "forbidden", reason: "owner_required" });
+    expect(calls).toEqual([]);
+  });
+
+  it("a member who doesn't manage the group gets forbidden for a missing group, and the member isn't looked up", async () => {
+    const w = world();
+    const { ctx, calls } = setup(w, "member");
+    const result = await authorize(ctx, {
+      action: "group.add_member",
+      groupId: crypto.randomUUID(),
+      memberId: crypto.randomUUID(),
+    });
+    expect(!result.ok && result.error).toMatchObject({ code: "forbidden", reason: "not_permitted" });
+    expect(calls.some((call) => call.startsWith("person:"))).toBe(false);
+  });
+
+  it("an owner gets not_found for a missing group, and the miss is logged", async () => {
+    const w = world();
+    const { ctx, lines, actor } = setup(w, "owner");
+    const result = await authorize(ctx, {
+      action: "group.remove_member",
+      groupId: "nope",
+      memberId: idOf(w, "member"),
+    });
+    expect(!result.ok && result.error.code).toBe("not_found");
+    expect(lines.map((l) => JSON.parse(l.line) as unknown)).toEqual([
+      { level: "info", message: "permission target not found", action: "group.remove_member", actorId: actor.userId },
+    ]);
+  });
+
+  it("an unauthorised actor with a stale session gets not_found on a hidden object, never reauth_required", async () => {
+    const w = world();
+    const { ctx } = setup(w, "member", passkeySession(60 * MINUTE));
+    for (const request of [
+      { action: "member.export", subjectId: idOf(w, "owner"), phase: "download" },
+      { action: "member.issue_recovery_link", targetId: idOf(w, "admin") },
+      { action: "members.csv.download" },
+    ] satisfies PermissionRequest[]) {
+      expect(await authorize(ctx, request, { hideAs404: true }), request.action).toEqual({
+        ok: false,
+        error: { code: "not_found", message: "Not found." },
+      });
+    }
+  });
+});
+
+describe("authorize: unknown values fail closed", () => {
+  it("refuses an actor with an unknown role before loading anything", async () => {
+    const w = world();
+    const { ctx, calls } = setup(w, "owner");
+    ctx.actor = { ...ctx.actor, role: "superadmin" as WorkspaceRole };
+    for (const request of [
+      { action: "directory.view" },
+      { action: "profile.edit", ownerId: ctx.actor.userId },
+      { action: "member.disable", targetId: idOf(w, "member") },
+    ] satisfies PermissionRequest[]) {
+      expect(await authorize(ctx, request), request.action).toMatchObject({
+        ok: false,
+        error: { code: "forbidden", reason: "not_permitted" },
+      });
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a target whose stored role or status doesn't parse", async () => {
+    const w = world();
+    const odd = `odd-${crypto.randomUUID()}`;
+    w.people[odd] = { userId: odd, role: "superadmin" as WorkspaceRole, status: "active" };
+    const { ctx } = setup(w, "admin");
+    expect(await authorize(ctx, { action: "member.disable", targetId: odd })).toMatchObject({
+      ok: false,
+      error: { code: "forbidden", reason: "invalid_target" },
+    });
+  });
+
+  it("refuses a guest everything (default, until Phase 2)", async () => {
+    const w = world();
+    const guest = `guest-${crypto.randomUUID()}`;
+    w.people[guest] = { userId: guest, role: "guest", status: "active" };
+    const { facts, calls } = stubFacts(w);
+    const ctx: PermissionContext = {
+      log: createLogger({}, () => {}),
+      now: () => NOW,
+      actor: { userId: guest, role: "guest", status: "active", session: passkeySession(MINUTE) },
+      facts,
+    };
+    expect(await authorize(ctx, { action: "devices.view", ownerId: guest })).toMatchObject({
+      ok: false,
+      error: { code: "forbidden", reason: "not_permitted" },
+    });
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("authorize: logging", () => {
   it("logs a denial at info with action, reason and actor ID only", async () => {
     const w = world();

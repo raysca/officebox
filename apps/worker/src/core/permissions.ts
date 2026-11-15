@@ -1,7 +1,7 @@
 import {
-  actorDenial,
   apiError,
   decide,
+  decideWithoutFacts,
   denialMessage,
   err,
   ok,
@@ -12,6 +12,7 @@ import {
   type GroupMemberAction,
   type MemberAdminAction,
   type PermissionCheck,
+  personRefSchema,
   type PersonRef,
   type Result,
   type SelfAction,
@@ -42,6 +43,15 @@ import type { Logger } from "./log";
  * The loaders are injected so this module needs no identity tables: M1a/M1b/M1e wire D1-backed
  * loaders (users, passkeys, `recovery_token_uses`, settings, groups); tests pass stubs.
  *
+ * **Order:** the fact-free part of the decision (`decideWithoutFacts`: status, role, the action's
+ * audience) runs **before any fact is loaded**. A request that's about to be denied costs no queries,
+ * and an actor who couldn't act on a target anyway gets `forbidden`, never a `not_found` that would
+ * tell them whether the target exists. Facts from loaders are parsed with the shared Zod schemas: a
+ * person with an unknown role or status is refused (`invalid_target`), never acted on.
+ *
+ * **Bulk jobs** (Admin §5) must rebuild the `Actor` from storage for **each item** they process and
+ * call `authorize` per item, so a demotion or sign-out mid-job takes effect at once.
+ *
  * **Extending:** a feature adding a check type to the engine adds the route-facing request here, a
  * loader for each new fact, and a case in `buildCheck`. Features whose facts are already in hand (for
  * example a Durable Object that knows channel membership) can call {@link authorizeCheck} directly
@@ -70,7 +80,12 @@ export type PermissionRequest =
 export interface PermissionFacts {
   /** A person's current role and status, or null when no such user exists. */
   person(userId: string): Promise<PersonRef | null>;
-  /** Users with role `owner` and status `active`. */
+  /**
+   * Users with role `owner` and status `active`. The engine's last-owner decision is never the last
+   * line of defence: the count can change between this read and the write, so the write that
+   * disables, deletes or demotes an owner must also be conditional (Admin §5.3:
+   * `UPDATE … WHERE (SELECT count(*) …) >= 1`), and the route treats a no-op write as `last_owner`.
+   */
   activeOwnerCount(): Promise<number>;
   /** Registered passkeys of a user. */
   passkeyCount(userId: string): Promise<number>;
@@ -129,7 +144,18 @@ export function authorizeCheck(
   return refuse(ctx, check.action, decision.error, options);
 }
 
-type Built = Result<PermissionCheck, "not_found">;
+type Built = Result<PermissionCheck, "not_found" | DenialReason>;
+
+/** Loads a person and parses them: null when missing, `invalid_target` when a value is unknown. */
+async function loadPerson(
+  facts: PermissionFacts,
+  userId: string,
+): Promise<Result<PersonRef, "not_found" | DenialReason>> {
+  const loaded = await facts.person(userId);
+  if (!loaded) return err("not_found");
+  const parsed = personRefSchema.safeParse(loaded);
+  return parsed.success ? ok(parsed.data) : err("invalid_target");
+}
 
 /** Loads the facts a request's rule needs and builds the engine's check. */
 async function buildCheck(actor: Actor, request: PermissionRequest, facts: PermissionFacts): Promise<Built> {
@@ -155,21 +181,24 @@ async function buildCheck(actor: Actor, request: PermissionRequest, facts: Permi
     case "member.enable":
     case "member.delete":
     case "member.sign_out_all": {
-      const [target, activeOwnerCount] = await Promise.all([facts.person(request.targetId), facts.activeOwnerCount()]);
-      if (!target) return err("not_found");
-      return ok({ action: request.action, target, activeOwnerCount });
+      const [target, activeOwnerCount] = await Promise.all([
+        loadPerson(facts, request.targetId),
+        facts.activeOwnerCount(),
+      ]);
+      if (!target.ok) return target;
+      return ok({ action: request.action, target: target.value, activeOwnerCount });
     }
     case "member.change_role": {
       const [target, activeOwnerCount, targetPasskeyCount, recoveryTokenUnconsumed] = await Promise.all([
-        facts.person(request.targetId),
+        loadPerson(facts, request.targetId),
         facts.activeOwnerCount(),
         facts.passkeyCount(request.targetId),
         facts.recoveryTokenUnconsumed(),
       ]);
-      if (!target) return err("not_found");
+      if (!target.ok) return target;
       return ok({
         action: request.action,
-        target,
+        target: target.value,
         newRole: request.newRole,
         activeOwnerCount,
         targetPasskeyCount,
@@ -178,18 +207,22 @@ async function buildCheck(actor: Actor, request: PermissionRequest, facts: Permi
     }
     case "member.export": {
       // The subject's role as stored now, at start and at every download (Admin §12).
-      const subject = await facts.person(request.subjectId);
-      if (!subject) return err("not_found");
-      return ok({ action: request.action, subject, phase: request.phase });
+      const subject = await loadPerson(facts, request.subjectId);
+      if (!subject.ok) return subject;
+      return ok({ action: request.action, subject: subject.value, phase: request.phase });
     }
     case "group.add_member":
     case "group.remove_member": {
-      const [managerIds, target] = await Promise.all([
-        facts.groupManagerIds(request.groupId),
-        facts.person(request.memberId),
-      ]);
-      if (!managerIds || !target) return err("not_found");
-      return ok({ action: request.action, group: { managerIds }, target });
+      // Owners and admins may act on any group, so a missing group is not_found for them. Anyone else
+      // acts only as the group's manager: load the managers first, and refuse (never not_found) when
+      // the group is missing or they don't manage it, before looking up the member.
+      const managesAny = actor.role === "owner" || actor.role === "admin";
+      const managerIds = await facts.groupManagerIds(request.groupId);
+      if (!managesAny && !managerIds?.includes(actor.userId)) return err("not_permitted");
+      if (!managerIds) return err("not_found");
+      const target = await loadPerson(facts, request.memberId);
+      if (!target.ok) return target;
+      return ok({ action: request.action, group: { managerIds }, target: target.value });
     }
     case "passkey.add": {
       // Someone else's passkeys are refused as not_own by the engine; their count isn't loaded.
@@ -218,16 +251,21 @@ async function buildCheck(actor: Actor, request: PermissionRequest, facts: Permi
 
 /**
  * Authorizes a request: `ok()` to go ahead, otherwise the typed error for the route to return. An
- * inactive or system actor is refused before any fact is loaded.
+ * actor the fact-free check refuses (inactive, system, unknown role, guest, or a role that can't take
+ * the action) is refused before any fact is loaded.
  */
 export async function authorize(
   ctx: PermissionContext,
   request: PermissionRequest,
   options: AuthorizeOptions = {},
 ): Promise<Result<void, ApiError>> {
-  const refused = actorDenial(ctx.actor);
-  if (refused) return refuse(ctx, request.action, refused, options);
+  const pre = decideWithoutFacts(ctx.actor, request.action);
+  if (!pre.ok) return refuse(ctx, request.action, pre.error, options);
   const check = await buildCheck(ctx.actor, request, ctx.facts);
-  if (!check.ok) return err(NOT_FOUND);
+  if (!check.ok) {
+    if (check.error !== "not_found") return refuse(ctx, request.action, check.error, options);
+    ctx.log.info("permission target not found", { action: request.action, actorId: ctx.actor.userId });
+    return err(NOT_FOUND);
+  }
   return authorizeCheck(ctx, check.value, options);
 }
