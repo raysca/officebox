@@ -266,7 +266,7 @@ CREATE TABLE inbox_items (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,                       -- notification | action | schedule | follow (Personal Inbox, PRD §5.3)
   event_type TEXT NOT NULL,                 -- §3 catalogue (Zod-validated)
-  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder
+  source_type TEXT NOT NULL,                -- channel | thread | document | event | call | object | security | assistant | reminder | admin
   source_id TEXT NOT NULL,
   source_seq INTEGER,                       -- latest channel seq contributing (chat)
   message_id TEXT,                          -- latest message contributing (chat)

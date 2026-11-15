@@ -651,7 +651,7 @@ CREATE TABLE IF NOT EXISTS download_tokens (
   - `export_retention_days` (owner, `settings.export_retention`)
   - `scheduled_export` `{ enabled, weekday, time, include_files, set_by }` (admin, `settings.scheduled_export`); the keep count is fixed at 4
   - `workspace_timezone` (IANA name; admin, `settings.workspace_timezone`) **(default)**.
-- `inbox_items.event_type` gains `admin_alert` and `maintenance_scheduled`.
+- `inbox_items.event_type` gains `admin_alert` and `maintenance_scheduled`, both with `source_type = 'admin'` **(default)**.
 - Shared error codes gain `reauth_required` and `maintenance`.
 
 **Timers:** all on the existing cron dispatcher (TDD §7.8).
