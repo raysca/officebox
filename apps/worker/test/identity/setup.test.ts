@@ -254,6 +254,15 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
     }
   });
 
+  it("setup is limited to 5 attempts per minute per IP, before the token is checked", async () => {
+    const browser = new Browser();
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++)
+      statuses.push((await claim(browser, ownerDetails(), "wrong-token-0123456789abcdefghijklmnopq")).status);
+    expect(statuses.slice(0, 5)).toEqual([403, 403, 403, 403, 403]);
+    expect(statuses[5]).toBe(429);
+  });
+
   it("before setup completes, signed-in routes answer setup_required", async () => {
     const me = await new Browser().json("/api/me");
     expect(me.status).toBe(409);
