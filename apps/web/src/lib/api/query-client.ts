@@ -78,7 +78,7 @@ export function toastMessage(error: unknown, operation: RequestOperation): strin
 export interface CreateQueryClientOptions {
   /**
    * Called when any query or mutation fails because the session is missing or expired.
-   * TODO(M1): sign the person out and send them to sign-in, keeping where they were.
+   * The app wires it to send the person to sign-in, keeping where they were (`app/clients.ts`).
    */
   onUnauthorized?: () => void;
 }

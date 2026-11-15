@@ -77,7 +77,11 @@ describe("feature routes and typed results", () => {
   it("validates JSON bodies with Zod and reports fields", async () => {
     const { call } = makeApp();
     const post = (body: string) =>
-      call("/api/sample/items", { method: "POST", body, headers: { "Content-Type": "application/json" } });
+      call("/api/sample/items", {
+        method: "POST",
+        body,
+        headers: { "Content-Type": "application/json", "X-Officebox-Request": "1", Origin: ORIGIN },
+      });
 
     expect((await post('{"name":"x"}')).status).toBe(201);
 

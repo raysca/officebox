@@ -2,7 +2,7 @@
 
 A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar, documents and files in one deployment. It runs in your own Cloudflare account, is open source under AGPL-3.0, and has no per-seat fees.
 
-> **Status:** early development (milestone M0, Foundation). The deployed app is the application shell (navigation, themes, empty areas) and a `/health` endpoint; there's no sign-in yet. See [`PLAN.md`](PLAN.md) for the roadmap.
+> **Status:** early development (milestone M1, Identity). The deployed app has first-run setup with a passkey, passkey sign-in (there are no passwords), "My devices", passkey management and the application shell (navigation, themes, empty areas). Invitations and email arrive next. See [`PLAN.md`](PLAN.md) for the roadmap.
 
 ## Deploy
 
@@ -15,7 +15,7 @@ npm run build    # builds the web app and checks the Worker bundle
 npm run deploy   # preflight → wrangler d1 migrations apply DB --remote → wrangler deploy
 ```
 
-R2 must be enabled on the Cloudflare account (dashboard → R2) before the first deploy. After deploying, open `https://<your-worker>.workers.dev/health`; it returns `{ "status": "ok", "version": "…" }`.
+R2 must be enabled on the Cloudflare account (dashboard → R2) before the first deploy. After deploying, open `https://<your-worker>.workers.dev/health`; it returns `{ "status": "ok", "version": "…" }`. Then set the [secrets](#secrets) and [set up the workspace](#first-run-setup).
 
 To deploy by hand instead: `npx wrangler login`, create the database with `npx wrangler d1 create officebox` and add its `database_id` to `wrangler.jsonc`, then run `npm run build && npm run deploy`.
 
@@ -44,11 +44,39 @@ Each run checks out the commit CI tested, and deploys only if it is still the ti
 - **Preflight checks.**
 - **Database.** Creates the `officebox` D1 database if the account has none by that name. It's found by name, so no ID is committed.
 - **Migrations.** Applies D1 migrations.
+- **Secrets (default).** Creates `BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` if the Worker doesn't have them yet, each from 32 random bytes, so sign-in works on the first deploy. It never overwrites a secret that exists, never prints a value, and logs only "created NAME" or "NAME already set". It doesn't create `SETUP_TOKEN` (the Worker generates a one-time token into its logs instead), `BETTER_AUTH_SECRETS` or `RECOVERY_TOKEN`. If this step fails, the deploy stops before the new version goes live.
 - **Deploy.** `wrangler deploy` creates the R2 bucket and queues on first use.
 
 If a step fails, the run stops and the previous Worker version stays live. Migrations that already ran stay applied, which is safe by design (expand/contract, TDD §6.5).
 
 Only the deploy step can read the token. Never paste it into an issue, pull request or chat; it belongs only in the GitHub secret.
+
+## Secrets
+
+Officebox reads these Worker secrets (full inventory and rotation rules: [platform §16](specs/platform.md#16-secrets-inventory)). Set each with `npx wrangler secret put <NAME>`, or in the dashboard (your Worker → Settings → Variables and Secrets → Add → Secret). Generate random values with `openssl rand -base64 32`; each must be at least 32 bytes, and no two may be the same.
+
+| Secret | Required | Notes |
+|---|---|---|
+| `BETTER_AUTH_SECRET` | Yes | Signs the session cookie (better-auth). **Changing it signs everyone out**: the cookie is signed with the newest secret only. To rotate, set `BETTER_AUTH_SECRETS` to `2:<new>,1:<old>` (newest first), tell members they'll need to sign in again, and after 30 days set `BETTER_AUTH_SECRET` to the new value and delete `BETTER_AUTH_SECRETS`. |
+| `TOKEN_HASH_KEY` | Yes | Keys the stored hashes of our tokens (passkey enrolment tickets now; invitation, recovery and email-change links later). Changing it invalidates outstanding links. |
+| `SETUP_TOKEN` | No | First-run setup token (at least 32 characters). Leave it unset to get a one-time token in the logs instead. Delete it after setup. |
+| `RECOVERY_TOKEN` | No | Owner recovery when every owner has lost their passkeys (at least 32 characters; arrives with recovery links). While it's set and unused, it also lets an owner with one passkey invite people. |
+
+Deploys from GitHub Actions create the two required secrets if they're missing ([above](#deploy-from-github-actions)). Other deploy paths (the Deploy button, `npm run deploy`) don't: set them yourself. Until both are set, setup and sign-in show "This workspace isn't fully configured yet", and the Worker logs which secret is missing (never its value).
+
+There are no passwords, so there are no password peppers to keep: lost passkeys are replaced, not recovered (Identity §4.6).
+
+## First-run setup
+
+Open your workspace's address **on the domain you'll keep using**: the address setup runs on becomes the workspace's canonical origin, and passkeys are bound to it. Until setup is done, every page leads to **Set up your workspace**, which checks that the browser can create a passkey, then asks for the setup token, the workspace name and the first owner's name, handle and email. The owner then creates a passkey (this device's screen lock, a phone, or a security key with a PIN or biometric; user verification is required). Setup is complete once that passkey exists, and `/setup` is gone for good. Add a second passkey straight away if you can: an owner with one passkey can't invite anyone until they add another (or set `RECOVERY_TOKEN`).
+
+The setup token is either:
+- the `SETUP_TOKEN` secret, if you set one, or
+- a one-time token the Worker generates on the first visit. Find it in the dashboard: Workers & Pages → your Worker → Logs, in the entry **officebox setup token** (only members of your Cloudflare account can read these logs). It expires after 24 hours; visiting the setup page again after that writes a new one.
+
+If you leave before creating the passkey, open `/setup` again (on any device) and enter the same token to continue. An unfinished setup is released 24 hours after it started. On a `*.workers.dev` address the workspace usually has no email, so a second passkey matters even more; moving to a custom domain later means adding passkeys again.
+
+Setup is rate-limited and recorded in the audit log. For extra protection while the workspace is unclaimed, you can put Cloudflare Access in front of it until setup is done.
 
 ## Develop
 
@@ -56,7 +84,7 @@ Requires Node 22.22 or later.
 
 ```sh
 npm install --legacy-peer-deps   # npm 10.9 crashes resolving peer dependencies without it (.npmrc sets it too)
-cp .dev.vars.example .dev.vars   # local Worker secrets
+cp .dev.vars.example .dev.vars   # local Worker secrets: fill in each value (openssl rand -base64 32)
 npm run dev                      # Worker on :8787, web app with hot reload on http://localhost:5173
 ```
 

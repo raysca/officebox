@@ -14,6 +14,9 @@ export default defineConfig({
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations("./migrations"),
+          // Test-only identity secrets (Platform §16); never used anywhere else.
+          BETTER_AUTH_SECRET: "test-better-auth-secret-0123456789abcdefghijkl",
+          TOKEN_HASH_KEY: "test-token-hash-key-0123456789abcdefghijklmnop",
         },
         durableObjects: {
           SYSTEM: { className: "SystemObject", useSQLite: true },

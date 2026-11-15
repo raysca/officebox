@@ -1,4 +1,6 @@
+import { can } from "@officebox/shared";
 import { Link } from "@tanstack/react-router";
+import { useMe } from "../../lib/api/identity";
 import { NAV_ITEMS } from "../nav";
 
 export interface NavListProps {
@@ -12,9 +14,21 @@ export interface NavListProps {
  * by colour alone (a bar on the left and bold text as well).
  */
 export function NavList({ onNavigate }: NavListProps) {
+  const user = useMe().data?.user;
+  const items = NAV_ITEMS.filter(
+    (item) =>
+      !item.requires ||
+      (user &&
+        can(
+          { userId: user.id, role: user.role, status: "active", session: null },
+          { action: item.requires },
+          // Role-only actions never need step-up, so the clock doesn't matter here.
+          0,
+        )),
+  );
   return (
     <ul className="flex flex-col gap-1 p-3">
-      {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+      {items.map(({ to, label, icon: Icon }) => (
         <li key={to}>
           <Link
             to={to}

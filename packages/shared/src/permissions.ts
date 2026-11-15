@@ -273,6 +273,9 @@ export const SELF_ACTIONS = [
   "devices.view", // list own sessions
   "devices.sign_out", // sign out one own session, all other devices, or everywhere
   "passkey.rename",
+  // Acknowledge the security-notice banner (Identity §4.6a): a step-up action, so a stolen session
+  // can't dismiss a notice without a fresh passkey assertion.
+  "security_notice.ack",
 ] as const;
 export type SelfAction = (typeof SELF_ACTIONS)[number];
 
@@ -348,6 +351,9 @@ export const STEP_UP_ACTIONS = [
   "audit.csv.download",
   "workspace.export", // phase "download"
   "member.export", // phase "download"
+  // Not in Identity §2's list of sensitive actions, but the banner rule is the same check: a passkey
+  // assertion on this session within 10 minutes (Identity §4.6a, TDD §8.1).
+  "security_notice.ack",
 ] as const satisfies readonly PermissionAction[];
 
 /** Whether `freshAuthAt` (any method) lies within the step-up window at `now`. */
@@ -579,6 +585,7 @@ function rule(actor: Actor, check: PermissionCheck): Decision {
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":
+    case "security_notice.ack":
     case "passkey.add":
       return ownRule(actor, check.ownerId);
     case "passkey.remove":
@@ -656,6 +663,7 @@ export function decideWithoutFacts(actor: Actor, action: string): Decision {
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":
+    case "security_notice.ack":
     case "passkey.add":
     case "passkey.remove":
       return ALLOW;

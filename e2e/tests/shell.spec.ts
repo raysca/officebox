@@ -109,7 +109,7 @@ test.describe("desktop shell", () => {
     await tabTo(page, button);
     await page.keyboard.press("Enter");
     await expect(button).toHaveAttribute("aria-expanded", "true");
-    await expect(page.getByText("Signing in arrives in a later release.")).toBeVisible();
+    await expect(page.getByText("Signed in as")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(button).toHaveAttribute("aria-expanded", "false");
     await expect(button).toBeFocused();

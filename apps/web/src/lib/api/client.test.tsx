@@ -14,6 +14,7 @@ import {
   describeApiError,
   parseHttpDate,
   parseRetryAfter,
+  setReauthHandler,
   unwrap,
   type ApiClientError,
 } from "./client";
@@ -395,5 +396,51 @@ describe("unauthorized hook", () => {
       .fetchQuery({ queryKey: ["u2"], queryFn: reject({ kind: "http", status: 403 }), retry: false })
       .catch(() => undefined);
     expect(onUnauthorized).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("step-up retry (Identity §4.5)", () => {
+  const reauthRequired = () =>
+    jsonResponse({ error: { code: "reauth_required", message: "x", reason: "reauth_required" } }, 403);
+
+  it("asks the registered handler once for concurrent refusals, then retries each request", async () => {
+    let confirmed = false;
+    const handler = vi.fn(() => {
+      confirmed = true;
+      return Promise.resolve(true);
+    });
+    const stop = setReauthHandler(handler);
+    try {
+      const fetch = vi.fn<typeof globalThis.fetch>(() =>
+        Promise.resolve(confirmed ? jsonResponse({ ok: true }) : reauthRequired()),
+      );
+      const schema = z.object({ ok: z.boolean() });
+      const [a, b] = await Promise.all([
+        apiRequest("/api/one", { method: "DELETE", schema, fetch }),
+        apiRequest("/api/two", { method: "DELETE", schema, fetch }),
+      ]);
+      expect(a).toEqual({ ok: true, value: { ok: true } });
+      expect(b).toEqual({ ok: true, value: { ok: true } });
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(4);
+    } finally {
+      stop();
+    }
+  });
+
+  it("returns the original error when the person cancels, and never prompts with reauth: false", async () => {
+    const handler = vi.fn(() => Promise.resolve(false));
+    const stop = setReauthHandler(handler);
+    try {
+      const fetch = fetchReturning(reauthRequired());
+      const result = await apiRequest("/api/x", { method: "POST", fetch });
+      expect(!result.ok && result.error).toMatchObject({ kind: "api", error: { code: "reauth_required" } });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const quiet = fetchReturning(reauthRequired());
+      await apiRequest("/api/me/reauth", { method: "POST", fetch: quiet, reauth: false });
+      expect(handler).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+    }
   });
 });

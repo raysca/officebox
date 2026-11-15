@@ -3,10 +3,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { IconButton } from "../../lib/ui/Button";
 import { Dialog } from "../../lib/ui/Dialog";
 import { MenuIcon } from "../../lib/ui/icons";
-import { Toaster } from "../../lib/ui/Toaster";
+import { useMe } from "../../lib/api/identity";
 import { messages } from "../messages";
+import { ReauthPrompt } from "../reauth";
 import { HealthStatus } from "./HealthStatus";
 import { NavList } from "./NavList";
+import { SecurityBanner } from "./SecurityBanner";
 import { ThemeSelect } from "./ThemeSelect";
 import { UserMenu } from "./UserMenu";
 
@@ -16,7 +18,9 @@ const MOBILE_MENU_ID = "mobile-menu";
 export const DESKTOP_QUERY = "(min-width: 48rem)";
 
 /**
- * The application shell: skip link, header, sidebar navigation, main content and footer.
+ * The application shell for signed-in people: skip link, header (workspace name, theme, account menu),
+ * sidebar navigation, the security-notice banner, main content and footer, and the step-up prompt.
+ * Toasts are rendered by the root layout.
  *
  * Below the `md` breakpoint the sidebar is replaced by a menu button that opens the same navigation
  * in a modal drawer. After every client-side navigation, focus moves to the new page's h1 so keyboard
@@ -24,6 +28,8 @@ export const DESKTOP_QUERY = "(min-width: 48rem)";
  */
 export function AppShell({ children }: { children?: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // Loaded by the app route's beforeLoad before the shell renders.
+  const me = useMe().data;
   // The resolved location changes once the new route has loaded and rendered, so its heading exists.
   const pathname = useRouterState({ select: (state) => state.resolvedLocation?.pathname });
   const previousPathname = useRef(pathname);
@@ -76,7 +82,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
           aria-controls={menuOpen ? MOBILE_MENU_ID : undefined}
           onClick={() => setMenuOpen(true)}
         />
-        <p className="truncate text-base font-semibold">{messages.workspaceName}</p>
+        <p className="truncate text-base font-semibold">{me?.workspace.name || messages.workspaceName}</p>
         <div className="ml-auto flex items-center gap-1 sm:gap-2">
           <ThemeSelect />
           <UserMenu />
@@ -92,6 +98,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
         </nav>
 
         <div className="flex min-w-0 flex-1 flex-col">
+          <SecurityBanner />
           <main id={MAIN_ID} tabIndex={-1} className="flex-1 focus:outline-none">
             {children ?? <Outlet />}
           </main>
@@ -114,7 +121,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
         </nav>
       </Dialog>
 
-      <Toaster />
+      <ReauthPrompt />
     </div>
   );
 }

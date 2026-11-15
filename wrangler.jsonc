@@ -22,6 +22,9 @@
   "name": "officebox",
   "main": "apps/worker/src/index.ts",
   "compatibility_date": "2026-11-01",
+  // better-auth needs AsyncLocalStorage (node:async_hooks). It is on by default from 2026-08-04, but set
+  // explicitly so a compatibility-date change can never remove it (M1a-0 spike; TDD §8.1).
+  "compatibility_flags": ["nodejs_compat"],
 
   // Build-time version, reported by /health. Preflight checks it equals package.json "version".
   "vars": {
@@ -99,6 +102,13 @@
       "name": "API_RATE_LIMITER",
       "namespace_id": "662002",
       "simple": { "limit": 300, "period": 60 }
+    },
+    {
+      // Passkey sign-in and registration (options and verification) and step-up attempts: 20 per minute
+      // per IP (Platform §8).
+      "name": "PASSKEY_RATE_LIMITER",
+      "namespace_id": "662003",
+      "simple": { "limit": 20, "period": 60 }
     }
   ],
 

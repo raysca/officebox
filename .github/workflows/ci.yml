@@ -35,6 +35,12 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
+      # The advisory gate (TDD §8.1; M1a-0 spike, workaround 16): fail on any high or critical advisory
+      # against a runtime dependency (better-auth, its passkey plugin and SimpleWebAuthn among them),
+      # using the GitHub Advisory Database through npm's audit endpoint.
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Typecheck
         run: npm run typecheck
 

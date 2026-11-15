@@ -8,3 +8,5 @@ export * from "./Link";
 export * from "./Toaster";
 export * from "./toast-store";
 export * from "./VisuallyHidden";
+export * from "./Alert";
+export * from "./TextField";

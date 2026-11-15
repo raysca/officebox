@@ -952,6 +952,7 @@ describe("step-up: a passkey assertion within 10 minutes (Permissions §6; Ident
         "members.csv.download",
         "passkey.add",
         "passkey.remove",
+        "security_notice.ack",
         "workspace.export",
       ].sort(),
     );

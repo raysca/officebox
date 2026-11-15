@@ -11,6 +11,8 @@ export const ERROR_CODES = [
   "unauthenticated", // no valid session
   "forbidden", // signed in, but the permission engine denied the action (`reason` says why)
   "reauth_required", // step-up: a sensitive action needs a passkey assertion within 10 minutes (Identity §4.5)
+  "csrf_failed", // a state-changing request without X-Officebox-Request or a canonical Origin (TDD §8.2)
+  "setup_required", // first-run setup has not completed: the web app goes to /setup (TDD §6.8)
   "not_found",
   "method_not_allowed", // the path exists but not with this HTTP method
   "conflict", // a concurrent change or a uniqueness rule

@@ -491,7 +491,12 @@ describe("denials over HTTP", () => {
         return respond(c, await authorize(ctx, { action: "member.issue_recovery_link", targetId: c.req.param("id") }));
       });
     const app = createApp({ features: [defineFeature("perm", routes)], logSink: () => {} });
-    const call = (path: string) => app.request(`http://officebox.test/api/perm${path}`, { method: "POST" }, env);
+    const call = (path: string) =>
+      app.request(
+        `http://officebox.test/api/perm${path}`,
+        { method: "POST", headers: { "X-Officebox-Request": "1", Origin: "http://officebox.test" } },
+        env,
+      );
 
     const forbidden = await call(`/members/${idOf(w, "owner")}/disable`);
     expect(forbidden.status).toBe(403);
