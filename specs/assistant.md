@@ -4,6 +4,7 @@
 **Revision:**
 - First draft written after four rounds of product-owner questions (15 Nov 2026).
 - Revised after the first independent review: a tool allow-list for shared conversations, memory treated as untrusted, AI Gateway logging off, copies purged when sources go, a hardened confirmation protocol, captions separated from call notes.
+- Product-owner decisions (15 Nov 2026): the naming exception; people without assistant access are still transcribed; the D1 source mirror, the "Ask me privately" link, the core DO base class and the mention handle were all accepted as recommended.
 - Revised after the second independent review:
   - a D1 source index for purge, with race-safe summarising
   - execution states and idempotency for confirmations
@@ -13,7 +14,7 @@
   - FTS and cleanup triggers, and indexing only while the assistant is enabled
   - deterministic spoken confirmation, and caption indicators.
 
-**Feature name:** Assistant. The name people see is a workspace setting, `assistant_display_name`, which defaults to **"Butler"**. The product owner chose this default; it is an exception to AGENTS §8, recorded in §17. Code, routes and tables say `assistant`.
+**Feature name:** Assistant. The name people see is a workspace setting, `assistant_display_name`, which defaults to **"Butler"**. The product owner approved this as an exception to AGENTS §8's generic-name rule (recorded there). Code, routes and tables say `assistant`.
 
 **Milestones** ([PLAN](../PLAN.md)):
 - M9a: retrieval foundation and text assistant (two PRs)
@@ -76,7 +77,7 @@ AI stays optional (PRD principle 6). With the assistant off or its model unreach
 | Admin visibility | **Metadata only** (PRD §11 unchanged): who, when, which model, which tools ran, which objects were read or changed, and the outcome. Never prompts, replies or memory. |
 | Assistant DM storage | **Only in the member's Assistant DO** **(default)**. It is not a `channels` row, has no D1 message copy, isn't in workspace search, and is never in the owner export. |
 | Channel mentions | **Audience-safe.** A shared reply is generated **only** from the conversation itself and sources the whole audience can open (§6). It never sees the asker's memory or private sources, and uses a restricted tool set. |
-| Private follow-up | **A fixed link, not a conditional notice** **(default)**. Every shared reply ends with "Ask me privately", which opens the asker's assistant DM with the question pre-filled. It never hints whether private material exists. *This replaces the round-1 answer's "I found more, sent to you" notice, which revealed that private material existed; flagged for the product owner.* |
+| Private follow-up | **A fixed link, not a conditional notice** **(default)**. Every shared reply ends with "Ask me privately", which opens the asker's assistant DM with the question pre-filled. It never hints whether private material exists. This replaces the earlier "I found more, sent to you" notice, which revealed that private material existed (product owner accepted). |
 | Actions | **Confirm writes.** Reads and searches happen freely. Anything that creates, changes or sends shows a **server-rendered** preview card with **Confirm / Cancel** (§5.1). |
 | Models | **Workers AI by default, BYOK optional.** The assistant works straight after deploy. An owner can move each model role (chat, summaries, speech, vision) to their own provider through AI Gateway (TDD §5.1), where AI Gateway supports that role. |
 | AI Gateway logging | **Off for assistant traffic** **(default)** (§11). |
@@ -89,6 +90,10 @@ AI stays optional (PRD principle 6). With the assistant off or its model unreach
 | Indexing | **Only while the assistant is enabled** **(default)**. Enabling it back-fills the index. Disabling stops ingestion, and an owner can delete the index (§9). |
 | Scheduling | **Free/busy only.** The assistant sees other people's calendars exactly as you would in "find a time" ([Calendar](calendar.md)). It proposes times, you confirm, and invitations go out as normal invitations. In shared conversations, scheduling moves to the asker's assistant DM. It never negotiates by messaging people. |
 | Files | **Documents, whiteboards, messages, meeting notes, PDF and Office files, images, and audio files.** Video files are an open question (§19). |
+| No assistant access | **Means you can't use the assistant**, not that it's absent around you. Members without access are still transcribed in calls where someone else turned on notes, and get the same notice and Stop control. Mention replies and call notes are visible to them like any other content. |
+| Source index for purge | **D1 mirror** `assistant_source_refs` (object references only, no content) to find whose memory cites a deleted object (§4.4). Accepted over broadcasting to every Assistant DO. |
+| Assistant DO base class | **Our core DO base class** (AGENTS §4.2). Cloudflare's `agents` SDK is used only as a source of patterns, unless a spike shows it can wrap our base class cleanly. |
+| Mention handle | **Stored by ID.** `@assistant` always works, and the handle derived from the current display name is reserved too. |
 | Presence in chat | **A system actor** with a private DM for every member, which you can also `@mention` in any conversation you're in. It doesn't count as a seat and isn't in the directory. |
 | Placement | **New milestone M9** after M8, in four slices (header, §16). M9a is split into two PRs (PLAN). |
 | Web browsing | **Not in the first release (default).** Answers come from workspace sources the user can access and the model's general knowledge. |
@@ -171,7 +176,7 @@ A settings page, also reachable by asking "what do you remember about me?":
 ### 4.4 Memory can't outlive access or deletion
 
 - **Source index.** Each Assistant DO keeps `source_refs` (which turn, item or summary cites which object). It also mirrors the **object list only** to D1 table `assistant_source_refs (user_id, object_type, object_id)`, so the platform can find whose DOs to notify.
-  - **The D1 mirror holds no content.** It reveals the same "who read which object" metadata admins already see in `assistant_interactions`, but is kept for as long as the memory is **(default; trade-off flagged in §19)**.
+  - **The D1 mirror holds no content.** It reveals the same "who read which object" metadata admins already see in `assistant_interactions`, but is kept for as long as the memory is. This trade-off was accepted over a broadcast to every member's DO (§2).
   - The DO writes the mirror through the outbox helper (TDD §3.3).
 - **Deletion purges.**
   1. When a source is deleted (a message deleted, a document or file version purged), the deletion pipeline (TDD §2.3, §5.2) looks up `assistant_source_refs`.
@@ -467,7 +472,7 @@ Admins can see **that** a member used the assistant and which objects were touch
    - **Banner:** everyone in the call sees a persistent banner, "Butler is taking notes — started by *Name*. Notes will be visible to *everyone in #channel / attendees of this event / anyone who can open this document*", with a **Stop** button. The banner is a labelled region announced once (`role="status"`), and doesn't steal focus.
    - **Joining while notes are on:** every joiner sees a **mandatory notice** with the same text and must choose **Join** or **Don't join**, even if their devices would otherwise skip the pre-join screen (Calls §5 change, §17). Their audio isn't forwarded to transcription until they've chosen Join.
    - **In-call chat:** a system message records each start and stop.
-   - Participants without assistant access are transcribed too. They get the same notice and can also stop notes.
+   - Participants without assistant access are transcribed too (§2): no access means they can't *use* the assistant. They get the same notice and can also stop notes.
 3. **Stop and restart.**
    - **Any participant** can stop notes. The banner records who stopped them.
    - Start and stop are serialised in the HuddleRoom DO, in order of arrival, so the last request processed decides the state.
@@ -892,7 +897,7 @@ These edits are made in the PR that moves this spec to **Approved**, so that no 
 | Document | Change |
 |---|---|
 | AGENTS.md §2 | List this spec under feature specs (done in this change). |
-| AGENTS.md §8 | Record the product-owner exception: the assistant's default display name is "Butler" (an admin setting); code stays generic. |
+| AGENTS.md §8 | Product-owner exception for the assistant's default display name "Butler" (done in this change). |
 | PRD §5.8 | Replace "with consent" with the visible-and-stoppable rule and the mandatory join notice (§12.3); captions separate from notes (§12.4). |
 | PRD §5.9, §11, §16 (non-goals), Appendix A | Personal memory moves from *deferred* into the first AI release under §4. Add the display-name, audience-safe mention, voice, call-notes and AI Gateway decisions. Tasks and issues stay with projects. Add the privacy scope from §1. |
 | PRD §7 principle 6, §15 (Phase 3), accessibility NFR | Indexing runs only while the assistant is enabled; captions arrive with M9c; Phase 3 maps to M9. |
@@ -933,22 +938,20 @@ These edits are made in the PR that moves this spec to **Approved**, so that no 
 
 ## 19. Open questions
 
-1. **Agents SDK or the core base class?** Cloudflare's `agents` package (MIT) offers chat state, streaming and scheduling on Durable Objects. AGENTS §4.2 requires our core DO base class. Recommendation: build on the core base class and borrow the SDK's patterns, unless a spike shows the SDK can wrap our base class cleanly.
-2. **Voice spike (gates M9c and M9d).** Confirm on production Cloudflare:
+1. **Voice spike (gates M9c and M9d).** Confirm on production Cloudflare:
    - that the Realtime SFU can deliver each participant's audio track to a Durable Object (the WebSocket adapter is in beta), and stream audio back
    - which Workers AI speech-to-text model supports streaming
    - the latency target
    - the **memory, CPU and wall-time** of transcribing 25 tracks in one HuddleRoom, versus a separate per-call transcriber DO.
 
    If the SFU path fails, live voice falls back to a direct WebSocket audio stream to the Assistant DO.
-3. **AI Gateway controls (verify in M9a).**
+2. **AI Gateway controls (verify in M9a).**
    - Can `cf-aig-collect-log` and `cf-aig-skip-cache` be set per request, and is a per-request "no log" honoured?
    - Does the Workers AI binding accept equivalent gateway options?
    - Which providers does AI Gateway support for speech-to-text, text-to-speech and vision? Roles without support stay on Workers AI.
-4. **Video files.** Workers can't run ffmpeg. Options: Cloudflare Stream's audio extraction (new dependency and cost), only transcribing containers that speech-to-text accepts directly, or deferring video.
-5. **Budget as a hard stop?** Warn-only by default, with cost estimated from token counts. Should owners be able to make the budget pause the assistant?
-6. **Workspace export, DMs and DM-call notes.** Assistant memory is excluded from the owner export because admins can't read it. Existing documents disagree on whether the owner export includes private DMs (Permissions §4.1 vs TDD §7.5). DM-call notes and transcripts follow DMs. Settle all three together.
-7. **D1 source mirror.** `assistant_source_refs` reveals who asked the assistant about which object for as long as memory lasts. The interaction log only keeps this for 30 days. Is this acceptable, or should purge use a broadcast to every member with an Assistant DO instead (slower, and no stored mapping)?
-8. **Mention handle after rename.** The mention is stored by ID, so renaming is safe. Should a handle derived from the new display name also be reserved, or only `@assistant`?
-9. **Recall re-check cost.** Re-checking every cited source on every recall could be slow for long histories. Measure in M9a and, if needed, cache access decisions per request.
-10. **Transcribing people without assistant access.** They're transcribed, with notice, the power to stop notes, and the choice not to join. Should an admin be able to restrict notes to calls where everyone has assistant access?
+3. **Video files.** Workers can't run ffmpeg. Options: Cloudflare Stream's audio extraction (new dependency and cost), only transcribing containers that speech-to-text accepts directly, or deferring video.
+4. **Budget as a hard stop?** Warn-only by default, with cost estimated from token counts. Should owners be able to make the budget pause the assistant?
+5. **Workspace export, DMs and DM-call notes.** Assistant memory is excluded from the owner export because admins can't read it. Existing documents disagree on whether the owner export includes private DMs (Permissions §4.1 vs TDD §7.5). DM-call notes and transcripts follow DMs. Settle all three together.
+6. **Recall re-check cost.** Re-checking every cited source on every recall could be slow for long histories. Measure in M9a and, if needed, cache access decisions per request.
+
+Resolved by the product owner (15 Nov 2026), now in §2: the DO base class, the D1 source mirror, the mention handle, and transcribing people without assistant access.

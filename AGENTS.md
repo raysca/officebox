@@ -194,3 +194,4 @@ npm run test:media               # real-media run, inside spikes/realtime/ (need
 - **Recommend.** When asking, propose the option you'd choose and say why.
 - **Report honestly.** Say what you verified and how, and what you didn't. A failing test or a skipped step is stated plainly.
 - **Feature names are generic for now** ("Chat", "Calls", "Calendar", "Documents"). Marketing names come later; don't invent them in code or UI copy.
+  - **Exception (product owner, Nov 2026):** the assistant's default display name is **"Butler"**. It's an admin setting (`assistant_display_name`), so UI copy uses the configured name, while code, routes and tables still say `assistant` ([specs/assistant.md](specs/assistant.md)).
