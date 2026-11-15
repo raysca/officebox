@@ -1,7 +1,7 @@
 # Spec: Identity & Access
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Revised after independent review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: reserved `assistant` handles, reserved non-user senders)
+**Revision:** Revised after independent review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: reserved `assistant` handles, reserved non-user senders); updated for the [Admin](admin.md) spec (15 Nov 2026: exports become an owner and admin power, not owner-only; `sessions.authenticated_at` and step-up re-authentication with `POST /auth/reauth`; bulk member tools and member CSV; admin screens defined in Admin §3)
 **Feature name:** Identity & Access (marketing name to be decided later)
 **Milestone:** M1 ([PLAN](../PLAN.md)) · **Related:** PRD §6, §10.1; TDD §3.1, §6.8, §8.1; [Permissions](permissions.md), [Platform](platform.md), [Notifications](notifications.md)
 
@@ -48,19 +48,21 @@ The permission engine that every feature relies on is specified in [Permissions]
 | Guests | **Phase 2** (the role value is reserved in the schema) |
 | What M1 creates | **Only identity objects**: users, handles, groups, invitations, sessions, passkeys, auth tokens and settings. `channels` and `channel_members` are **not** created in M1. `#general`, default channels and the welcome post arrive in **M3a**; personal, workspace and group calendars in **M5a**; My files, group drives, the Channels drive and channel folders in **M6a**. Each milestone provisions its own objects for existing people and groups with an idempotent backfill job (platform §13 Provisioning and backfill). |
 | Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** access to a group drive or folder, **needs an owner**. It's audited (permissions §6 Admin powers). |
+| Exports | **Owners and admins** run workspace and per-member exports; members can't export their own data. Changed from owner-only by [Admin §2](admin.md), which makes exporting an admin power. |
+| Step-up re-authentication | Sensitive downloads (exports, member and audit CSVs) need authentication within the last **10 minutes (default)**, tracked in `sessions.authenticated_at` and renewed with `POST /auth/reauth` ([Admin §11.3](admin.md)). Added by the Admin spec. |
 | Recovery links without email | Admins may issue them for members, **loudly flagged**: the member sees a notice on the **sign-in page** ("An admin reset your account on …"), and **every owner sees it flagged** on the member list until an owner acknowledges it. |
 
 ## 3. Users and roles
 
 | Role | Can |
 |---|---|
-| **Owner** | Everything an admin can, plus: invite and promote admins; change email, issue recovery links, disable, delete and sign out **admins and owners**; transfer ownership; installation settings (upgrades, export, email, policies). At least one active owner must exist. |
-| **Admin** | Invite **members**; for **members only**: disable, re-enable, delete, change email, issue recovery links, sign out all sessions. Manage groups and group managers (but **adding themselves** to a group needs an owner); set default channels; workspace settings except owner-only ones (platform §7 Admin settings); view the audit log. |
+| **Owner** | Everything an admin can, plus: invite and promote admins; change email, issue recovery links, disable, delete and sign out **admins and owners**; transfer ownership; installation settings (upgrades, email, policies). At least one active owner must exist. |
+| **Admin** | Invite **members**; for **members only**: disable, re-enable, delete, change email, issue recovery links, sign out all sessions. Manage groups and group managers (but **adding themselves** to a group needs an owner); set default channels; workspace settings except owner-only ones (platform §7 Admin settings); view the audit log; run and download **workspace and per-member exports** ([Admin §11, §12](admin.md); a per-member export of an admin or owner needs an owner). |
 | **Member** | Use the workspace, edit their own profile, manage their own sign-in methods and devices. |
 | **Group manager** | A member (or admin) who manages one group's membership. This is a property of group membership, not a workspace role. |
 | *Guest* | Phase 2 |
 
-Admins can't read private content they haven't been given access to, and can't add themselves to private channels (permissions §6 Admin powers). The full matrix of who can do what to people and groups is permissions §4.6.
+Admins can't read private content they haven't been given access to in the app, and can't add themselves to private channels (permissions §6 Admin powers). Workspace exports, which owners and admins run, do include private content; the privacy statement says so ([Admin §2](admin.md)). The full matrix of who can do what to people and groups is permissions §4.6.
 
 ## 4. Functional requirements
 
@@ -137,6 +139,7 @@ An invite opened by someone already signed in as another member shows "You're si
   - **Recovery:** members with a password sign in with it and add new passkeys. **Passkey-only members** need an admin recovery link (§4.6). The admin guide for domain changes and restores says so, and the restore flow lists passkey-only members who will need one (platform §6 Export coverage).
 - **Rate limits:** progressive delays after **5 failed attempts per minute per IP** and **10 per hour per account** (TDD §8.1). There is no hard lockout.
   - **Delay schedule per account (default):** attempts 1–5 are immediate; then each further failed attempt waits 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s (the cap). A successful sign-in resets it.
+  - **Step-up failures count too.** Failed `POST /auth/reauth` attempts (§4.5) count toward the per-account limit and its progressive delay, and are audited (`auth.reauth_failed`, [Admin §11.3](admin.md)).
   - Further limits are in platform §8 Rate limits and quotas.
 - **Disabled and deleted members** can't sign in. They see a generic "can't sign in" message.
 
@@ -146,6 +149,9 @@ An invite opened by someone already signed in as another member shows "You're si
 - **Grace window (default 30 s):** if two tabs refresh with the same refresh token at once, both get the **same successor** token within 30 seconds of the rotation. Reuse of a token older than that still revokes the session.
 - **Every authenticated request checks `session_epoch` and user status**, not only WebSocket upgrades. The check can be cached per isolate for at most **60 seconds** **(default)**, so a disabled member loses REST access within a minute and sockets within seconds.
 - **30-day sliding expiry.** Each refresh extends the session.
+- **Recent authentication (`authenticated_at`).** Each session records when the member last proved who they are: a password, passkey or magic-link sign-in, accepting an invitation, using a recovery link, or a step-up. **A token refresh doesn't update it.** `0` means "not recently authenticated".
+  - **Step-up re-authentication.** Sensitive downloads need `authenticated_at` within the last **10 minutes (default)**; otherwise they return `reauth_required`. The member re-authenticates with `POST /auth/reauth`, using any method they have (password, passkey, or a one-time magic link to their own email when email is configured). Passkey challenges and email links for step-up are bound to the current session and user.
+  - Limited to **5 attempts per 10 minutes per session (default)** (platform §8), and failures count toward the §4.4 per-account limit. The full design, including download tokens, is in [Admin §11.3](admin.md).
 - **My devices** (this is PRD §6's "login activity visibility"):
   - a list of active sessions showing browser and OS, approximate location if available, created and last-seen times, and which one is the current device
   - **sign out** any session, or **sign out all other devices**
@@ -224,6 +230,11 @@ An invite opened by someone already signed in as another member shows "You're si
   - disable and re-enable; delete (anonymise, PRD §10.2); change email; issue a recovery link; sign out all sessions.
 
   **Admins can do these for members only; for admins and owners, an owner must act** (permissions §6 Admin powers). What disabling and deleting do in each feature is set out in platform §3 Member lifecycle.
+- **Bulk tools** ([Admin §5](admin.md)), following the same per-member rules:
+  - **CSV invite** with a preview of every row before anything is sent ([Admin §5.1](admin.md))
+  - **bulk group changes**: add to or remove from a group ([Admin §5.2](admin.md))
+  - **bulk disable**, confirmed by typing the count, never including the actor or the last owner ([Admin §5.3](admin.md)). There is no bulk delete **(default)**.
+- **Member CSV download** of the filtered member list, with step-up re-authentication (§4.5) and audited ([Admin §5.4](admin.md)).
 - **Email change:**
   - When email is configured, the new address must be confirmed before it takes effect. The pending address is held in an `email_change` token's payload. The link opens a confirmation page (GET), and only its POST applies the change (platform §10 Email links).
   - The **old address is notified**: "Your Officebox email was changed to *new* by *Admin Name* on *date*". The person also gets a `security_notice` inbox item and the sign-in banner (`pending_security_notice`).
@@ -320,7 +331,10 @@ ALTER TABLE sessions ADD COLUMN device_label TEXT;         -- e.g. "Chrome on ma
 ALTER TABLE sessions ADD COLUMN approx_location TEXT;      -- from request.cf (city/country), if available; deleted with the session
 ALTER TABLE sessions ADD COLUMN previous_refresh_hash TEXT; -- refresh grace window: the token just rotated away
 ALTER TABLE sessions ADD COLUMN rotated_at INTEGER;         -- when it was rotated (grace window 30 s)
+ALTER TABLE sessions ADD COLUMN authenticated_at INTEGER NOT NULL DEFAULT 0; -- last sign-in, invitation acceptance, recovery-link use or step-up; not refresh (§4.5, Admin §11.3)
 ```
+
+`sessions.authenticated_at` is in M1's baseline if M1 hasn't shipped, otherwise an expand migration ([Admin §16](admin.md)).
 
 Settings keys (defined in platform §7 Admin settings): `default_channels`, `welcome_post_enabled`, `allowed_invite_domains`, `magic_link_enabled`, `min_password_length`.
 
@@ -335,6 +349,7 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 | `GET /auth/magic-link/:token` · `POST /auth/magic-link/:token` | Public | GET shows the confirmation page (doesn't use the token); POST signs in |
 | `POST /auth/passkey/options` · `POST /auth/passkey/verify` | Public | WebAuthn sign-in |
 | `POST /auth/refresh` · `POST /auth/sign-out` | Session | Rotate (with the 30 s grace window), or sign out |
+| `POST /auth/reauth` | Member | Step-up re-authentication; sets `authenticated_at` (§4.5, [Admin §11.3](admin.md)) |
 | `POST /auth/ws-ticket` | Member | One-time WebSocket ticket for non-browser clients (realtime API, TDD §3.1; listed here for completeness) |
 | `GET /me/sessions` · `DELETE /me/sessions/:id` · `POST /me/sessions/sign-out-others` | Member | My devices |
 | `POST /me/passkeys/options` · `POST /me/passkeys` · `PATCH/DELETE /me/passkeys/:id` | Member | Manage passkeys |
@@ -350,6 +365,9 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 | `POST /admin/members/:id/acknowledge-reset` | Owner | Clear the owners' "recovery link issued" flag |
 | `GET/POST /groups` · `PATCH/DELETE /groups/:id` · `PUT/DELETE /groups/:id/members/:userId` | Admin / manager (an admin adding themselves needs an owner) | Groups |
 | `GET /handles/:handle/available` | Member | Handle check |
+| Bulk tools, member CSV, exports | Admin (as [Admin §17](admin.md)) | Defined in [Admin §17](admin.md) |
+
+Shared error codes gain **`reauth_required`**, returned by downloads that need step-up re-authentication ([Admin §11.3, §16](admin.md)).
 
 ## 7. Screens
 
@@ -360,7 +378,7 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 5. Forgot password, reset password, recovery link
 6. Profile settings: profile, status, sign-in methods (password, passkeys), my devices
 7. Member directory and profile card
-8. Admin: members, invitations, groups, default channels, policies, audit log
+8. Admin: the admin area's pages are defined in [Admin §3](admin.md)
 
 ## 8. Edge cases
 
@@ -402,7 +420,8 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
   - "sign out" for a single session and for all other devices works
   - changing the password signs out other sessions
   - two concurrent refreshes with the same token within 30 seconds both succeed with the same successor; reusing a token after the grace window revokes the session
-  - disabling a member closes their open connections within 5 seconds, and their REST requests fail within 60 seconds.
+  - disabling a member closes their open connections within 5 seconds, and their REST requests fail within 60 seconds
+  - `authenticated_at` is set by each sign-in method, invitation acceptance, recovery-link use and `POST /auth/reauth`, and a refresh doesn't change it; failed step-ups count toward the per-account sign-in limit (the step-up criteria are in [Admin §18](admin.md)).
 - **Rate limits:** the 6th failed password attempt within a minute from one IP, and the 11th within an hour for one account, are delayed. The per-account delay follows the schedule in §4.4 (1 s, 2 s, 4 s … capped at 30 s), checked with an injected clock. The account isn't locked: a correct password after the delay succeeds.
 - **Admin powers:**
   - an admin can disable, delete, change the email of and issue a recovery link for a **member**
@@ -427,7 +446,7 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 
 ## 10. Later
 
-TOTP two-factor · Google/Microsoft or SSO sign-in · guests · member self-service email change, account deletion or data export · custom roles.
+TOTP two-factor · Google/Microsoft or SSO sign-in · guests · member self-service email change or account deletion · custom roles. (Member self-export is not planned: exports are an admin power, [Admin §2](admin.md).)
 
 ## 11. Open questions
 
