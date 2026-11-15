@@ -50,13 +50,14 @@ Collaborative documents and whiteboards, and the files around them, organised in
 | **My files** | Automatically per member from M6a, backfilled for existing members (platform §13) | The member | Private (restricted) |
 | **Group drive** | Automatically per group from M6a, backfilled (platform §13) | The group (managed by group managers and admins; an admin granting **themselves** access needs an owner, permissions §6) | Group members edit. **Listed by name to all members**; contents are not visible to non-members unless shared. |
 | **Shared drive** | Any member creates one | The drive itself; creator is the first drive manager | Shared with users, groups and channels as manager / editor / commenter / viewer. Restricted by default. |
+| **Project drive** | Automatically per project from M10a ([Projects](projects.md) §3.1) | The project (managed by Project Leads and admins) | Follows the project's effective role (Project Leads & Editors edit; Commenters comment; Viewers view). On project purge, items move to their creators' My files (keeping explicit item shares). |
 | **Channels drive** | Created with M6a, or at setup once M6a has shipped (platform §13) | The workspace; **admins manage it** (permissions §4.3) | Contains one folder per channel (§3.3). Members get access only through channel membership of each folder. |
 
 - **Shared drives belong to the team, not a person.** Content stays when people leave.
 - **Leavers:** a **disabled** member keeps ownership of their My files (PRD §6). When a member is **deleted**, their My files content transfers to an admin, **who can then read it** (stated in the privacy statement, permissions §6), and who can move it into a shared drive (platform §3).
 - **Deleting drives:**
   - A drive's managers can delete a shared drive, which moves it and its contents to Trash for 30 days (§3.5).
-  - Group drives are deleted only with their group, in the same way (platform §4).
+  - Group drives are deleted only with their group, in the same way (platform §4). Project drives follow their project (platform §4).
   - My files and the Channels drive can't be deleted.
 
 ### 3.2 Folders and items
@@ -128,7 +129,7 @@ Collaborative documents and whiteboards, and the files around them, organised in
 ### 4.1 Editor
 
 - **Tiptap + Yjs**, using only the MIT packages (PRD §5.5).
-- **Text and structure:** headings, paragraphs, bold, italic, underline, strikethrough, highlight, links, inline code, bulleted, numbered and **task lists**, quotes, dividers.
+- **Text and structure:** headings, paragraphs, bold, italic, underline, strikethrough, highlight, links, inline code, bulleted, numbered and **task lists** (lightweight document checkboxes; in M10b an editor can explicitly **Promote to issue**, which creates a linked project issue or personal task and replaces or annotates the line with its live `ENG-42` / `TASK-12` chip, [Projects §4.5](projects.md)), quotes, dividers.
 - **Tables:** add and remove rows and columns, a header row, cell alignment.
 - **Media:** images (upload or paste, resizable, captions, **alt text**) and file attachments (cards). These are **document-owned files** (§6).
 - **Slash commands:** `/` opens a block menu (heading, list, table, callout, toggle, code, image, file, whiteboard, embed, divider, mention, date), filtered as you type.
@@ -137,7 +138,7 @@ Collaborative documents and whiteboards, and the files around them, organised in
 - **Code blocks:** language picker, syntax highlighting and copy.
 - **Mentions:**
   - `@person` notifies them through the inbox (notifications §3). If they lack access, the author is asked to share.
-  - `@date`, and `#channel` or document links.
+  - `@date`, `#channel`, document links, and issue/task keys (`ENG-42`, `TASK-12`; M10a).
 - **Officebox embeds** (§4.3).
 - **Markdown shortcuts** throughout (`#`, `-`, `1.`, `[]`, `>`, ```` ``` ````, `**`).
 - **Outline:** an automatic table-of-contents sidebar from headings.
@@ -162,6 +163,7 @@ Live, permission-checked embeds inserted with `/embed` or by pasting an Officebo
 | **Calendar event** | Title, time in the viewer's zone, attendees and RSVP | RSVP inline; join the call | Through hub activity |
 | **Whiteboard** | A preview of the board | **Edit in place** (expands inline) or open full screen | A BoardRoom socket opens **only while editing in place** (platform §12); otherwise the preview refreshes through hub activity |
 | **Document** | Title, owner and the first lines | Open | Through hub activity |
+| **Issue / Task** (M10a) | Key (`ENG-42`), title, status chip, priority, assignee and due date | Open issue detail | Through hub activity |
 
 - A viewer without access to the embedded object sees the no-access state from permissions §7. Embedding never grants access (PRD §5.2).
 - Deleted objects show "This *message* was deleted".
@@ -228,10 +230,11 @@ Live, permission-checked embeds inserted with `/embed` or by pasting an Officebo
 
 ## 6. Files
 
-There are three kinds of file (platform §14):
+There are four kinds of file (platform §14):
 - **Drive files:** live in a folder, are versioned, and are covered by this section.
 - **Message-owned files:** chat attachments (Chat §10). They become drive files only through **Save to folder**, which makes an independent copy.
 - **Document-owned files:** images and file cards inserted into a document (`parent_type = 'document'`). They have no folder and no versions, **inherit the document's access**, appear only inside the document, and are **deleted with it** (with the document's Trash and purge).
+- **Issue-owned files** (M10a, [Projects §4.6](projects.md)): files attached to an issue description or comment (`parent_type = 'issue'`). They have no folder and no versions, **inherit the issue's access**, and are **deleted with the issue** (with the issue's Trash and purge); "Save to folder" copies one into a drive folder as an independent drive file.
 
 - **Upload:** drag-and-drop files and folders, the upload button, or paste. Uploads stream through the Worker into R2, multipart above 50 MB; the default limit is 2 GB per file (TDD §8.3; quotas in platform §8).
 - **Previews:**
@@ -277,7 +280,7 @@ Activity is visible to anyone who can view the item; call notes and transcripts 
 ```sql
 CREATE TABLE drives (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,                               -- 'personal' | 'group' | 'shared' | 'channels'; Zod-validated, CHECK omitted (platform §14)
+  kind TEXT NOT NULL,                               -- 'personal' | 'group' | 'project' | 'shared' | 'channels'; Zod-validated, CHECK omitted (platform §14)
   name TEXT NOT NULL,
   general_access TEXT NOT NULL DEFAULT 'restricted', -- 'restricted' | 'workspace_view' | 'workspace_comment' | 'workspace_edit' (permissions §9)
   owner_user_id TEXT REFERENCES users(id),          -- personal
@@ -299,10 +302,11 @@ ALTER TABLE documents ADD COLUMN version INTEGER NOT NULL DEFAULT 0;       -- me
 ALTER TABLE documents ADD COLUMN idempotency_key TEXT;                     -- create idempotency key (§10) (default); cleared after 24 hours (default)
 CREATE UNIQUE INDEX documents_idempotency ON documents(created_by, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
--- files: three kinds, kept apart (platform §14)
+-- files: four kinds, kept apart (platform §14)
 --   drive files:     folder_id + drive_id set, parent_type NULL, versioned
 --   message files:   parent_type = 'message', folder_id NULL, never versioned (Chat §10)
 --   document files:  parent_type = 'document', folder_id NULL, never versioned; inherit the document's access; deleted with it
+--   issue files:     parent_type = 'issue', folder_id NULL, never versioned; inherit the issue's access; deleted with it (Projects §4.6)
 -- The baseline CHECK (NOT (folder_id IS NOT NULL AND parent_type IS NOT NULL)) stays and matches this model.
 ALTER TABLE files ADD COLUMN drive_id TEXT REFERENCES drives(id);
 ALTER TABLE files ADD COLUMN current_version INTEGER NOT NULL DEFAULT 1;
@@ -323,7 +327,7 @@ CREATE TABLE recent_items (user_id TEXT, object_type TEXT, object_id TEXT, opene
 
 CREATE TABLE access_requests (
   id TEXT PRIMARY KEY,
-  object_type TEXT NOT NULL, object_id TEXT NOT NULL,   -- document | whiteboard | folder | file | drive | calendar | event (permissions §7)
+  object_type TEXT NOT NULL, object_id TEXT NOT NULL,   -- document | whiteboard | folder | file | drive | calendar | event | project | issue (permissions §7)
   requester_id TEXT NOT NULL REFERENCES users(id),
   message TEXT,
   state TEXT NOT NULL DEFAULT 'pending',            -- 'pending' | 'approved' | 'declined' | 'expired' | 'cancelled'; Zod-validated

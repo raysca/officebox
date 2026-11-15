@@ -61,6 +61,7 @@ Instant, audio-first calls you can start from any conversation, document or cale
 | DM / group DM | M4 | DM header | DM participants | **Rings** the others |
 | Calendar event | M5b | Event "Join call", by the **organiser, attendees, or anyone with details-level access** to the event's calendar **(default)** | **Invitees + anyone with details-level access to the event's calendar** ([Calendar](calendar.md) §4.5). Free/busy-only viewers can't. | Join window opens 10 minutes before start |
 | Document / whiteboard | M6 | Document header, by **anyone with access, viewers included** | Anyone with access to the document, viewers included | Present mode is suggested |
+| Issue / personal task | M10b | Issue detail header "Start call", by **anyone who can view the issue** ([Projects §6.3](projects.md)) | Anyone with access to the issue | Not available on issues in archived projects |
 
 **Context keys.** At most one active call per context key, and starting one when a call already exists joins it (TDD §3.6):
 
@@ -70,12 +71,14 @@ Instant, audio-first calls you can start from any conversation, document or cale
 | Document | `document:<documentId>` |
 | Single event | `event:<eventId>` |
 | Recurring event occurrence | `event:<eventId>:<occurrenceStart>`, where `occurrenceStart` is the occurrence id used by `event_exceptions.original_start` |
+| Issue / personal task | `issue:<issueId>` (project-level calls use the project's channel, `channel:<project.channel_id>`) |
 
 **Start and end records:**
 - **Channels and DMs:** start and end **system messages**. The end message shows duration and participants.
 - **Events:** recorded on the event (shown in the event detail).
 - **Documents:** recorded in the **document details panel → Activity** ([Documents](documents.md) §6.1 Activity) **(default)**.
-- **Call notes** (M9c), when taken, go to the same context: a `call_notes` message in the channel or DM ([Chat](chat.md) §4.6), a "Call notes" section on the event ([Calendar](calendar.md) §9), or the document's Activity section. They are visible to that context's audience ([Assistant §12.3](assistant.md)).
+- **Issues:** recorded in the issue's **Activity & Comments** timeline (`call.started` / `call.ended`, [Projects §6.3](projects.md)) **(default)**.
+- **Call notes** (M9c), when taken, go to the same context: a `call_notes` message in the channel or DM ([Chat](chat.md) §4.6), a "Call notes" section on the event ([Calendar](calendar.md) §9), the document's Activity section, or the issue's Activity & Comments timeline. They are visible to that context's audience ([Assistant §12.3](assistant.md)).
 - The channel `call_started` system message is posted by the HuddleRoom through a **typed-result RPC to the ChatChannel DO** ([Chat](chat.md) §4.6 System messages).
 
 ## 4. Ringing (DMs and group DMs)
@@ -161,7 +164,7 @@ Mute, camera, share screen, reactions, raise hand, in-call chat, participants li
 - A chat panel inside the call. It supports text, mentions, links and emoji. Files come later **(default)**.
 - **Saved afterwards:**
   - **Channel and DM calls:** messages are posted as a **thread under the call's "started" system message**, reusing chat ([Chat](chat.md) §5), with **`kind = 'call_chat'`** ([Chat](chat.md) §4.7). These messages create no thread follows, no `thread_reply` notifications, no offline email and no unread counts, so a busy call doesn't flood the channel. The HuddleRoom writes them through a **typed-result RPC to the ChatChannel DO**, never throwing expected denials ([AGENTS.md](../AGENTS.md) §4.1).
-  - **Document and event calls:** messages are stored in `huddle_messages`, **attached to the context** (document or event), not to the call record. The HuddleRoom writes them to D1 **through an outbox** (the outbox pattern of TDD §3.3). They're linked from the call record in the document's Activity or on the event. They raise no notifications.
+  - **Document, event and issue calls:** messages are stored in `huddle_messages`, **attached to the context** (document, event or issue), not to the call record. The HuddleRoom writes them to D1 **through an outbox** (the outbox pattern of TDD §3.3). They're linked from the call record in the document's Activity, on the event, or in the issue's Activity & Comments timeline. They raise no notifications.
 - **Rate limit:** in-call chat has its own limit, not the channel's per-conversation send limit ([Platform §8](platform.md)).
 - **Retention:** in-call chat is kept for **the life of the context**. It isn't deleted when the call's metadata is purged after 365 days ([Platform](platform.md) §5). It's deleted with its context.
 - Everyone who can see the context can read the saved chat, whether or not they were in the call.
@@ -192,8 +195,9 @@ As specified in **PRD §5.8** and **TDD §3.6 / §4.5**, and validated in the sp
   - the **host**: the person who started the call
   - in channel calls: **channel admins**
   - in document calls: **document owners**
-  - in event calls: the **event organiser**.
-- **When the host leaves,** moderation passes to a moderator who is present: a channel admin, the document owner or the event organiser. Otherwise, in DM and group-DM calls, any participant may stop a screen share. Otherwise, moderation passes to the **earliest remaining participant** **(default)**. [Permissions](permissions.md) §4.5 says the same.
+  - in event calls: the **event organiser**
+  - in issue calls: **Project Leads** (or the issue creator for personal tasks).
+- **When the host leaves,** moderation passes to a moderator who is present: a channel admin, the document owner, the event organiser or a Project Lead (or issue creator). Otherwise, in DM and group-DM calls, any participant may stop a screen share. Otherwise, moderation passes to the **earliest remaining participant** **(default)**. [Permissions](permissions.md) §4.5 says the same.
 - **Moderators can:**
   - mute a participant (the participant must unmute themselves; they can't be force-unmuted)
   - stop a screen share
@@ -230,17 +234,17 @@ As specified in **PRD §5.8** and **TDD §3.6 / §4.5**, and validated in the sp
 ## 10. Data model (additions to TDD §3.6)
 
 ```sql
--- huddles.context_type gains 'event' (schema reconciliation, platform §14).
--- The call "kind" is derived, not stored: DM = channel context whose channel type is a DM or group DM; event = 'event' context.
-ALTER TABLE huddles ADD COLUMN context_key TEXT;            -- e.g. 'event:<eventId>:<occurrenceStart>' (§3)
+-- huddles.context_type gains 'event' and 'issue' (schema reconciliation, platform §14).
+-- The call "kind" is derived, not stored: DM = channel context whose channel type is a DM or group DM; event = 'event' context; issue = 'issue' context.
+ALTER TABLE huddles ADD COLUMN context_key TEXT;            -- e.g. 'event:<eventId>:<occurrenceStart>' or 'issue:<issueId>' (§3)
 ALTER TABLE huddles ADD COLUMN started_message_id TEXT;     -- channel/DM: the "call started" message (in-call chat thread root)
 -- Active-call uniqueness moves to the context key:
 --   CREATE UNIQUE INDEX huddles_active ON huddles(context_key) WHERE ended_at IS NULL;
 
-CREATE TABLE huddle_messages (                              -- in-call chat for document and event calls
+CREATE TABLE huddle_messages (                              -- in-call chat for document, event and issue calls
   id TEXT PRIMARY KEY,
-  context_type TEXT NOT NULL,                               -- 'document' | 'event' (Zod-validated)
-  context_id TEXT NOT NULL,                                 -- document id, or event id (occurrence in context_key)
+  context_type TEXT NOT NULL,                               -- 'document' | 'event' | 'issue' (Zod-validated)
+  context_id TEXT NOT NULL,                                 -- document id, event id (occurrence in context_key), or issue id
   context_key TEXT NOT NULL,
   huddle_id TEXT,                                           -- informational link; no cascade from huddles
   sender_id TEXT REFERENCES users(id),
@@ -249,7 +253,7 @@ CREATE TABLE huddle_messages (                              -- in-call chat for 
   created_at INTEGER NOT NULL
 );
 CREATE INDEX huddle_messages_context ON huddle_messages(context_type, context_id, created_at);
--- Deleted with the context (document or event purge), never with the huddle record (platform §4, §5).
+-- Deleted with the context (document, event or issue purge), never with the huddle record (platform §4, §5).
 
 CREATE TABLE call_rings (                                   -- durable record; live ring state is in the UserHub
   huddle_id TEXT NOT NULL,

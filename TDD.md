@@ -133,10 +133,11 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 | R2 | Files, attachments, exports | R2 |
 | Vectorize | Embeddings for permission-aware retrieval | Vectorize |
 | HuddleRoom DO | Huddle roster, track registry, single-presenter control, host actions; call notes and captions (M9c) | Durable Object |
+| ProjectRoom DO | Authoritative issues, board ordering, checklists, comments, activity, and board presence per project (and per member for personal tasks), with outbox to D1 ([Projects](specs/projects.md) §11.1) | Durable Object + SQLite |
 | Assistant DO | Per-member assistant: conversations, private memory, pending actions, live voice sessions (§5.5) | Durable Object + SQLite |
 | Realtime SFU | Audio, video and screen-share media; TURN | Cloudflare Realtime |
 | AI Gateway | BYOK provider proxy, fallback, rate limiting; logging and caching turned off for assistant calls (§5.10) | AI Gateway |
-| Queues | Message and search projection to D1, purge jobs, email, AI indexing, assistant mentions, nudges, proactive runs and purges (each with a dead-letter queue) | Queues |
+| Queues | Message, issue and search projection to D1, purge jobs, email, AI indexing, assistant mentions, nudges, proactive runs and purges (each with a dead-letter queue) | Queues |
 | Cron Triggers | Daily purge, retention, reconciliation and release check | Workers Cron Triggers |
 
 ### 1.2 Why Durable Objects for both chat and Yjs
@@ -158,6 +159,8 @@ Every kind of data has exactly one source of truth. Copies are derived from it, 
 |---|---|---|
 | Channel messages, edits, deletions, reactions, threads | ChatChannel DO SQLite (`events`, `messages`) | D1 `messages` (search, inbox, notifications, cross-channel views); Vectorize (M9; upserts only while the assistant is enabled, §5.2) |
 | Document and whiteboard content | DocRoom / BoardRoom DO SQLite (Yjs) | R2 snapshot copies (export and recovery); search text projection (see §10); Vectorize (M9; upserts only while the assistant is enabled, §5.2) |
+| Project issues, personal tasks, board ordering, checklists, issue comments and activity | ProjectRoom DO SQLite (`issues`, `issue_checklist_items`, `issue_comments`, `issue_activity`, `issue_reviewers`) ([Projects](specs/projects.md) §11.1) | D1 `issues`, `issue_reviewers` (cross-project My Work, search, inbox, capacity math); `search_index`; Vectorize (M10c) |
+| Projects, milestones, labels, issue relations, key aliases, Project Pulses and shared Project Memory | D1 (`projects`, `project_milestones`, `project_labels`, `issue_relations`, `issue_key_aliases`, `project_pulses`, `project_memories`, `project_memory_sources`) | `search_index` and Vectorize for `project_memories` |
 | Identity, roles, groups, channel membership, grants, object metadata, inbox, audit | D1 | — |
 | File bytes | R2 | — (metadata in D1 `files`) |
 | Presence, typing, awareness | DO memory and WebSocket attachments | — (never persisted) |
@@ -165,7 +168,7 @@ Every kind of data has exactly one source of truth. Copies are derived from it, 
 | Call transcripts and notes | D1 `call_transcript_segments`, `call_notes` (the HuddleRoom holds segments only until their D1 write succeeds, §3.6) | Vectorize; `search_index` |
 | Derived file text | — (derived from the file bytes in R2) | D1 `file_derived_text`, `search_index`, Vectorize; rebuilt, not exported (§7.5) |
 
-The D1 `messages` copy can be fully rebuilt by replaying each ChatChannel DO's state (§3.3). Export reads channel messages from the DOs, not from D1.
+The D1 `messages` and `issues` copies can be fully rebuilt by replaying each ChatChannel or ProjectRoom DO's state (§3.3). Export reads channel messages and issues from the DOs, not from D1.
 
 ### 2.1 D1 schema (core domain)
 
@@ -179,7 +182,7 @@ Conventions:
 - The schema implements the role model and retention rules in PRD §10.1 and §10.2.
 - **Authority:**
   - This section is authoritative for the **core** tables: installation, users, sessions, invitations, groups, channels, channel members, the message copy, resource grants, audit, jobs.
-  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15, and Assistant §14.2.
+  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15, Assistant §14.2, and Projects §11.
   - [Platform §14](specs/platform.md) reconciles every change.
 - **Enums that may grow are validated with Zod** in `packages/shared`, not with SQL `CHECK` constraints (Platform §14). The value lists are given as comments below. Fixed sets (for example `group_members.role`) may keep a `CHECK`.
 - **Baseline rule:** spec changes to a table are folded into the baseline migration of the milestone that first creates it, so no table is rebuilt. After a release, changes follow expand/contract (§6.5).
@@ -418,33 +421,17 @@ CREATE TABLE object_links (
 );
 CREATE INDEX object_links_target ON object_links(target_type, target_id);
 
--- Projects and issues (Phase 2; columns finalised then)
-CREATE TABLE projects (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  description TEXT,
-  visibility TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public', 'private')),
-  created_by TEXT NOT NULL REFERENCES users(id),
-  created_at INTEGER NOT NULL,
-  deleted_at INTEGER,
-  purge_after INTEGER
-);
-
-CREATE TABLE issues (
-  id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES projects(id),
-  title TEXT NOT NULL,
-  description TEXT,
-  status TEXT NOT NULL,
-  assignee_id TEXT REFERENCES users(id),
-  due_date INTEGER,
-  created_by TEXT NOT NULL REFERENCES users(id),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  deleted_at INTEGER,
-  purge_after INTEGER
-);
-CREATE INDEX issues_assignee ON issues(assignee_id, status);
+-- Projects and issues (M10; authoritative DDL in Projects §11.1–11.2, added in M10a migration)
+-- projects: id, key, name, description, icon, color, status ('active' | 'on_hold' | 'completed' | 'archived'),
+--   general_access ('restricted' | 'workspace_view' | 'workspace_comment' | 'workspace_edit'),
+--   channel_id, drive_id, calendar_id, columns_json, pulse_schedule, next_issue_number, created_by, created_at, updated_at, archived_at, deleted_at, purge_after
+-- issues (D1 query/search projection of ProjectRoom DO state): id, project_id (NULL = personal task in ProjectRoom("personal")),
+--   number, key, title, description_format, description_text, status_column_id, status_category, priority,
+--   assignee_id, creator_id, parent_id, milestone_id, start_date, due_date (ISO YYYY-MM-DD), effort_days,
+--   labels_json, checklist_total, checklist_done, comment_count, blocked_by_count, needs_reassignment,
+--   board_order, version, completed_at, created_at, updated_at, deleted_at, purge_after
+-- Plus D1 tables: project_milestones, project_labels, issue_key_aliases, issue_reviewers, issue_relations, issue_follows,
+--   project_memories, project_memory_sources, project_pulses.
 
 -- Follows, inbox and notification preferences
 CREATE TABLE follows (
@@ -552,36 +539,38 @@ CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 | Notifications | `inbox_items` (above); `user_preferences` (email delay, DM text opt-in, DND, reminder defaults, offline cache, shortcuts), `user_availability` (derived-availability sources), `notify_anyway_log`; `notification_preferences` keyed by `user_id, event_type, delivery` | Notifications §3.1, §5.7, §7 |
 | Timers | `scheduled_triggers` and `trigger_outbox` in the ReminderScheduler DO; D1 `pending_emails` | Platform §11 |
 | Platform | `rate_counters` (D1 counters), `ics_opt_outs`, the durable UserHub room registry | Platform §8, §12, §15 |
-| Files | Three kinds: message-owned (`parent_type = 'message'`), document-owned (`parent_type = 'document'`), drive files (`folder_id` set, versioned) | Platform §14, Documents §6 |
+| Files | Four kinds: message-owned (`parent_type = 'message'`), document-owned (`parent_type = 'document'`), issue-owned (`parent_type = 'issue'`), drive files (`folder_id` set, versioned) | Platform §14, Documents §6 |
 | Assistant | New `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments`; `messages.kind` adds `assistant` and `call_notes` (sender `'assistant'`); `scheduled_triggers.kind` adds `assistant_brief`, `assistant_prep`, `personal_reminder`; `inbox_items.event_type` adds `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`; `rate_counters` scopes `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes`; reserved handles `assistant` and the display-name handle; reserved `users` rows `'system'` and `'assistant'` (`status = 'system'`, above) | Assistant §14.2 |
+| Projects, Tasks & Issues (M10) | `projects` (with `columns_json`, `pulse_schedule`, `next_issue_number`, `general_access`) and `issues` D1 projection (with `status_column_id`, `status_category`, `priority`, `effort_days`, `labels_json`, `needs_reassignment`, `parent_id`, `board_order`, `blocked_by_count`, `creator_id`); new D1 tables `project_milestones`, `project_labels`, `issue_key_aliases`, `issue_reviewers`, `issue_relations`, `issue_follows`, `project_memories`, `project_memory_sources`, `project_pulses`; `ProjectRoom` DO tables (`issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments`, `issue_activity`); `channels.project_id`, `drives.project_id`, `calendars.project_id`, `events.type` (`release`, `demo`), `messages.kind` (`project_event`), `huddles.context_type` (`project`, `issue`), `scheduled_triggers.kind` (`issue_due`, `project_pulse`), `inbox_items` (`assignment`, `review_request`, `issue_review_decided`, `issue_mention`, `issue_comment`, `issue_status`, `issue_due_soon`, `issue_needs_reassignment`) | Projects §11 |
 
 **Permission resolution** ([Permissions](specs/permissions.md) §5). The Worker resolves access as follows:
 
 1. **Account:** the user's status must be `active`. The reserved `status = 'system'` rows never pass, so the system sender and the assistant are never principals and can't be granted anything (Assistant §1).
-2. **Channels and messages** don't use grants. Access comes from channel type and membership, or DM participation. Members add people to private channels; channel admins remove them. Message-owned files inherit their message's access.
-3. **Documents, whiteboards, files, folders and drives use the union rule.** The effective role is the **highest** of:
+2. **Channels and messages** don't use grants, except **project channels**, whose access and membership are synced and locked to the project's effective access (Projects §3.3). Otherwise access comes from channel type and membership, or DM participation. Members add people to private channels; channel admins remove them. Message-owned files inherit their message's access.
+3. **Projects, project issues, project drives and project calendars use the union rule** (Permissions §4.7, §5.1). A member's effective role on a project is the **highest** of their direct user grant, their group/channel grants on `resource_type = 'project'`, and `projects.general_access` (stored role `owner` = **Project Lead**). Project issues inherit that role; the project's drive and calendar take the union of the project role and any explicit drive/folder/item or calendar grants. **Personal tasks (`project_id IS NULL`)** are private to `creator_id` (`owner`) plus `assignee_id` (`editor`), `issue_reviewers` (`editor`) and explicit `resource_type = 'issue'` grants (`general_access` is always `'restricted'`).
+4. **Documents, whiteboards, files, folders and drives use the union rule.** The effective role is the **highest** of:
    - grants on the item
    - grants on each ancestor folder up to the drive root
-   - grants on the drive, plus built-in drive roles (My files → owner; group drive → group members edit)
+   - grants on the drive, plus built-in drive roles (My files → owner; group drive → group members edit; project drive → effective project role)
    - the channel-folder rule (channel members edit; public channel → everyone can view)
    - the general access of the item and of each ancestor.
 
    Grants count for the user, any of their groups, and any channel they're in. There is no deny: sharing can only widen. New items follow their container (Permissions §5.2), so nothing starts workspace-wide unless its folder is.
-4. **Calendars** use the same rule without folders: grants, built-in kind rules and general access. **Event visibility then filters the result** (Calendar §4.5): private events show as busy blocks to editors who aren't the organiser or an attendee; invitees always see full details.
-5. **Otherwise:** no access.
+5. **Calendars** use the same rule without folders: grants, built-in kind rules (including project calendars inheriting the effective project role) and general access. **Event visibility then filters the result** (Calendar §4.5): private events show as busy blocks to editors who aren't the organiser or an attendee; invitees always see full details.
+6. **Otherwise:** no access.
 
 This replaces v1.3's "stop at the first match".
 
 **Admin limits** (Permissions §6):
-- Owners and admins get management rights (rename, archive, delete, manage members), with **no implicit read access** to private channels, DMs or restricted items. Admins can't join private channels.
+- Owners and admins get management rights (rename, archive, delete, manage members), with **no implicit read access** to private channels, DMs, restricted projects, personal tasks or restricted items. Admins can't join private channels.
 - Admins may change email, issue recovery links, disable and delete **members** only. Acting on admins or owners, and inviting or promoting admins, needs an owner.
 - Every recovery link or email change notifies the person (old address plus an in-app banner) and revokes their other pending tokens.
 - Every privileged action on a private object is written to `audit_log`.
-- An admin adding **themselves** to a group, or granting **themselves** a role on a drive or folder, needs an owner.
+- An admin adding **themselves** to a group, or granting **themselves** a role on a drive, folder or private project, needs an owner.
 - Recovery links issued without email configured are flagged on the sign-in page and to every owner (`users.admin_reset_*`).
 - Admins can delete messages in public channels and in private channels they're a member of.
 
-**Resource decisions the engine encodes** (Permissions §4): document owners, editors and admins can remove others' comments; anyone who can open a document (viewers included) can start a call on it; event calls can be started or joined by the organiser, attendees and full-details viewers; owners and admins can delete a private event whose organiser is disabled or deleted without seeing its details; **restore from Trash** is allowed for the item's owner, the person who deleted it, drive managers of its drive, and admins.
+**Resource decisions the engine encodes** (Permissions §4): document owners, editors and admins can remove others' comments; anyone who can open a document (viewers included) or an issue can start a call on it; event calls can be started or joined by the organiser, attendees and full-details viewers; owners and admins can delete a private event whose organiser is disabled or deleted without seeing its details; **restore from Trash** is allowed for the item's owner (or Project Lead for projects and project issues), the person who deleted it, drive managers of its drive, and admins.
 
 ### 2.2 Durable Object SQLite schemas
 
@@ -968,13 +957,13 @@ Presence is never the source of truth for durable data.
 **Connection budget** ([Platform](specs/platform.md) §12; replaces v1.3's "at most three"):
 
 1. **Hub socket** (always open) to the user's UserHub DO. It carries inbox and notification events, unread changes for *all* channels, workspace presence, rings and revocation commands.
-2. **Channel socket** to the ChatChannel DO of the conversation on screen. Switching closes the previous one.
-3. **Document socket** to the DocRoom or BoardRoom DO of the item on screen.
+2. **Channel socket** to the ChatChannel DO of the conversation on screen (or the project channel split-pane drawer). Switching closes the previous one.
+3. **Document or Project socket** to the DocRoom, BoardRoom or `ProjectRoom` DO (`/ws/projects/:id`, M10a) of the item or project board/list/issue on screen. Switching between a project view and a full-screen document closes the previous one.
 4. **Call socket** to the HuddleRoom while in a call.
 5. **Embedded whiteboard** sockets, only while "edit in place" is active.
 6. **Assistant socket** (`/ws/assistant`, M9) to the member's Assistant DO, only while an assistant surface is on screen (Assistant §3).
 
-Other embeds (messages, events, document previews, link previews) refresh through hub `activity` events and never open sockets. **Hard cap: 6 sockets per tab.** Opening another closes the least recently used embedded-board socket.
+Other embeds (messages, events, document previews, issue chips/embeds, link previews) refresh through hub `activity` events and never open sockets. **Hard cap: 6 sockets per tab.** Opening another closes the least recently used embedded-board socket.
 
 Tabs of the same browser elect a leader with `BroadcastChannel` and share one hub socket.
 
@@ -997,18 +986,18 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 **Keepalive.** Every DO sets `setWebSocketAutoResponse` for application ping/pong. Keepalives then neither wake the object nor add billed duration. Clients pause document awareness updates while their tab is hidden, so idle open documents can hibernate.
 
 **Role downgrades and inherited-access changes** (Permissions §8, Platform §12):
-- When someone's effective role on an open object changes (for example editor → viewer, a folder or drive grant changes, an item moves, a channel is made private, or a poster loses `can_post`), the Worker calls the RPC **`updateAccess(userId, role | null)`** on the affected DOs through the room registry.
-- The DO updates the socket attachment and sends **`{ type: "access.changed", role }`**. A DocRoom then treats the socket as read-only. When `role` is null (all access lost) the DO closes the socket with **`4403`**. This is the only name for the mechanism (Permissions §8, Platform §12).
+- When someone's effective role on an open object changes (for example editor → viewer, a folder, drive or project grant changes, an item moves, a channel is made private, or a poster loses `can_post`), the Worker calls the RPC **`updateAccess(userId, role | null)`** on the affected DOs through the room registry.
+- The DO updates the socket attachment and sends **`{ type: "access.changed", role }`**. A DocRoom or ProjectRoom then enforces the new role immediately. When `role` is null (all access lost) the DO closes the socket with **`4403`**. This is the only name for the mechanism (Permissions §8, Platform §12).
 - **Offline edits** that reach the server after access was lost are rejected. The client keeps them locally and offers to export them.
 
-**Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel, document or call context, the Worker calls `closeConnections(userId, reason, scope)`. The room registry kinds are `channel`, `doc`, **`huddle`** and **`assistant`**, so revocation also closes HuddleRoom sockets and the user's SFU tracks, and the member's `/ws/assistant` sockets:
+**Revocation.** Whenever a user is disabled or deleted, a session is revoked, or the user loses access to a channel, document, project or call context, the Worker calls `closeConnections(userId, reason, scope)`. The room registry kinds are `channel`, `doc`, `board`, **`huddle`**, **`assistant`** and **`project`**, so revocation also closes HuddleRoom sockets and the user's SFU tracks, `/ws/assistant` sockets, and `/ws/projects/:id` sockets:
 
 - on the user's UserHub, and
-- on every affected ChatChannel, DocRoom, BoardRoom or HuddleRoom DO, and the member's Assistant DO.
+- on every affected ChatChannel, DocRoom, BoardRoom, ProjectRoom or HuddleRoom DO, and the member's Assistant DO.
 
 Losing assistant access (removal from `assistant_access`) closes `/ws/assistant` sockets with `4403`; disabling closes them with `4401` (Assistant §10.1, §13).
 
-To find every affected DO, each ChatChannel, DocRoom, BoardRoom, HuddleRoom and Assistant DO registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, call contexts, and the member's own Assistant DO, which is always included for a user-wide revocation or loss of assistant access) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
+To find every affected DO, each ChatChannel, DocRoom, BoardRoom, ProjectRoom, HuddleRoom and Assistant DO registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, project access, call contexts, and the member's own Assistant DO, which is always included for a user-wide revocation or loss of assistant access) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
 
 
 ### 3.6 Calls (huddles): audio, video and screen sharing
@@ -1020,8 +1009,8 @@ Media runs on **Cloudflare Realtime SFU**. Signalling and huddle state run in a 
 ```sql
 CREATE TABLE huddles (
   id TEXT PRIMARY KEY,
-  context_type TEXT NOT NULL,          -- channel (including DMs) | document | event (project reserved) (Zod)
-  context_key TEXT NOT NULL,           -- channel:<id> | document:<id> | event:<id> | event:<id>:<occurrenceStart>
+  context_type TEXT NOT NULL,          -- channel (including DMs) | document | event | issue (Zod)
+  context_key TEXT NOT NULL,           -- channel:<id> | document:<id> | event:<id> | event:<id>:<occurrenceStart> | issue:<id>
   started_message_id TEXT,             -- channel/DM: the "call started" message (in-call chat thread root)
   context_id TEXT NOT NULL,
   started_by TEXT REFERENCES users(id),
@@ -1071,7 +1060,7 @@ Huddle records hold metadata only. No media is ever recorded. When call notes ar
 - **Single presenter:** the HuddleRoom DO is the authority.
   - `screen.start` is granted only when nobody is presenting. Otherwise it becomes a take-over request sent to the presenter and the host.
   - On acceptance or a host hand-over, the DO tells the current presenter to stop. If they haven't stopped within 5 seconds, the DO closes their `screen` tracks through the Worker, then grants the new presenter.
-- **Host controls:** the host, and channel admins for channel calls (document owners for document calls, organisers for event calls), can stop another participant's share or mute their audio. The DO enforces this, the Worker closes the track at the SFU, and the action is audited.
+- **Host controls:** the host, and channel admins for channel calls (document owners for document calls, organisers for event calls, Project Leads for issue calls), can stop another participant's share or mute their audio. The DO enforces this, the Worker closes the track at the SFU, and the action is audited.
 - **Policy:** the workspace sharing policy (`installation.settings.screen_share`: `everyone`, `admins` (workspace owners and admins plus channel admins for channel calls) or `off`) and the resolution cap are enforced by the DO before it grants a share, and the client applies the cap to `getDisplayMedia`.
 - **Presenter client:**
   - sets presence status `presenting`, so the UserHub suppresses notification toasts on the presenter's devices
@@ -1094,9 +1083,9 @@ Example: a 30-minute share to 8 viewers at 2 Mbps is about 3.6 GB. The usage pan
 
 **Additions** ([Calls](specs/calls.md); its data model, §10, is authoritative):
 - **Contexts:**
-  - channel and DM calls (M4); event calls (M5b; each recurring occurrence has its own `context_key`); document calls (M6)
-  - announcement channels allow calls for anyone who can read them; **archived channels don't**
-  - event calls can be started or joined by the organiser, attendees and anyone with details-level access to the calendar; document calls by anyone who can open the document.
+  - channel and DM calls (M4); event calls (M5b; each recurring occurrence has its own `context_key`); document calls (M6); issue calls (M10a, `context_key = 'issue:' + issueId`)
+  - announcement channels allow calls for anyone who can read them; **archived channels and archived projects don't**
+  - event calls can be started or joined by the organiser, attendees and anyone with details-level access to the calendar; document calls by anyone who can open the document; issue calls by anyone who can view the issue.
 - **API:** the complete REST and WebSocket list is in Calls §11 (`/calls/...`, `/ws/calls/:id`).
 - **Ringing:**
   - DM and group-DM calls ring through each participant's UserHub (`call.ring`, `call.ring.cancel`, `call.accepted-elsewhere`), with a **30-second timeout alarm on the caller's UserHub**
@@ -1106,10 +1095,10 @@ Example: a 30-minute share to 8 viewers at 2 Mbps is about 3.6 GB. The usage pan
 - **One connection per person:** joining from a second device hands the call over, and the old socket closes with `4002 "moved"`.
 - **One call at a time:** the UserHub records `currentCall` in its SQLite, and joining another call needs `leaveCurrent` (above).
 - **Revocation:** losing access to the call's context closes the HuddleRoom socket and SFU tracks with `4403`; disabling closes with `4401`.
-- **Moderator hand-over:** if the host leaves, moderation passes to a present channel admin, document owner or event organiser. In DMs and group DMs any participant may stop a share. Otherwise it passes to the earliest remaining participant.
+- **Moderator hand-over:** if the host leaves, moderation passes to a present channel admin, document owner, event organiser or Project Lead. In DMs and group DMs any participant may stop a share. Otherwise it passes to the earliest remaining participant.
 - **In-call chat:**
   - channel and DM calls post it as `call_chat` thread replies under `started_message_id`, through a typed ChatChannel RPC (no follows, notifications or unread counts)
-  - document and event calls write `huddle_messages`, keyed to the **context**, through an **outbox**; it's kept for the life of the context and doesn't cascade from `huddles`.
+  - document, event and issue calls write `huddle_messages`, keyed to the **context**, through an **outbox**; it's kept for the life of the context and doesn't cascade from `huddles`.
 - **Raise-hand queue and reactions** are relayed through the HuddleRoom and never stored.
 
 **Call notes and captions** (M9c; [Assistant](specs/assistant.md) §12.3, §12.4 are authoritative for behaviour, §14.2 for `call_notes` and `call_transcript_segments`):
@@ -1120,7 +1109,7 @@ Example: a 30-minute share to 8 viewers at 2 Mbps is about 3.6 GB. The usage pan
 - **Captions.** `POST` / `DELETE /calls/:id/captions` turns captions on or off for the caller only (when `call_captions` is on). They use the same per-track pipeline and store nothing. While anyone has captions on, the DO broadcasts a "Captions on" indicator to every participant.
 - **Segments and durability.** Transcript segments are written to D1 `call_transcript_segments` in batches through the outbox helper (§3.3). The HuddleRoom holds a segment only until its D1 write succeeds and keeps nothing after finalising, so **D1 is the only lasting copy** and retention and cascades act on D1 and vectors alone. After eviction or a redeploy mid-call, the DO reconnects transcription on wake and records a transcription gap in `call_notes.gaps`.
 - **HuddleRoom timers** (alarm multiplexer): `notes_idle` stops notes when no human participants remain; `notes_finalize` writes the notes (summary, decisions, action items) after the call ends or after a crash, retrying the model 3 times with backoff before posting the "transcript available" fallback, and discarding the result if the context was deleted meanwhile.
-- **Output.** Channel and DM calls get a `call_notes` message through the assistant-message RPC (§2.2); event calls a "Call notes" section on the event; document calls the document's Activity section. Notes and transcripts are then indexed per §2.4 and §5.2.
+- **Output.** Channel and DM calls get a `call_notes` message through the assistant-message RPC (§2.2); event calls a "Call notes" section on the event; document calls the document's Activity section; issue calls the issue's Activity timeline. Notes and transcripts are then indexed per §2.4 and §5.2.
 - **Caps and cost.** Call minutes while notes or anyone's captions are on count against `assistant_call_notes_monthly_minutes` (D1 `rate_counters` scope `assistant_call_notes`).
 - **Injection.** The notetaker has no tools; transcripts are untrusted input wherever they are later read (§5.5).
 
@@ -1222,9 +1211,9 @@ Logging and caching controls for assistant traffic are in §5.10.
 5. Changing the embedding model requires a new index, because index dimensions are fixed at creation, followed by a full re-index. This is delivered as a release migration that builds the new index before switching to it.
 
 **Object types** (Assistant §9 has the scope table):
-- messages, documents and whiteboards, from their search-text projection (§2.4)
+- messages, documents, whiteboards, issues/tasks (`object_type = 'issue'`, `scope_id = 'project:<projectId>'` or `'task:<issueId>'`, M10a) and confirmed project memories (`object_type = 'project_memory'`, `scope_id = 'project:<projectId>'`, M10c), from their search-text projection (§2.4)
 - **derived file text** (`file_derived_text`, per file version; version `1` for files without versions). PDF, Office, text, Markdown and CSV files are converted with Workers AI `toMarkdown` on upload; images (vision model) and audio (speech-to-text, in chunks) are processed on demand and cached per version. All of it runs as `indexing` jobs. The same text feeds `search_index` (§2.4). Unsupported or oversize files, including video, are indexed by name and metadata only.
-- **call notes and transcripts** of channel, DM and document calls, when notes are finalised (`scope_id` the channel or document). Event-call notes are not vector-indexed.
+- **call notes and transcripts** of channel, DM, document and issue calls, when notes are finalised (`scope_id` the channel, document or issue scope). Event-call notes are not vector-indexed.
 - **Events are never indexed**; the assistant reads them only through the calendar permission rules (`find_events`, `my_day`).
 
 Derived text follows its file: Trash removes it from retrieval, restore re-indexes it, and purge deletes it and its vectors (§2.3). Transcripts past retention are deleted with their vectors by the daily purge job.
@@ -1281,7 +1270,7 @@ Each queue has a dead-letter queue (§6.1). Every consumer except `assistant-pur
 
 - **`assistant-mentions`: the stateless audience worker** (Assistant §6). Mentions never run in the asker's Assistant DO, so the asker's memory is structurally out of reach. The worker re-reads the mention message (cancelling if the mention was edited away or the message deleted), computes the audience and its allowed sources, retrieves (§5.3), builds a prompt from those sources, the question and the last 50 messages, and runs the model with the shared tool set only. It recomputes the audience before posting and regenerates once or drops the reply if a new member can't open a cited source. The reply is inserted through the assistant-message RPC with `clientId = 'assistant:' + mentionMessageId` (§2.2), so concurrent or repeated deliveries post one reply. On failure or DLQ, no shared reply is posted and the asker gets a notice in their assistant DM.
 - **`assistant-nudges`.** Fed only for opted-in authors by the projection consumer (§3.3). The consumer skips messages that were deleted or edited before it runs, classifies the text, keeps nothing beyond the check, and offers a reminder in the member's assistant DM.
-- **`assistant-proactive`.** Fed by ReminderScheduler `assistant_brief` and `assistant_prep` triggers (§2.2). The consumer checks the member's opt-in in `assistant_optins`, then calls `runProactive(kind)` on the member's DO. Delivery follows DND, focus time and time off (Notifications §5), with no inbox preview.
+- **`assistant-proactive`.** Fed by ReminderScheduler `assistant_brief`, `assistant_prep` and (from M10c) `project_pulse` triggers (§2.2). For member triggers the consumer checks the member's opt-in in `assistant_optins`, then calls `runProactive(kind)` on the member's DO. For `project_pulse` triggers (Projects §8.1), the consumer runs in a stateless project-scoped worker (never a member's Assistant DO), reads only project-scoped objects (`project:<projectId>`), writes a `status = 'draft'` row in `project_pulses` (`created_by = 'assistant'`), and posts a `project_event` digest in the project channel only when published by a Project Lead/Editor or if `pulse_schedule.autoPost` is enabled.
 - **`assistant-purge`.** §5.7.
 
 ### 5.9 Confirmation state machine
@@ -1289,7 +1278,7 @@ Each queue has a dead-letter queue (§6.1). Every consumer except `assistant-pur
 Write tools never run from model output (Assistant §5.1). A write creates a **pending action** in the Assistant DO with the Zod-validated arguments and, for edits, the target's current version. The preview card is rendered from those arguments by deterministic code.
 
 - **States:** `pending → executing → done | failed`, plus `pending → cancelled | expired`. Confirm moves `pending → executing` with a compare-and-set, so a second confirm returns the current state and never writes twice.
-- **Execute.** The DO re-checks permission, then calls the target service with the **action ID as the idempotency key** and the stored version as **`expectedVersion`**. Calendar (events, RSVPs), Documents (create), status, personal reminders and Chat (`post_message`, using its existing `clientId`) accept the key and keep it with the created object for 24 hours, returning the existing result on a repeat. Calendar and Documents updates apply only if the version still matches, as an atomic compare-and-set, and otherwise return `conflict`; the action moves to `failed` and a fresh card is offered.
+- **Execute.** The DO re-checks permission, then calls the target service with the **action ID as the idempotency key** and the stored version as **`expectedVersion`**. Calendar (events, RSVPs), Documents (create), Projects/Issues (`create_issue`, `update_issue`, `comment_on_issue`, `propose_project_memory`, M10c), status, personal reminders and Chat (`post_message`, using its existing `clientId`) accept the key and keep it with the created object for 24 hours, returning the existing result on a repeat. Calendar, Documents and Issue updates apply only if the version still matches, as an atomic compare-and-set, and otherwise return `conflict`; the action moves to `failed` and a fresh card is offered.
 - **Resume.** If the DO is evicted or the call times out while `executing`, the next confirm or the `pending_expire` timer resumes the same call with the same key. Before resuming, the DO re-checks the member's status, assistant access, an active session and permission; if any fails, or the action is more than 10 minutes past its confirmation, it moves to `failed`.
 - **Expiry and cleanup.** Pending actions expire after 10 minutes or when the member's sessions are revoked; finished, cancelled and expired actions are deleted after 24 hours.
 - Write tools aren't available on shared surfaces, so a card is only ever shown to the asker.
@@ -1336,6 +1325,10 @@ The repository's `wrangler.jsonc` grows to include the bindings below. It is add
   - Queues, each with a dead-letter queue: `assistant-mentions` (the audience worker), `assistant-nudges`, `assistant-proactive` and `assistant-purge` (§5.8, §5.7); the existing `indexing` queue gains file conversion, audio transcription and back-fill jobs
   - the Vectorize index and Workers AI binding, built in M9a with the ingestion pipeline (§5.2)
   - the assistant settings keys (Assistant §10.1), including `assistant_gateway_id`.
+- **M10 additions** ([Projects §11](specs/projects.md)):
+  - the **`ProjectRoom`** Durable Object class (SQLite-backed, new migration tag)
+  - Queue `project-projection` (with dead-letter queue) for projecting `ProjectRoom` DO state to D1 and `search_index`
+  - the `project_creation` admin setting (`everyone` by default, or `admins`; Platform §7).
 
 The Deploy to Cloudflare button copies the repository into the customer's GitHub account, provisions the supported resources and runs the deploy command:
 
@@ -1567,9 +1560,10 @@ CREATE TABLE exports (
 
 | Path | Content |
 |---|---|
-| `manifest.json` | Format version, Officebox version, D1 schema version, creation time, row/object counts, SHA-256 for every part, each channel's exported `seq`, each document's state vector |
+| `manifest.json` | Format version, Officebox version, D1 schema version, creation time, row/object counts, SHA-256 for every part, each channel's exported `seq`, each project's (plus `personal`) exported `seq` and `next_issue_number`, each document's state vector |
 | `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `mfa_factors`, setup fields, job tables, `passkeys`, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6). From M9 also `file_derived_text` (rebuilt like `search_index`), `personal_reminders` (personal export only) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
 | `channels/<id>/messages.jsonl` | Current message state from the ChatChannel DO, including tombstones |
+| `projects/<id>/state.jsonl` | Authoritative `issues`, `issue_reviewers`, `issue_checklist_items`, `issue_comments` and `issue_activity` from each project's `ProjectRoom` DO plus `projects/personal/state.jsonl` from `ProjectRoom("personal")` (M10a; `project_milestones`, `project_labels`, `issue_relations`, `issue_follows`, `issue_key_aliases`, `project_memories`, `project_memory_sources` and `project_pulses` are in `d1/<table>.jsonl`) |
 | `docs/<id>/state.ystate` | Native Yjs state |
 | `docs/<id>/content.md` or `content.json` | Readable rendering (Markdown for documents, JSON for whiteboards) |
 | `docs/<id>/versions/` | Retained versions |
@@ -1587,11 +1581,11 @@ CREATE TABLE exports (
 1. The first-run setup page of a fresh installation offers **Restore from export**, which still requires the setup token (§6.8).
 2. The archive is uploaded through the Worker with R2 multipart upload. Very large archives can instead be placed in the bucket with Wrangler, and `officebox-restore` then starts the Workflow.
 3. The Restore Workflow checks the manifest and checksums. It accepts exports from the same Officebox version or older, and maps older logical schemas forward.
-4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`. Derived file text and vectors are rebuilt by the assistant back-fill (§5.2) once the assistant is enabled; assistant memory is not part of a restore (Assistant §13).
+4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, each `ProjectRoom` DO (including `ProjectRoom("personal")`) with `importProjectState`, keeping `seq` and `next_issue_number`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`. Derived file text and vectors are rebuilt by the assistant back-fill (§5.2) once the assistant is enabled; assistant memory is not part of a restore (Assistant §13).
 5. It completes setup. All sessions are invalid and users with MFA must re-enrol.
 
 **Coverage** ([Platform](specs/platform.md) §6 is authoritative):
-- **Added:** calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, and `call_notes` and `call_transcript_segments` within retention (Assistant §13).
+- **Added:** calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, and `call_notes` and `call_transcript_segments` within retention (Assistant §13). From M10: `projects`, `ProjectRoom` DO state, D1 project/issue tables (including personal tasks, key aliases, `project_memories` and `project_pulses`), and issue-owned files (Projects §10).
 - **Excluded:**
   - sessions, `auth_tokens`, `ws_tickets` and MFA secrets
   - **passkeys** (bound to the domain; members re-register after a restore to a new domain)

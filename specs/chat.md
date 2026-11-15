@@ -84,6 +84,7 @@ Real-time team conversation:
   - Leaving a private channel requires being re-added to return.
 - **Archive:** the channel becomes read-only, stays searchable and is hidden from the sidebar; it can be unarchived. No new calls can start in an archived channel. **Delete** (workspace admins only) moves it to Trash for 30 days. What happens to the channel folder, calendar, pins, polls and huddle records is defined in [Platform §4](platform.md).
 - **Convert public → private:** channel admin only. Current members stay; non-members lose access to the conversation, including in search. Private → public isn't possible. The channel folder follows (Documents §3.3).
+- **Promote channel to project** (M10a, [Projects §3.2](projects.md)): a channel admin can promote a public or private channel to a project, making the channel the project's dedicated channel (`projects.channel_id`), converting its channel folder into the project drive (`drives.project_id`), and provisioning the project's `ProjectRoom` DO and calendar.
 
 ### 3.4 Channel configuration in the DO
 
@@ -120,6 +121,7 @@ The ChatChannel DO enforces posting rights itself, so it needs the channel's cur
   - `@person`, `@group`, `@channel` and `@here`
   - the **`assistant` mention token** (`@Butler`, shown with the current assistant display name), offered only when the assistant and `assistant_mentions` are on and the member has assistant access (§6; [Assistant §6](assistant.md))
   - `#channel` references
+  - issue and task keys (`ENG-42`, `TASK-12`; M10a, [Projects §6.2](projects.md)), which render as live permission-checked status chips
   - pasted Officebox links become rich references.
 
   Mentions are stored by ID. The plain-text copy holds the handle at send time and is refreshed when a handle changes or a member is deleted ([Platform §3](platform.md)).
@@ -165,7 +167,7 @@ Quick reactions (the last 6 used) and the full picker. Hover shows who reacted. 
 | Edit / delete | Author; admins can delete (§4.3) | |
 | **Copy link** | Anyone who can read | Permalink that opens the conversation at the message (or the thread) |
 | **Forward** | Anyone who can read | **A live reference, not a copy.** Shows the original as it is now: edits apply, and deletion shows "deleted". Recipients without access see "A message you don't have access to" ([Permissions §7](permissions.md)). Forwarding from a private conversation to people outside it shows a warning first: "Most recipients can't see this message". Forwarding uses the REST endpoint only (§17); `message.send` has no forward field. |
-| **Create from message** | Anyone who can read | **Document** (title from the message, body **copied** from it, link back) or **calendar event** (title and description copied). **Task** arrives with projects (Phase 2). The person creating it chooses to copy the content; later edits or deletion of the source don't change the copy. |
+| **Create from message** | Anyone who can read | **Document** (title from the message, body **copied** from it, link back), **calendar event** (title and description copied), or **issue / personal task** (M10b, [Projects §6.3](projects.md): title and description copied, linked back via `object_links` with `relation = 'created_from'`). The person creating it chooses to copy the content; later edits or deletion of the source don't change the copy. |
 | **Reply privately** | Anyone who can read | Opens a DM with the author with the message text **copied** as a quote (the user can edit or remove it before sending) |
 | Pin / unpin | Channel members, or posters in announcement channels **(default)** | |
 | Save for later | Anyone | Private to the member |
@@ -185,6 +187,7 @@ System messages are messages with `sender_id = 'system'` and a `kind`:
 | `poll_closed` | `{ pollId, results }` | Polls |
 | `message_pinned` | `{ messageId, byUserId }` | Pins |
 | `notes_started` / `notes_stopped` | `{ huddleId, byUserId }` | Call notes started or stopped, posted in the call's in-call chat ([Assistant](assistant.md) §12.3) **(default)** |
+| `project_event` | `{ projectId, eventKind, issueId?, eventId?, actorId? }` | Project lifecycle, release/demo calendar events, and high-signal issue events in the project channel (M10a, [Projects §6.1](projects.md)) **(default)** |
 
 - System messages may be posted into announcement channels, read-only #general and archived channels; posting policy doesn't apply to them.
 - `call_started` is the thread root for in-call chat (Calls §6.4). The HuddleRoom DO posts it through a typed ChatChannel RPC that returns a result, not a thrown denial (AGENTS §4.1).
