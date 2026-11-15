@@ -19,6 +19,33 @@ R2 must be enabled on the Cloudflare account (dashboard → R2) before the first
 
 To deploy by hand instead: `npx wrangler login`, create the database with `npx wrangler d1 create officebox` and add its `database_id` to `wrangler.jsonc`, then run `npm run build && npm run deploy`.
 
+### Deploy from GitHub Actions
+
+Pushes to `main` deploy automatically once CI passes (`.github/workflows/deploy.yml`). You can also run it by hand: Actions → Deploy → Run workflow. Until the two secrets below exist, the workflow skips with a notice.
+
+1. **Create an API token** in the Cloudflare dashboard (My Profile → API Tokens → Create Token → Create Custom Token) with these **Account** permissions on the account you deploy to:
+   - Workers Scripts: Edit
+   - D1: Edit
+   - Workers R2 Storage: Edit
+   - Queues: Edit
+   - Account Settings: Read
+   - Workers Observability: Edit (Workers Logs)
+2. **Find your account ID**: dashboard → Workers & Pages → Account details (right-hand side).
+3. **Add both as secrets in GitHub**: repository Settings → Environments → New environment `production` → Add environment secret:
+   - `CLOUDFLARE_API_TOKEN`: the token
+   - `CLOUDFLARE_ACCOUNT_ID`: the account ID
+
+   Optionally add yourself under **Required reviewers**, so every deploy waits for your approval.
+4. Enable **R2** on the account (dashboard → R2) before the first deploy, and register a `workers.dev` subdomain (dashboard → Workers & Pages) if the account has never had one.
+
+Each run builds the commit CI tested, then `npm run deploy:ci` runs these steps in order. If any step fails, the run stops and the previous version stays live.
+- **Preflight checks.**
+- **Database.** Creates the `officebox` D1 database if it doesn't exist; it's found by name, so no ID is committed.
+- **Migrations.** Applies D1 migrations.
+- **Deploy.** `wrangler deploy` creates the R2 bucket and queues on first use.
+
+Never paste the token into an issue, pull request or chat; it only goes into the GitHub secret.
+
 ## Develop
 
 Requires Node 22.22 or later.
