@@ -45,6 +45,24 @@ export function defineFeature(name: string, routes: Hono<AppEnv>): Feature {
   return { name, routes };
 }
 
+/**
+ * Whether a route's own Cache-Control may stay on an API response (TDD §8.2). The header is parsed
+ * into directive names (split on commas, trimmed, the name before any `=`, lower-cased). It is kept
+ * only if it has a bare `private` (no `=` qualifier) or `no-store`, and no `public` or `s-maxage`.
+ * Everything else, including no header and `no-cache` alone (which still allows shared caches to
+ * store the response), is replaced with `no-store`.
+ */
+export function keepsApiCacheControl(value: string | null): boolean {
+  if (value === null) return false;
+  const directives = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  const names = new Set(directives.map((part) => (part.split("=", 1)[0] ?? "").trim().toLowerCase()));
+  const barePrivate = directives.some((part) => part.toLowerCase() === "private");
+  return (barePrivate || names.has("no-store")) && !names.has("public") && !names.has("s-maxage");
+}
+
 export interface AppOptions {
   features: readonly Feature[];
   /** Log destination; tests capture lines with it. */
@@ -68,13 +86,8 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) c.header(name, value);
     const isApi = path === "/api" || path.startsWith("/api/") || path === "/health";
     c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
-    // API responses carry user data: never stored by shared caches, whichever helper built the
-    // response. A route's own Cache-Control is kept only if it says `private`, `no-store` or
-    // `no-cache`; anything else (no header, `public`, a bare `max-age`, `s-maxage`) becomes
-    // `no-store` (TDD §8.2).
-    const cacheControl = c.res.headers.get("Cache-Control");
-    const keep = cacheControl !== null && /\b(private|no-store|no-cache)\b/i.test(cacheControl);
-    if (isApi && !keep) c.header("Cache-Control", "no-store");
+    // API responses carry user data: never stored by shared caches (TDD §8.2).
+    if (isApi && !keepsApiCacheControl(c.res.headers.get("Cache-Control"))) c.header("Cache-Control", "no-store");
     // Assets fall-through and health probes are noisy and carry nothing worth keeping.
     if (path.startsWith("/api/") || path === "/api") {
       log.info("request", {
