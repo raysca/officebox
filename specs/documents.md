@@ -234,7 +234,7 @@ There are three kinds of file (platform §14):
 
 - **Upload:** drag-and-drop files and folders, the upload button, or paste. Uploads stream through the Worker into R2, multipart above 50 MB; the default limit is 2 GB per file (TDD §8.3; quotas in platform §8).
 - **Previews:**
-  - images, PDF, video and audio in the browser (allow-listed inline types)
+  - images, PDF, video and audio in the browser (allow-listed inline types). PDFs show in an `<iframe>` **without** the `sandbox` attribute, which blocks the browser's PDF viewer; the file response's `Content-Security-Policy: sandbox` provides the isolation (TDD §8.3).
   - text and code files in a read-only viewer **(default)**
   - everything else downloads.
 - **Versions:**
@@ -437,6 +437,7 @@ Realtime: document content goes through the DocRoom/BoardRoom sockets (TDD §4).
 - **Offline (revoked access):** if A's access is revoked while offline, A's edits are rejected on reconnect and **Export my local copy** produces a Markdown file containing them.
 - **Offline cache:** sign-out wipes the cache; the cache never exceeds 20 documents or 100 MB.
 - **Files and versions:** uploading a new file version keeps the old one downloadable; restoring version 1 makes it the latest; links open the latest.
+- **PDF preview:** a PDF served with `Content-Security-Policy: sandbox` renders in the preview iframe in **Chrome, Firefox and Safari** (the M0 foundation spike verified Chromium only). If a browser can't render it, that browser falls back to PDF.js in a sandboxed iframe on a separate path.
 - **Trash:**
   - a deleted item restores to its original folder within 30 days and is purged after
   - deleting a shared drive and restoring it within 30 days brings back its contents

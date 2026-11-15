@@ -113,12 +113,12 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - light and dark theme tokens and the accessibility baseline (focus rings, landmarks, reduced motion)
   - API client and error handling
 - **Shared package:** Zod schema conventions, message envelope `{ type, id?, ... }`, error codes.
-- **Foundation spike.** Short, throwaway checks on production Cloudflare, before M1 code depends on them. Each result is recorded in TDD §10.
-  - **PBKDF2 limit:** does production Workers cap PBKDF2 iterations (local workerd accepts 600k)? If it caps at 100k, adopt the fallback in Identity §4.4 (100k plus a server-side HMAC pepper, or Argon2id in WASM).
-  - **WebAuthn:** does a maintained library (for example SimpleWebAuthn) run in Workers, or do we verify with WebCrypto ourselves?
-  - **Rate Limiting binding:** which periods and what consistency it really offers, so each limit in platform §8 is assigned to the binding, a D1 counter or a Durable Object.
-  - **Queue delays:** the maximum `delaySeconds`, which affects the unread-email and DND timers (platform §11).
-  - **PDF preview under `Content-Security-Policy: sandbox`:** does Chrome's built-in PDF viewer render it (TDD §8.3)?
+- **Foundation spike.** Short, throwaway checks on production Cloudflare, before M1 code depends on them. Each result is recorded in TDD §10. **Answered** in [`spikes/foundation`](spikes/foundation/README.md), and **confirmed in production** by the probe run of 15 November 2026 (PBKDF2 capped at 100k, rate limits approximate, queue delays up to 24 h).
+  - **PBKDF2 limit:** answered: production very likely caps at 100k, so M1 adopts **100k plus an HMAC pepper** (Identity §4.4). *Pending production run* for the 600k question.
+  - **WebAuthn:** answered: `@simplewebauthn/server` runs in Workers (verified end to end locally).
+  - **Rate Limiting binding:** answered: periods are exactly 10 or 60 s, per location and approximate; platform §8 assignments unchanged. *Pending production run* for measured behaviour.
+  - **Queue delays:** answered: the maximum `delaySeconds` is 24 hours (platform §11 updated).
+  - **PDF preview under `Content-Security-Policy: sandbox`:** answered: Chromium renders it; previews use an iframe without the `sandbox` attribute (TDD §8.3). Firefox and Safari are checked in M6.
 
 **Exit criteria:**
 - A fresh Cloudflare account deploys from the button and shows the app shell. `/health` is green.
@@ -132,7 +132,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 **Must:**
 - **First-run setup** with the setup token, either the deploy secret or a generated token in the logs, and an atomic claim (TDD §6.8).
 - **Sign-in:**
-  - email and password, hashed with PBKDF2-SHA256 at 600k iterations in a versioned format
+  - email and password, hashed with PBKDF2-SHA256 at 100k iterations plus an HMAC pepper, in a versioned format (Identity §4.4; the production probe confirmed the 100k cap)
   - **magic links** by email and **passkeys** (members may be passkey-only; owners must keep a password)
   - `HttpOnly` session cookie plus rotating refresh cookie, reuse detection, and `session_epoch` revocation
   - sign out and sign out everywhere

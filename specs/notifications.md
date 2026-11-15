@@ -204,7 +204,7 @@ The UserHub computes each member's **derived availability**: `{ state, until, so
   - the delay is a **single per-member setting** (`user_preferences.email_delay`): **5, 10 (default) or 30 minutes**, an **hourly digest**, a **daily digest** (sent at the start of working hours), or **off**. There's no per-conversation delay **(default)**.
 - **Timers:**
   - Per-recipient, per-conversation delayed messages (5, 10 or 30 minutes) are owned by [Platform §11](platform.md). The timer re-checks the inbox records when it fires and sends nothing if they're resolved, deleted or at a count of 0.
-  - Holds for DND or time off can last longer than the queue's 12-hour maximum delay. The platform mechanism re-queues them in chunks, or hands the release to the ReminderScheduler's DND and time-off end triggers ([Platform §11](platform.md)).
+  - Holds for DND or time off can last longer than the queue's 24-hour maximum delay. The platform mechanism re-queues them in chunks, or hands the release to the ReminderScheduler's DND and time-off end triggers ([Platform §11](platform.md)).
   - **Hourly and daily digests are scheduled jobs**, not per-message timers ([Platform §11](platform.md)). They collect each member's unread records.
 - **Batching:** one email per conversation (or per document or event) covering everything still unread there. Digests group all conversations.
 - **Cancellation:** reading the conversation (or resolving the record) before the delay cancels the pending email. So does deleting the message (§3.1).

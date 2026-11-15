@@ -181,7 +181,7 @@ This extends TDD §7.5.
 | `ics_feeds` tokens | Credentials. Members create new feed URLs after a restore. |
 | ICS-in URLs | Secrets. Subscriptions are exported **without URLs** and need re-entry after a restore **(default)**. |
 | `search_index` | Rebuilt on restore (TDD §2.4) |
-| Setup, recovery and Worker secrets | Never exported |
+| Setup, recovery and Worker secrets | Never exported. Password hashes are exported but are only usable with the same `PEPPER_*` secrets (§16), which the restore guide tells owners to carry over. |
 
 ## 7. Admin settings
 
@@ -218,7 +218,7 @@ Every change writes the audit event with old and new values (values that are per
 ## 8. Rate limits and quotas
 
 Every limit names its **mechanism**:
-- **binding:** the Workers Rate Limiting binding. Windows of **60 seconds or less** only; counted per Cloudflare location and approximate. Good for abuse protection, not exact quotas.
+- **binding:** the Workers Rate Limiting binding. Windows of **exactly 10 or 60 seconds** (no other period is supported); counted **per Cloudflare location**, **approximate and eventually consistent** (bursts can exceed the limit before counts converge). Good for abuse protection, not exact quotas. The wrapper treats a binding result as **advisory**: a refusal returns `rate_limited` with retry-after equal to the period. Local Miniflare is exact, so tests must not rely on production being exact (M0 foundation spike).
 - **DO:** a counter inside the Durable Object that already owns the action (exact, per object). For example, per-conversation sends are counted in that channel's ChatChannel DO, and rings in the caller's UserHub.
 - **D1 counter:** rows in a `rate_counters` table keyed `(scope, key, window_start)` for windows **longer than 60 seconds** and daily quotas. Daily windows use the member's time zone.
 
@@ -318,7 +318,7 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 | Status expiry | ReminderScheduler | Kind `status_expire` |
 | DND schedule (weekly quiet hours) | ReminderScheduler | Kinds `dnd_start` / `dnd_end`, expanded from the member's schedule, refilled hourly; each calls UserHub `refreshAvailability()` |
 | Manual DND expiry | ReminderScheduler | Kind **`dnd_until_end`**, created when a member sets DND "for 1 hour", "until tomorrow" and so on; calls UserHub `refreshAvailability()` |
-| Holds longer than 12 hours (e.g. an email held for a long time off) | ReminderScheduler | Kind `email_release`, instead of a queue delay |
+| Holds longer than 24 hours (e.g. an email held for a long time off) | ReminderScheduler | Kind `email_release`, instead of a queue delay |
 | **Offline unread email** | **Queues, delayed message** + D1 `pending_emails` | Below |
 | Hourly and daily email digests | Hourly cron | For members whose email delay is "hourly" or "daily": send one digest of still-unread items; daily digests go at the start of the member's working hours ([Notifications](notifications.md) §6) |
 | DND-end held-notification summary | UserHub DO | When DND, focus or time off ends, the hub delivers "While you were away…" ([Notifications](notifications.md) §5.1) |
@@ -335,10 +335,10 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 
 **Offline unread email:**
 1. When a qualifying notification (mention, DM, thread reply, …) is created for an offline or inactive member, the consumer inserts a row into **`pending_emails`** with a uniqueness key `(user_id, conversation_id, window)`. `window` is the time bucket of the member's delay, so repeated events in one conversation share one row. Queues don't deduplicate, so this table does.
-2. If the row is new, a queue message is sent with `delaySeconds` = the member's delay (Queues allow at most **12 hours**).
+2. If the row is new, a queue message is sent with `delaySeconds` = the member's delay. Queues allow at most **24 hours (86,400 s)** for `send`, `sendBatch` and retries (M0 foundation spike). Every delay is validated with Zod as an integer from 0 to 86,400 before sending; a value out of range becomes a typed result, never a thrown error.
 3. When it fires, the consumer re-checks the member's **inbox records** for that conversation (Notifications §3.1: still unread, not retracted by message deletion), plus activity, DND and time off.
    - Read, or every message deleted: the row is deleted and nothing is sent.
-   - **In DND or on time off:** the email is held. When DND or time off ends it's **re-evaluated: if still unread it's sent after the remaining delay, or immediately if the delay has passed** ([Notifications](notifications.md) §6). The release is a queue message if the remaining hold is 12 hours or less, otherwise an `email_release` trigger.
+   - **In DND or on time off:** the email is held. When DND or time off ends it's **re-evaluated: if still unread it's sent after the remaining delay, or immediately if the delay has passed** ([Notifications](notifications.md) §6). The release is a queue message if the remaining hold is 24 hours or less, otherwise an `email_release` trigger.
    - Otherwise it's sent, and the row is deleted.
 4. Delivery is at-least-once, so the consumer is idempotent on the `pending_emails` row.
 
@@ -532,6 +532,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 | `REALTIME_APP_ID`, `REALTIME_APP_SECRET` | Realtime SFU for calls | Optional (calls) | Rotate in the Cloudflare dashboard |
 | `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | TURN credentials | Optional | Rotate in the dashboard |
 | `ANALYTICS_API_TOKEN` | Read-only usage panel | Optional | Rotate in the dashboard |
+| `PEPPER_1`, `PEPPER_2`, … | HMAC pepper applied to passwords before PBKDF2; the number is the `pepperId` in `pbkdf2-sha256-hmac$<pepperId>$…` (Identity §4.4). Each at least **32 random bytes**. | Yes (from M1); at least one | Add `PEPPER_<n+1>` and hash new passwords with it; re-hash at next sign-in; after a published deadline, accounts still on a retired pepper must reset; delete the old secret only after that deadline. **Restoring an export to another installation needs the same `PEPPER_*` secrets**, or every password must be reset. |
 
 ## 17. Acceptance criteria
 
@@ -563,7 +564,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 
 ## 18. Later
 
-Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF preview under `Content-Security-Policy: sandbox` (verify in the **M0 foundation spike** whether the browser's PDF viewer renders under the sandbox; otherwise use PDF.js in a sandboxed frame) · server-side image resizing for previews · legal hold · per-member data export (self-service).
+Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF.js fallback for PDF preview, only if a browser fails the M6 check (the **M0 foundation spike** answered the sandbox question: Chromium's viewer renders under `Content-Security-Policy: sandbox` in an iframe without the `sandbox` attribute; TDD §8.3) · server-side image resizing for previews · legal hold · per-member data export (self-service).
 
 ## 19. Open questions
 
