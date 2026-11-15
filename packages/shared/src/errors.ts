@@ -9,7 +9,8 @@ import { z } from "zod";
 export const ERROR_CODES = [
   "validation_failed", // the request body or message failed its Zod schema, or wasn't valid JSON
   "unauthenticated", // no valid session
-  "forbidden", // signed in, but the permission engine denied the action
+  "forbidden", // signed in, but the permission engine denied the action (`reason` says why)
+  "reauth_required", // step-up: a sensitive action needs a passkey assertion within 10 minutes (Identity §4.5)
   "not_found",
   "method_not_allowed", // the path exists but not with this HTTP method
   "conflict", // a concurrent change or a uniqueness rule
@@ -36,6 +37,12 @@ export const apiErrorSchema = z.object({
   message: z.string(),
   /** Field-level problems for `validation_failed`, keyed by a dotted path (`""` for the whole value). */
   fields: z.record(z.string(), z.array(z.string())).optional(),
+  /**
+   * Why the permission engine refused, for `forbidden` and `reauth_required`: a `DenialReason` from
+   * `permissions.ts`. Typed as a string so an older client tolerates reasons added later
+   * (expand/contract); clients map known reasons to their own copy and fall back to the code's.
+   */
+  reason: z.string().optional(),
   /** Seconds until the action may be retried; set for `rate_limited`. */
   retryAfterSeconds: z.number().int().nonnegative().optional(),
 });

@@ -27,3 +27,4 @@ export * from "./ids";
 export * from "./envelope";
 export * from "./health";
 export * from "./security";
+export * from "./permissions";

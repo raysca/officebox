@@ -254,8 +254,17 @@ export type RequestOperation = "query" | "mutation";
 export function describeApiError(error: ApiClientError, operation: RequestOperation = "query"): string {
   const copy = messages.errors;
   switch (error.kind) {
-    case "api":
-      return copy.byCode[error.error.code] ?? copy.generic;
+    case "api": {
+      const { code, reason } = error.error;
+      if (
+        (code === "forbidden" || code === "reauth_required") &&
+        reason !== undefined &&
+        Object.hasOwn(copy.byDenial, reason)
+      ) {
+        return copy.byDenial[reason as keyof typeof copy.byDenial];
+      }
+      return copy.byCode[code] ?? copy.generic;
+    }
     case "http":
       if (error.status === 401) return copy.byCode.unauthenticated;
       if (error.status === 403) return copy.byCode.forbidden;
