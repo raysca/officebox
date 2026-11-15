@@ -3,7 +3,9 @@ import type { AppContext, AuthContext } from "../../core/context";
 import { coreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
 import type { PermissionContext, PermissionFacts } from "../../core/permissions";
+import { rootLogger } from "../../core/log";
 import type { Env } from "../../env";
+import { magicLinksAvailable } from "../email/config";
 import { timingSafeEqual, tokenHash } from "./crypto";
 import { MIN_SECRET_BYTES } from "./secrets";
 
@@ -40,9 +42,8 @@ export function d1Facts(env: Env): PermissionFacts {
       return recoveryTokenUnconsumed(env);
     },
     magicLinksAvailable() {
-      // Magic links need email, which arrives in M1b. Until then they never work, so the last-passkey
-      // rule is "never" for everyone (Identity §2).
-      return Promise.resolve(false);
+      // Email configured and `magic_link_enabled` on (Identity §2 "Removing the last passkey").
+      return magicLinksAvailable({ env, log: rootLogger, now: Date.now });
     },
     groupManagerIds() {
       // Groups arrive in M1e; until then no group exists.

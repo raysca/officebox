@@ -1,6 +1,8 @@
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
+import type { EmailProvider, EmailSendMessage } from "@officebox/shared";
 import { ulid } from "../../src/core/ids";
+import { clearSettingsCache } from "../../src/core/settings";
 import { clearSetupCache } from "../../src/features/identity/setup-state";
 import worker from "../../src/index";
 import type { Env } from "../../src/env";
@@ -15,12 +17,56 @@ export const uniqueHandle = (tag = "u") => `${tag}${ulid().toLowerCase().slice(-
 export const randomIp = () =>
   `10.${(Math.random() * 255) | 0}.${(Math.random() * 255) | 0}.${(Math.random() * 255) | 0}`;
 
+/**
+ * The test email sink (PLAN M1 exit criteria): a fake `EMAIL_QUEUE` that keeps every queued message,
+ * so tests read emails without a driver ever sending one. Every `callWorker` uses it.
+ */
+export class FakeQueue {
+  readonly messages: EmailSendMessage[] = [];
+  send(body: unknown): Promise<void> {
+    this.messages.push(body as EmailSendMessage);
+    return Promise.resolve();
+  }
+  sendBatch(batch: Iterable<{ body: unknown }>): Promise<void> {
+    for (const message of batch) this.messages.push(message.body as EmailSendMessage);
+    return Promise.resolve();
+  }
+  to(address: string): EmailSendMessage[] {
+    return this.messages.filter((m) => m.to.toLowerCase() === address.toLowerCase());
+  }
+}
+export const outbox = new FakeQueue();
+
 /** Calls the real Worker (with optional env overrides) and waits for its `waitUntil` work. */
 export async function callWorker(request: Request, overrides: Partial<Env> = {}): Promise<Response> {
   const ctx = createExecutionContext();
-  const response = await worker.fetch(request, { ...env, ...overrides }, ctx);
+  const response = await worker.fetch(request, { ...env, EMAIL_QUEUE: outbox as unknown as Queue, ...overrides }, ctx);
   await waitOnExecutionContext(ctx);
   return response;
+}
+
+/** The token in a link's fragment (`…#t=<token>`), or null. */
+export function fragmentToken(text: string): string | null {
+  return /#t=([A-Za-z0-9_-]+)/.exec(text)?.[1] ?? null;
+}
+
+/** Turns email on (default: the Cloudflare driver, whose binding exists in tests), or off. */
+export async function configureEmail(
+  provider: EmailProvider = { driver: "cloudflare", from: "no-reply@officebox.test" },
+) {
+  await env.DB.prepare(
+    "UPDATE installation SET settings = json_set(settings, '$.email_provider', json(?)) WHERE id = 1",
+  )
+    .bind(JSON.stringify(provider))
+    .run();
+  clearSettingsCache(env.DB);
+}
+
+export async function setSetting(key: string, value: unknown) {
+  await env.DB.prepare("UPDATE installation SET settings = json_set(settings, ?, json(?)) WHERE id = 1")
+    .bind(`$.${key}`, JSON.stringify(value))
+    .run();
+  clearSettingsCache(env.DB);
 }
 
 export interface CallOptions {
@@ -105,12 +151,16 @@ export async function resetInstallation(): Promise<void> {
     env.DB.prepare("DELETE FROM passkeys"),
     env.DB.prepare("DELETE FROM auth_tokens"),
     env.DB.prepare("DELETE FROM auth_verifications"),
+    env.DB.prepare("DELETE FROM magic_link_issues"),
+    env.DB.prepare("DELETE FROM user_devices"),
+    env.DB.prepare("DELETE FROM invitations"),
     env.DB.prepare("DELETE FROM handles"),
     env.DB.prepare("DELETE FROM users WHERE status != 'system'"),
     env.DB.prepare("DELETE FROM installation"),
     env.DB.prepare("DELETE FROM rate_counters"),
   ]);
   clearSetupCache(env.DB);
+  clearSettingsCache(env.DB);
 }
 
 /** Stores a known generated setup token (generated-token mode: no SETUP_TOKEN secret in tests). */
@@ -243,6 +293,51 @@ export async function giveTicket(browser: Browser, userId: string, via: "invitat
   const ticket = await issueTicket(env.DB, env.TOKEN_HASH_KEY!, userId, via, null, Date.now());
   browser.cookies.set(ENROL_COOKIE, ticket.token);
   return ticket;
+}
+
+/** Gives the workspace owner a second passkey, so they meet the invite gate (Identity §2). */
+export async function meetInviteGate(ws: Workspace): Promise<SoftAuthenticator> {
+  const second = new SoftAuthenticator();
+  const reg = await registerPasskey(ws.browser, second);
+  if (reg.verify?.status !== 200) throw new Error(`second passkey failed: ${JSON.stringify(reg.verify)}`);
+  return second;
+}
+
+export interface InvitationResult {
+  invitation: { id: string; email: string; role: string; status: string };
+  link: string;
+  email: string;
+}
+
+export function invite(browser: Browser, email: string, role: "member" | "admin" = "member", sendEmail = false) {
+  return browser.json<InvitationResult & { error?: { code: string; reason?: string } }>("/api/admin/invitations", {
+    body: { email, role, sendEmail },
+  });
+}
+
+/** Accepts an invitation on a new browser; the browser then holds the enrolment ticket. */
+export async function acceptInvite(token: string, name = "Ana Diaz", handle = uniqueHandle("ana")) {
+  const browser = new Browser();
+  const accept = await browser.json<{ email: string; resumed: boolean; enrolmentExpiresInSeconds: number }>(
+    "/api/invitations/accept",
+    { body: { token, name, handle } },
+  );
+  return { browser, accept, handle };
+}
+
+/** Invites, accepts and registers a passkey: a signed-in member created the M1b way. */
+export async function joinByInvitation(ws: Workspace, role: "member" | "admin" = "member") {
+  const email = uniqueEmail(role);
+  const created = await invite(ws.browser, email, role);
+  if (created.status !== 201) throw new Error(`invite failed: ${JSON.stringify(created.body)}`);
+  const token = fragmentToken(created.body.link)!;
+  const { browser, accept } = await acceptInvite(token);
+  if (accept.status !== 201) throw new Error(`accept failed: ${JSON.stringify(accept.body)}`);
+  const authenticator = new SoftAuthenticator();
+  const reg = await registerPasskey(browser, authenticator);
+  if (reg.verify?.status !== 200) throw new Error(`registration failed: ${JSON.stringify(reg.verify)}`);
+  const row = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first<{ id: string }>();
+  return { id: row!.id, email, browser, authenticator };
 }
 
 /** Makes a session's last passkey assertion old, so step-up is needed again. */

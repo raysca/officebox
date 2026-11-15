@@ -149,9 +149,12 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
       name: string;
     }>();
     const tables = results.map((r) => r.name);
-    for (const later of ["channels", "channel_members", "calendars", "drives", "folders", "invitations"]) {
+    for (const later of ["channels", "channel_members", "calendars", "drives", "folders"]) {
       expect(tables).not.toContain(later);
     }
+    // Invitations are an identity object (M1b), but setup creates none.
+    const invitations = await env.DB.prepare("SELECT count(*) AS n FROM invitations").first<{ n: number }>();
+    expect(invitations?.n).toBe(0);
   });
 
   it("a second claim while one is open is refused (409): resume instead", async () => {

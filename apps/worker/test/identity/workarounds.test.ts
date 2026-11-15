@@ -385,6 +385,8 @@ describe("workaround 16: upgrade checks", () => {
         "GET /api/auth/passkey/generate-register-options",
         "POST /api/auth/passkey/verify-authentication",
         "POST /api/auth/passkey/verify-registration",
+        // M1b, reviewed: behind our availability check and per-IP and per-email limits (Identity §4.4).
+        "POST /api/auth/sign-in/magic-link",
         "POST /api/auth/sign-out",
       ].sort(),
     );

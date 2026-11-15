@@ -63,6 +63,7 @@ export type PermissionRequest =
   | { action: WorkspaceAction }
   | { action: "admin.job.view"; startedBy: string }
   | { action: "invitation.create"; role: WorkspaceRole }
+  | { action: "invitation.revoke"; role: WorkspaceRole }
   | { action: MemberAdminAction; targetId: string }
   | { action: "member.change_role"; targetId: string; newRole: WorkspaceRole }
   | { action: "member.export"; subjectId: string; phase: ExportPhase }
@@ -163,6 +164,7 @@ async function buildCheck(actor: Actor, request: PermissionRequest, facts: Permi
     case "admin.job.view":
     case "workspace.export":
     case "setting.change":
+    case "invitation.revoke":
     case "profile.edit":
     case "devices.view":
     case "devices.sign_out":

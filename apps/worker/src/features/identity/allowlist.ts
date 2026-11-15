@@ -5,7 +5,7 @@
  * email and password, update user, change email, delete user, and anything a plugin or an upgrade
  * adds) answers 404. Our routes call the rest on the server through `auth.api`.
  *
- * The magic-link request (`POST /sign-in/magic-link`) joins the list in M1b.
+ * The magic-link request (`POST /sign-in/magic-link`) joined the list in M1b.
  *
  * Matching: the path is percent-decoded, repeated slashes collapsed, a trailing slash dropped and the
  * result lower-cased; dot segments and backslashes are refused outright. A request is let through only
@@ -14,8 +14,18 @@
  * `HEAD` and `OPTIONS` are not listed, so they answer 404 too.
  */
 
+const MAGIC_LINK_REQUEST_PATH = "/api/auth/sign-in/magic-link";
+const MAGIC_LINK_REQUEST_ROUTE = `POST ${MAGIC_LINK_REQUEST_PATH}`;
+
+export function isMagicLinkRequestRoute(path: string): boolean {
+  return path === MAGIC_LINK_REQUEST_PATH;
+}
+
 export const AUTH_ALLOWLIST: ReadonlySet<string> = new Set([
   "POST /api/auth/sign-out",
+  // M1b: the magic-link request, behind our availability check and per-IP and per-email limits
+  // (magic-link.ts). Its GET verify route stays unreachable: our confirm route calls it on the server.
+  MAGIC_LINK_REQUEST_ROUTE,
   // The two options routes are GETs with side effects (a challenge cookie and a verification row):
   // the mount requires the CSRF header on them as well (M1a-0 spike, workaround 9).
   "GET /api/auth/passkey/generate-authenticate-options",

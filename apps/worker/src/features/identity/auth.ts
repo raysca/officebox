@@ -1,8 +1,9 @@
 import { passkey } from "@better-auth/passkey";
-import { normaliseEmail, type PasskeyCreatedVia } from "@officebox/shared";
+import { MAGIC_LINK_TTL_SECONDS, normaliseEmail, type PasskeyCreatedVia } from "@officebox/shared";
 import { verifyAuthenticationResponse, type AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
+import { magicLink } from "better-auth/plugins";
 import { audit, auditStatement } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
@@ -15,6 +16,8 @@ import { createKysely } from "./d1-kysely";
 import { approxLocation, deviceLabel } from "./device";
 import { bindChallenge, consumeTicket, findValidTicket, readTicketCookie } from "./enrolment";
 import type { ClaimedInstallation } from "./installation";
+import { issueMagicLink } from "./magic-link";
+import { emailSecurityNotices, type RaisedNotice } from "./notice-email";
 import { noticeStatement } from "./notices";
 import { consumeRateLimit } from "./rate-limits";
 import { currentStore } from "./request-store";
@@ -68,6 +71,7 @@ const PATH_VERIFY_AUTHENTICATION = "/passkey/verify-authentication";
 const PATH_VERIFY_REGISTRATION = "/passkey/verify-registration";
 const PATH_AUTHENTICATE_OPTIONS = "/passkey/generate-authenticate-options";
 const PATH_REGISTER_OPTIONS = "/passkey/generate-register-options";
+const PATH_MAGIC_LINK_VERIFY = "/magic-link/verify";
 
 /** Logs from inside better-auth go to the request's logger (redacted), or the root logger. */
 function logger(): Logger {
@@ -168,11 +172,17 @@ async function raiseClone(env: Env, clone: { passkeyId: string; userId: string }
       clone.userId,
     ),
   );
+  const raised: RaisedNotice[] = [
+    { userId: clone.userId, kind: "passkey_clone_detected", details: {}, at: now },
+    ...owners.map((o): RaisedNotice => ({
+      userId: o.id,
+      kind: "passkey_clone_detected",
+      details: { subjectName: person?.display_name ?? "" },
+      at: now,
+    })),
+  ];
   const statements = [
-    noticeStatement(database, clone.userId, "passkey_clone_detected", {}, now),
-    ...owners.map((o) =>
-      noticeStatement(database, o.id, "passkey_clone_detected", { subjectName: person?.display_name ?? "" }, now),
-    ),
+    ...raised.map((n) => noticeStatement(database, n.userId, n.kind, n.details, n.at)),
     await auditStatement(ctx, {
       action: "auth.passkey_clone_detected",
       actor: null,
@@ -182,6 +192,20 @@ async function raiseClone(env: Env, clone: { passkeyId: string; userId: string }
   ];
   expectOk(await database.batchRun(statements));
   ctx.log.warn("passkey clone detected", { userId: clone.userId, passkeyId: clone.passkeyId });
+  // Banner and, when email is configured, email (Identity §4.6a).
+  await emailSecurityNotices(ctx, raised);
+}
+
+/** How a passkey added while signed in was enabled: after a magic-link sign-in, or ordinarily. */
+async function signedInVia(env: Env, sessionId: string | undefined): Promise<PasskeyCreatedVia> {
+  if (!sessionId) return "signed_in";
+  const row = expectOk(
+    await new Database(env.DB).first<{ fresh_auth_method: string | null }>(
+      "SELECT fresh_auth_method FROM sessions WHERE id = ?",
+      sessionId,
+    ),
+  );
+  return row?.fresh_auth_method === "magic_link" ? "magic_link" : "signed_in";
 }
 
 /** After a successful registration: label the passkey, complete setup, raise the notice, audit. */
@@ -189,7 +213,11 @@ async function afterRegistration(env: Env, passkeyId: string, userId: string, na
   const ctx = hookContext(env);
   const store = currentStore();
   const ticket = store?.consumedTicket;
-  const via: PasskeyCreatedVia = ticket ? ticket.via : "signed_in";
+  const mode = store?.registration;
+  // A member's first passkey after a magic-link sign-in is labelled "magic link" (Identity §4.4).
+  const via: PasskeyCreatedVia = ticket
+    ? ticket.via
+    : await signedInVia(env, mode?.kind === "signed_in" ? mode.sessionId : undefined);
   const database = new Database(env.DB);
   const now = ctx.now();
   const statements = [
@@ -202,10 +230,13 @@ async function afterRegistration(env: Env, passkeyId: string, userId: string, na
     }),
   ];
   // Every addition raises a notice, except the first passkey at setup or acceptance (Identity §4.4).
+  const raised: RaisedNotice[] = [];
   if (via !== "setup" && via !== "invitation") {
-    statements.push(noticeStatement(database, userId, "passkey_added", { passkeyName: name, createdVia: via }, now));
+    raised.push({ userId, kind: "passkey_added", details: { passkeyName: name, createdVia: via }, at: now });
   }
+  statements.push(...raised.map((n) => noticeStatement(database, n.userId, n.kind, n.details, n.at)));
   expectOk(await database.batchRun(statements));
+  await emailSecurityNotices(ctx, raised);
   if (ticket?.via === "setup" && ticket.claim) await completeSetupClaim(ctx, ticket.claim, userId);
 }
 
@@ -312,6 +343,16 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
       },
     },
     plugins: [
+      // Magic links, members only (Identity §4.4). better-auth's GET verify isn't reachable from
+      // outside (allowlist); our confirm route calls it on the server after our compare-and-set.
+      magicLink({
+        expiresIn: MAGIC_LINK_TTL_SECONDS,
+        disableSignUp: true,
+        storeToken: "hashed",
+        // A backstop only; our middleware enforces the real per-IP and per-email limits.
+        rateLimit: { window: 60, max: 100 },
+        sendMagicLink: ({ email, token }) => issueMagicLink(env, secrets, installation, { email, token }),
+      }),
       passkey({
         rpID,
         rpName: installation.workspaceName,
@@ -423,22 +464,34 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
             }
             // No better-auth path signs in anyone who isn't active (Identity §4.4).
             const user = expectOk(
-              await new Database(env.DB).first<{ status: string }>(
-                "SELECT status FROM users WHERE id = ?",
+              await new Database(env.DB).first<{ status: string; role: string }>(
+                "SELECT status, role FROM users WHERE id = ?",
                 session.userId,
               ),
             );
             if (user?.status !== "active") return false;
             const path = ctx?.path;
             const viaPasskey = path === PATH_VERIFY_AUTHENTICATION || path === PATH_VERIFY_REGISTRATION;
+            const viaMagicLink = path === PATH_MAGIC_LINK_VERIFY;
+            // A magic-link session only through our confirm route, for the member its row named, and
+            // only for role member (Identity §2: owners and admins never sign in by magic link).
+            if (viaMagicLink) {
+              const confirm = store?.magicLinkConfirm;
+              if (!confirm || confirm.userId !== session.userId || user.role !== "member") {
+                logger().warn("magic-link session refused outside our confirm route or for a non-member");
+                return false;
+              }
+            }
             const userAgent = session.userAgent ?? null;
             return {
               data: {
                 ...session,
                 deviceLabel: deviceLabel(userAgent),
                 approxLocation: approxLocation(store?.cf),
-                freshAuthAt: viaPasskey ? Date.now() : null,
-                freshAuthMethod: viaPasskey ? "passkey" : path === "/magic-link/verify" ? "magic_link" : null,
+                // Both record the time; only `passkey` satisfies step-up. `magic_link` lets a member with
+                // no passkeys add their first within 10 minutes (Identity §4.5; the engine's exception).
+                freshAuthAt: viaPasskey || viaMagicLink ? Date.now() : null,
+                freshAuthMethod: viaPasskey ? "passkey" : viaMagicLink ? "magic_link" : null,
               },
             };
           },
@@ -450,6 +503,9 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
                 session.userId,
               ),
             );
+            // The mount sets the known-device cookie on every sign-in (Identity §4.4).
+            const store = currentStore();
+            if (store) store.sessionCreated = { userId: session.userId, sessionId: session.id };
           },
         },
         delete: {
