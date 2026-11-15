@@ -1134,7 +1134,7 @@ Upgrades are delivered as **release-sync pull requests** in the customer's own r
 
 ### 6.1 Deploy to Cloudflare
 
-The repository includes a `wrangler.jsonc` with:
+The repository's `wrangler.jsonc` grows to include the bindings below. It is added to milestone by milestone, so a fresh deploy never provisions unused resources: M0 ships the bindings M0 and M1 need, and each later milestone adds its own bindings and Durable Object migration tags (Vectorize and AI in Phase 3, Workflows in M7, feature DOs and queues with their milestone). The full set:
 
 - Durable Object namespaces (ChatChannel, DocRoom, BoardRoom, UserHub, WorkspacePresence) as SQLite-backed classes.
 - Workflows (export and restore).

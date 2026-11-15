@@ -1,0 +1,9 @@
+{
+  // Workers runtime only: @cloudflare/workers-types and no DOM libs (they conflict; spike finding).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2022"],
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"]
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}

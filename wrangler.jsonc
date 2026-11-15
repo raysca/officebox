@@ -1,0 +1,109 @@
+// Officebox Worker configuration (TDD §6.1).
+//
+// This file lives at the repository root, not in apps/worker, because the Deploy to Cloudflare button
+// and Workers Builds look for the Wrangler config (and the package.json build and deploy scripts) at
+// the root of the repository they deploy. Paths below are relative to this file.
+//
+// Resource IDs are deliberately absent: the Deploy button provisions D1, R2 and the queues and writes
+// their IDs back into the customer's copy of this file. Local development and tests need no IDs.
+//
+// Bindings for later milestones are added by the milestone that uses them, so a fresh deploy never
+// provisions unused resources or fails on a product the account hasn't enabled:
+//   - Vectorize and Workers AI: AI is Phase 3 (TDD §5). A Vectorize index is a billable resource that
+//     needs fixed dimensions chosen with the embedding model.
+//   - Workflows (export and restore, M7): a binding requires its Workflow class to exist in the code.
+//   - Realtime SFU and TURN (M4): not bindings; they are Worker secrets (Platform §16).
+//   - The feature Durable Objects (ChatChannel, DocRoom, BoardRoom, UserHub, WorkspacePresence,
+//     HuddleRoom, ReminderScheduler) and the other queues (message-projection, search-projection,
+//     purge, indexing, link-preview-fetch, ics-fetch, unread-email) arrive with M1-M6, each with a
+//     new migration tag below. Class migrations only ever add classes (TDD §6.5).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "officebox",
+  "main": "apps/worker/src/index.ts",
+  "compatibility_date": "2026-11-01",
+
+  // Build-time version, reported by /health. Preflight checks it equals package.json "version".
+  "vars": {
+    "OFFICEBOX_VERSION": "0.1.0"
+  },
+
+  // The React app (apps/web, built by `npm run build`). Navigations to unknown paths get index.html.
+  // /api/* and /health always run the Worker first, so the SPA fallback never answers them.
+  "assets": {
+    "directory": "apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/health"]
+  },
+
+  "observability": {
+    // Workers Logs. Needed for the generated setup token (TDD §6.8).
+    "enabled": true
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "officebox",
+      "migrations_dir": "apps/worker/migrations"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      // Files, attachments and exports (TDD §1.1). Reached only through the binding (TDD §8.3).
+      "binding": "FILES",
+      "bucket_name": "officebox-files"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "SYSTEM", "class_name": "SystemObject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SystemObject"] }],
+
+  "queues": {
+    "producers": [
+      { "binding": "EMAIL_QUEUE", "queue": "officebox-email" },
+      // Declared as a producer so the Deploy button provisions the dead-letter queue as well, and so
+      // admin tooling can re-drive failed messages later.
+      { "binding": "EMAIL_DLQ", "queue": "officebox-email-dlq" }
+    ],
+    "consumers": [
+      {
+        "queue": "officebox-email",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "officebox-email-dlq"
+      }
+    ]
+  },
+
+  // Workers Rate Limiting binding: windows of 10 or 60 seconds only, approximate, per location
+  // (Platform §8).
+  // namespace_id is an account-wide integer: Workers in the same account that use the same value share
+  // counters. Officebox uses an arbitrary 6620xx range rather than small numbers such as 1001, which
+  // documentation examples (and so other Workers) commonly use. Keep the values stable once deployed;
+  // a second Officebox installation in the same account needs different values.
+  "ratelimits": [
+    {
+      // Sign-in per IP; setup, recovery and invitation acceptance per IP: 5 per minute.
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "662001",
+      "simple": { "limit": 5, "period": 60 }
+    },
+    {
+      // General API: 300 per minute per session (default).
+      "name": "API_RATE_LIMITER",
+      "namespace_id": "662002",
+      "simple": { "limit": 300, "period": 60 }
+    }
+  ],
+
+  // Every 5 minutes, hourly, daily (03:17 UTC). The dispatcher (M0b) maps each to named jobs (TDD §7.8).
+  "triggers": {
+    "crons": ["*/5 * * * *", "0 * * * *", "17 3 * * *"]
+  }
+}
