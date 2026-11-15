@@ -226,6 +226,7 @@ interface RefreshRow {
   user_id: string;
   refresh_token_hash: string;
   previous_refresh_hash: string | null;
+  retired_refresh_hashes: string | null;
   rotated_at: number | null;
   session_epoch: number;
   expires_at: number;
@@ -237,13 +238,26 @@ interface RefreshRow {
 async function loadRefreshRow(ctx: CoreContext, sessionId: string): Promise<RefreshRow | null> {
   return expectOk(
     await new Database(ctx.env.DB).first<RefreshRow>(
-      `SELECT s.user_id, s.refresh_token_hash, s.previous_refresh_hash, s.rotated_at, s.session_epoch,
+      `SELECT s.user_id, s.refresh_token_hash, s.previous_refresh_hash, s.retired_refresh_hashes, s.rotated_at, s.session_epoch,
               s.expires_at, s.revoked_at, u.session_epoch AS user_epoch, u.status
          FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.id = ?`,
       sessionId,
     ),
   );
+}
+
+/** How many rotated-away token hashes a session remembers for reuse detection (default). */
+export const RETIRED_HASHES_KEPT = 5;
+
+function retiredHashes(row: RefreshRow): string[] {
+  if (!row.retired_refresh_hashes) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.retired_refresh_hashes);
+    return Array.isArray(parsed) ? parsed.filter((h): h is string => typeof h === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 function usable(row: RefreshRow, now: number): boolean {
@@ -254,7 +268,10 @@ function usable(row: RefreshRow, now: number): boolean {
 
 /**
  * Rotates a refresh token (`POST /auth/refresh`). Returns the new tokens, the same successor within the
- * grace window, or `unauthenticated` (revoking the session when the token was reused).
+ * grace window, or `unauthenticated`. The session is revoked only when the presented token is one this
+ * session really issued earlier (its hash is among the last `RETIRED_HASHES_KEPT` rotated away): that is
+ * reuse. Any other token is refused without revoking, so knowing a session ID (it's inside the access
+ * token) isn't enough to sign someone out.
  */
 export async function refreshSession(
   ctx: CoreContext,
@@ -281,13 +298,19 @@ export async function refreshSession(
 
   if (sameText(row.refresh_token_hash, presented)) {
     // Compare-and-set on the current hash: of two concurrent rotations, one wins and the other falls
-    // through to the grace path below with the row as the winner left it.
+    // through to the grace path below with the row as the winner left it. The user's status and epoch
+    // are re-checked in the same statement, so a sign-out-everywhere or disable that lands between the
+    // read above and this write can't be undone by a rotation.
+    const retired = [row.refresh_token_hash, ...retiredHashes(row)].slice(0, RETIRED_HASHES_KEPT);
     const meta = expectOk(
       await new Database(ctx.env.DB).run(
         `UPDATE sessions
-            SET previous_refresh_hash = refresh_token_hash, refresh_token_hash = ?, rotated_at = ?,
-                last_seen_at = ?, expires_at = ?
-          WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL`,
+            SET previous_refresh_hash = refresh_token_hash, retired_refresh_hashes = ?, refresh_token_hash = ?,
+                rotated_at = ?, last_seen_at = ?, expires_at = ?
+          WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL
+            AND EXISTS (SELECT 1 FROM users u WHERE u.id = sessions.user_id AND u.status = 'active'
+                          AND u.session_epoch = sessions.session_epoch)`,
+        JSON.stringify(retired),
         successorHash,
         now,
         now,
@@ -308,6 +331,11 @@ export async function refreshSession(
     sameText(row.refresh_token_hash, successorHash)
   ) {
     return issue(row);
+  }
+
+  if (!retiredHashes(row).some((h) => sameText(h, presented))) {
+    // Not a token this session issued (or one older than the remembered history): refuse, don't revoke.
+    return err(UNAUTHENTICATED);
   }
 
   // Reuse: an old refresh token came back. Someone else may hold this session's tokens.
@@ -353,21 +381,46 @@ export async function sessionOfRefreshCookie(
     : null;
 }
 
-/** Revokes one session, if it belongs to `userId` (when given). Returns whether a row changed. */
-export async function revokeSession(ctx: CoreContext, sessionId: string, userId?: string): Promise<boolean> {
-  const db = new Database(ctx.env.DB);
+/** Revokes one session (sign-out of the current session). Returns whether a row changed. */
+export async function revokeSession(ctx: CoreContext, sessionId: string): Promise<boolean> {
   const meta = expectOk(
-    userId === undefined
-      ? await db.run("UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", ctx.now(), sessionId)
-      : await db.run(
-          "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
-          ctx.now(),
-          sessionId,
-          userId,
-        ),
+    await new Database(ctx.env.DB).run(
+      "UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+      ctx.now(),
+      sessionId,
+    ),
   );
   invalidateSessionCache(ctx.env.DB, { sessionId });
   return meta.changes > 0;
+}
+
+/**
+ * Signs out one of the user's devices from My devices. Audited (`session.revoke`); plain sign-out of
+ * the current session isn't. Takes effect at once in this isolate, within 60 s elsewhere.
+ */
+export async function signOutDevice(
+  ctx: CoreContext,
+  sessionId: string,
+  ownerId: string,
+  actorId: string,
+): Promise<void> {
+  const db = new Database(ctx.env.DB);
+  expectOk(
+    await db.batchRun([
+      db.statement(
+        "UPDATE sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+        ctx.now(),
+        sessionId,
+        ownerId,
+      ),
+      await auditStatement(
+        ctx,
+        { action: "session.revoke", actor: actorId, target: { type: "session", id: sessionId } },
+        { onlyIfPreviousChanged: true },
+      ),
+    ]),
+  );
+  invalidateSessionCache(ctx.env.DB, { sessionId });
 }
 
 /** Signs out every other session of the user, keeping `currentSessionId`. Audited. */

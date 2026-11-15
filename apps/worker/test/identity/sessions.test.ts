@@ -142,6 +142,38 @@ describe("refresh rotation and reuse detection", () => {
     expect((await me(call, jar)).status).toBe(401);
   });
 
+  it("a token this session never issued is refused without revoking, even with the right session ID", async () => {
+    const { call, jar } = await setup();
+    await refresh(call, jar); // so the session has history
+    const forged = new CookieJar();
+    forged.values.set("ob_refresh", `${sessionIdOf(jar)}.${"A".repeat(43)}`);
+    expect((await refresh(call, forged)).status).toBe(401);
+    expect((await sessionRow(sessionIdOf(jar)))?.revoked_at).toBeNull();
+    expect((await me(call, jar)).status).toBe(200);
+    expect((await refresh(call, jar)).status).toBe(200);
+  });
+
+  it("any of the last five tokens coming back is reuse and revokes", async () => {
+    const { call, clock, jar } = await setup();
+    const issued: CookieJar[] = [];
+    for (let i = 0; i < 5; i++) {
+      issued.push(jar.clone());
+      await refresh(call, jar);
+    }
+    clock.advance(REFRESH_GRACE_MS + 1);
+    expect((await refresh(call, issued[0] ?? jar)).status).toBe(401); // the oldest remembered one
+    expect((await sessionRow(sessionIdOf(jar)))?.revoked_at).not.toBeNull();
+  });
+
+  it("five truly parallel refreshes with one token all succeed with the same successor", async () => {
+    const { call, jar } = await setup();
+    const tabs = Array.from({ length: 5 }, () => jar.clone());
+    const results = await Promise.all(tabs.map((tab) => refresh(call, tab)));
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+    expect(new Set(tabs.map((t) => t.get("ob_refresh"))).size).toBe(1);
+    expect((await me(call, tabs[0] ?? jar)).status).toBe(200);
+  });
+
   it("a garbled cookie is refused without revoking anything", async () => {
     const { call, jar } = await setup();
     const bad = new CookieJar();
@@ -299,6 +331,12 @@ describe("My devices", () => {
       await (await call("GET", "/api/me/sessions", undefined, { jar: laptop })).json(),
     );
     expect(list.sessions.map((s) => s.id)).toEqual([sessionIdOf(laptop)]);
+    const audit = await env.DB.prepare(
+      "SELECT actor_id FROM audit_log WHERE action = 'session.revoke' AND target_id = ?",
+    )
+      .bind(sessionIdOf(phone))
+      .all();
+    expect(audit.results).toEqual([{ actor_id: user.id }]);
   });
 
   it("can't sign out someone else's session: 404, and the session survives", async () => {

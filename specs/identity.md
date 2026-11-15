@@ -37,6 +37,8 @@ The permission engine that every feature relies on is specified in [Permissions]
 | Default channels | **Public channels only** **(default)** |
 | Mentions | **Unique @handles** alongside display names |
 | Session length | **30 days, sliding** |
+| Sign-in throttling **(default, M1a)** | **Refuse early, per account and IP, with a cross-IP ceiling.** After 5 attempts, each further attempt from the same IP for the same account waits 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s; an attempt made too soon is refused with a retry-after rather than held open, and isn't counted. Keying by account **and** IP (IPv6 by /64) means an attacker only slows their own IP. Across all IPs, 50 attempts per account per hour trips a ceiling: browsers without a signed **known-device** cookie for that account (set after a successful sign-in) wait for the hour to end, while known devices keep the normal schedule. **Why:** a delay keyed by account alone let an attacker take every slot and lock the owner out, contradicting "no hard lockout" (TDD §8.1; found in the M1a review). |
+| Session signing key rotation **(default, M1a)** | **Previous-key overlap.** `SESSION_SIGNING_KEY_PREVIOUS` holds the old key during a rotation; access tokens signed with either verify, so rotating signs nobody out. Delete it after 15 minutes. **Why:** platform §16 asked for a previous-key slot; this names it. |
 | Member self-service | **See and sign out own devices.** Email change and account deletion are admin actions. |
 | Profile fields | Name, @handle, avatar, time zone, working hours, region, **job title, team, pronouns, phone, location/office** |
 | Copy-link invites | **The admin enters the invitee's email**, and the link is bound to it |
@@ -135,8 +137,9 @@ An invite opened by someone already signed in as another member shows "You're si
   - **Changing the workspace's domain** (for example from `*.workers.dev` to a custom domain, PRD §13) or **restoring to another installation** leaves existing passkeys unusable.
   - **Registering a passkey on a `*.workers.dev` domain shows a warning:** "If this workspace moves to a custom domain, you'll need to add this passkey again."
   - **Recovery:** members with a password sign in with it and add new passkeys. **Passkey-only members** need an admin recovery link (§4.6). The admin guide for domain changes and restores says so, and the restore flow lists passkey-only members who will need one (platform §6 Export coverage).
-- **Rate limits:** progressive delays after **5 failed attempts per minute per IP** and **10 per hour per account** (TDD §8.1). There is no hard lockout.
-  - **Delay schedule per account (default):** attempts 1–5 are immediate; then each further failed attempt waits 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s (the cap). A successful sign-in resets it.
+- **Rate limits:** 5 attempts per minute per IP, a progressive delay per account and IP, and a cross-IP ceiling per account (§2 Decisions; TDD §8.1). There is no hard lockout of the account's owner.
+  - **Delay schedule per account and IP (default):** attempts 1–5 are immediate; then each further attempt waits 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s (the cap) after the previous one. An attempt made sooner is refused with a retry-after and not counted. A successful sign-in, or an hour without attempts, resets it.
+  - **Ceiling per account (default):** 50 attempts per hour across all IPs; then only known devices sign in until the hour ends.
   - Further limits are in platform §8 Rate limits and quotas.
 - **Disabled and deleted members** can't sign in. They see a generic "can't sign in" message.
 
@@ -316,6 +319,7 @@ ALTER TABLE group_members ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (
 ALTER TABLE sessions ADD COLUMN device_label TEXT;         -- e.g. "Chrome on macOS"
 ALTER TABLE sessions ADD COLUMN approx_location TEXT;      -- from request.cf (city/country), if available; deleted with the session
 ALTER TABLE sessions ADD COLUMN previous_refresh_hash TEXT; -- refresh grace window: the token just rotated away
+ALTER TABLE sessions ADD COLUMN retired_refresh_hashes TEXT; -- JSON: last 5 rotated-away hashes; only these count as reuse (M1a review)
 ALTER TABLE sessions ADD COLUMN rotated_at INTEGER;         -- when it was rotated (grace window 30 s)
 ```
 
@@ -403,7 +407,7 @@ Paths are relative to the Worker's `/api` prefix (for example `POST /api/setup`)
   - changing the password signs out other sessions
   - two concurrent refreshes with the same token within 30 seconds both succeed with the same successor; reusing a token after the grace window revokes the session
   - disabling a member closes their open connections within 5 seconds, and their REST requests fail within 60 seconds.
-- **Rate limits:** the 6th failed password attempt within a minute from one IP, and the 11th within an hour for one account, are delayed. The per-account delay follows the schedule in §4.4 (1 s, 2 s, 4 s … capped at 30 s), checked with an injected clock. The account isn't locked: a correct password after the delay succeeds.
+- **Rate limits:** the 6th attempt within a minute from one IP is refused. For one account from one IP, attempts after the 5th must wait 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s after the previous one (checked with an injected clock), and one made sooner is refused with the remaining wait. The account isn't locked: a correct password after the wait succeeds, an attacker hammering from one IP doesn't stop the owner signing in from another, and after the cross-IP ceiling (50 an hour) trips, a known device still signs in. Unknown emails behave identically.
 - **Admin powers:**
   - an admin can disable, delete, change the email of and issue a recovery link for a **member**
   - the same actions on an **admin or owner** return 403 for an admin and succeed for an owner

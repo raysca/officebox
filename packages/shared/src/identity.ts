@@ -56,14 +56,20 @@ const PASSWORD_MESSAGES: Record<PasswordProblem, string> = {
   common: "This password is too common.",
 };
 
-/** A password being set (setup now; reset and change in later slices). Never trimmed. */
-export const newPasswordSchema = z.string().superRefine((value, ctx) => {
-  const problem = passwordProblem(value);
-  if (problem) ctx.addIssue({ code: "custom", message: PASSWORD_MESSAGES[problem], params: { problem } });
-});
+/**
+ * A password being set (setup now; reset and change in later slices). Never trimmed, but NFC-normalised
+ * (here and at sign-in), so the same characters typed on different keyboards hash the same.
+ */
+export const newPasswordSchema = z
+  .string()
+  .normalize("NFC")
+  .superRefine((value, ctx) => {
+    const problem = passwordProblem(value);
+    if (problem) ctx.addIssue({ code: "custom", message: PASSWORD_MESSAGES[problem], params: { problem } });
+  });
 
-/** Email addresses are stored and compared trimmed and lower-cased **(default)**. */
-export const emailSchema = z.string().trim().toLowerCase().max(MAX_EMAIL_LENGTH).pipe(z.email());
+/** Email addresses are stored and compared trimmed, NFC-normalised and lower-cased **(default)**. */
+export const emailSchema = z.string().trim().normalize("NFC").toLowerCase().max(MAX_EMAIL_LENGTH).pipe(z.email());
 
 export const displayNameSchema = z
   .string()
@@ -121,7 +127,7 @@ export type SetupResult = z.infer<typeof setupResultSchema>;
  */
 export const passwordSignInBodySchema = z.strictObject({
   email: emailSchema,
-  password: z.string().min(1).max(MAX_PASSWORD_LENGTH),
+  password: z.string().normalize("NFC").min(1).max(MAX_PASSWORD_LENGTH),
 });
 export type PasswordSignInBody = z.infer<typeof passwordSignInBodySchema>;
 

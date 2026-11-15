@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   refresh_token_hash TEXT NOT NULL UNIQUE,
   session_epoch INTEGER NOT NULL,          -- must equal users.session_epoch to stay valid
   previous_refresh_hash TEXT,              -- the token just rotated away (30-second grace window)
+  retired_refresh_hashes TEXT,             -- JSON array: hashes of the last 5 tokens rotated away (reuse detection)
   rotated_at INTEGER,
   user_agent TEXT,
   device_label TEXT,                       -- e.g. "Chrome on macOS"

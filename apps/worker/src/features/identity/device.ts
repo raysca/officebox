@@ -66,7 +66,43 @@ export function deviceInfo(request: Request): DeviceInfo {
   };
 }
 
-/** The client's IP for per-IP rate limits. Cloudflare sets this header and overwrites any sent by the client. */
+/**
+ * The client's IP for per-IP rate limits. Cloudflare always sets `CF-Connecting-IP` on requests that
+ * reach a deployed Worker, overwriting any value the client sent; "unknown" only happens locally
+ * (tests, `wrangler dev` without the header), where every request then shares one bucket.
+ */
 export function clientIp(request: Request): string {
   return request.headers.get("CF-Connecting-IP") ?? "unknown";
+}
+
+/** Expands an IPv6 address to eight 4-digit groups, or returns null when it isn't one. */
+function expandIpv6(ip: string): string[] | null {
+  if (!ip.includes(":")) return null;
+  let address = ip.split("%")[0] ?? ip;
+  // An embedded IPv4 tail (::ffff:1.2.3.4) becomes two groups.
+  const v4 = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(address);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number) as [number, number, number, number];
+    address = `${address.slice(0, v4.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = address.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array<string>(Math.max(fill, 0)).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return groups.map((g) => g.toLowerCase().padStart(4, "0"));
+}
+
+/**
+ * The bucket a client IP counts in for per-IP throttles: the address itself for IPv4, its /64 for
+ * IPv6 (one customer usually holds a whole /64, so per-address limits would be trivial to dodge).
+ */
+export function ipBucket(ip: string): string {
+  // An IPv4-mapped address is that IPv4 address.
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  if (mapped?.[1]) return mapped[1];
+  const groups = expandIpv6(ip);
+  return groups ? `${groups.slice(0, 4).join(":")}::/64` : ip;
 }

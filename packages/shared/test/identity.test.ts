@@ -81,3 +81,12 @@ describe("setup and sign-in bodies", () => {
     expect(passwordSignInBodySchema.safeParse({ email: "a@b.co", password: "" }).success).toBe(false);
   });
 });
+
+describe("Unicode normalisation", () => {
+  it("NFC-normalises passwords at setup and sign-in, and emails", () => {
+    const decomposed = "cafe\u0301 au lait!"; // e + combining acute
+    const composed = "caf\u00e9 au lait!";
+    expect(newPasswordSchema.parse(decomposed)).toBe(composed);
+    expect(passwordSignInBodySchema.parse({ email: "a@b.co", password: decomposed }).password).toBe(composed);
+  });
+});

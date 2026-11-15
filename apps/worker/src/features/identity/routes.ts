@@ -4,7 +4,14 @@ import { defineFeature } from "../../core/app";
 import { authOf, coreContext, type AppEnv } from "../../core/context";
 import { readJson, respond } from "../../core/errors";
 import { actorOf, authorize } from "../../core/permissions";
-import { clearSessionCookies, readAccessCookie, readRefreshCookie, setSessionCookies } from "./cookies";
+import {
+  clearSessionCookies,
+  readAccessCookie,
+  readKnownDeviceCookie,
+  readRefreshCookie,
+  setKnownDeviceCookie,
+  setSessionCookies,
+} from "./cookies";
 import { getMe } from "./me";
 import { requireAuth } from "./middleware";
 import { identitySecrets } from "./secrets";
@@ -16,6 +23,7 @@ import {
   revokeSession,
   sessionOfRefreshCookie,
   signOutEverywhere,
+  signOutDevice,
   signOutOtherSessions,
 } from "./sessions";
 import { completeSetup, setupStatus } from "./setup";
@@ -63,10 +71,11 @@ const authRoutes = new Hono<AppEnv>()
     if (!secrets.ok) return respond(c, secrets);
     const body = await readJson(c, passwordSignInBodySchema, SMALL_BODY);
     if (!body.ok) return respond(c, body);
-    const session = await signInWithPassword(ctx, secrets.value, body.value, c.req.raw);
-    if (!session.ok) return respond(c, session);
-    setSessionCookies(c, session.value);
-    return respond(c, await getMe(ctx, session.value.userId));
+    const signedIn = await signInWithPassword(ctx, secrets.value, body.value, c.req.raw, readKnownDeviceCookie(c));
+    if (!signedIn.ok) return respond(c, signedIn);
+    setSessionCookies(c, signedIn.value.session);
+    setKnownDeviceCookie(c, signedIn.value.knownDevice);
+    return respond(c, await getMe(ctx, signedIn.value.session.userId));
   })
   .post("/refresh", async (c) => {
     const secrets = identitySecrets(c.env, c.var.log);
@@ -132,7 +141,7 @@ const meRoutes = new Hono<AppEnv>()
     // Someone else's session answers 404 too, so session IDs can't be probed.
     const allowed = authorize(ctx, actorOf(auth), { action: "devices.sign_out", ownerId }, { hideAs404: true });
     if (!allowed.ok) return respond(c, allowed);
-    await revokeSession(ctx, sessionId, ownerId);
+    await signOutDevice(ctx, sessionId, ownerId, auth.userId);
     if (sessionId === auth.sessionId) clearSessionCookies(c);
     return respond(c, ok(null));
   });

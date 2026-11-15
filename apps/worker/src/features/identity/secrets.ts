@@ -24,6 +24,22 @@ const UNAVAILABLE: ApiError = apiError(
   "Sign-in isn't configured yet. An owner must set the Worker secrets.",
 );
 
+/** The same problem is logged at most once a minute per isolate, not on every request. */
+export const SECRETS_LOG_INTERVAL_MS = 60_000;
+let lastLogged: { signature: string; at: number } | null = null;
+
+function shouldLog(problems: string[], now = Date.now()): boolean {
+  const signature = problems.join("|");
+  if (lastLogged && lastLogged.signature === signature && now - lastLogged.at < SECRETS_LOG_INTERVAL_MS) return false;
+  lastLogged = { signature, at: now };
+  return true;
+}
+
+/** Forgets when problems were last logged (tests). */
+export function resetSecretsLogThrottle(): void {
+  lastLogged = null;
+}
+
 export function identitySecrets(env: Env, log: Logger): Result<IdentitySecrets, ApiError> {
   const problems: string[] = [];
   const strong = (name: string, value: string | undefined): value is string => {
@@ -51,10 +67,10 @@ export function identitySecrets(env: Env, log: Logger): Result<IdentitySecrets, 
   if (!set) problems.push("no PEPPER_<n> secret is set");
 
   if (!signingOk || !hashKeyOk || !set) {
-    log.error("identity secrets are missing or too short", { problems });
+    if (shouldLog(problems)) log.error("identity secrets are missing or too short", { problems });
     return err(UNAVAILABLE);
   }
-  if (problems.length > 0) log.warn("some identity secrets are ignored", { problems });
+  if (problems.length > 0 && shouldLog(problems)) log.warn("some identity secrets are ignored", { problems });
   return ok({
     peppers: set,
     sessionKeys: previousOk ? [signing, previous] : [signing],

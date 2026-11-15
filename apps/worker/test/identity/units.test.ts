@@ -13,7 +13,9 @@ import {
   verifyPassword,
   type PepperSet,
 } from "../../src/features/identity/password";
-import { identitySecrets } from "../../src/features/identity/secrets";
+import { identitySecrets, resetSecretsLogThrottle } from "../../src/features/identity/secrets";
+import { ipBucket } from "../../src/features/identity/device";
+import { isKnownDevice, signKnownDevice } from "../../src/features/identity/known-device";
 import { throttleDelayMs } from "../../src/features/identity/sign-in";
 
 const P1 = "unit-pepper-one-0123456789abcdefghijklmnop";
@@ -105,7 +107,20 @@ describe("identity secrets", () => {
     expect(rotating.ok && rotating.value.sessionKeys).toEqual([strong, "p".repeat(32)]);
   });
 
+  it("logs a missing secret once a minute per isolate, not on every request", () => {
+    resetSecretsLogThrottle();
+    const lines: string[] = [];
+    const log = createLogger({}, (_level, line) => lines.push(line));
+    const broken = { SESSION_SIGNING_KEY: strong, TOKEN_HASH_KEY: strong } as never;
+    for (let i = 0; i < 20; i++) expect(identitySecrets(broken, log).ok).toBe(false);
+    expect(lines).toHaveLength(1);
+    // A different problem is reported straight away.
+    identitySecrets({ TOKEN_HASH_KEY: strong, PEPPER_1: P1 } as never, log);
+    expect(lines).toHaveLength(2);
+  });
+
   it("never logs a secret's value", () => {
+    resetSecretsLogThrottle();
     const lines: string[] = [];
     const log = createLogger({}, (_level, line) => lines.push(line));
     identitySecrets({ SESSION_SIGNING_KEY: "tiny-secret", PEPPER_1: "tiny-pepper" } as never, log);
@@ -245,5 +260,29 @@ describe("authorize (Worker side of the permission engine)", () => {
         error: { code: "not_found", message: "Not found." },
       },
     );
+  });
+});
+
+describe("IP buckets for the per-IP throttle", () => {
+  it("keeps IPv4 addresses whole and groups IPv6 by /64", () => {
+    expect(ipBucket("203.0.113.7")).toBe("203.0.113.7");
+    expect(ipBucket("2001:db8:1:2::5")).toBe("2001:0db8:0001:0002::/64");
+    expect(ipBucket("2001:DB8:1:2:aaaa:bbbb:cccc:dddd")).toBe("2001:0db8:0001:0002::/64");
+    expect(ipBucket("::ffff:203.0.113.7")).toBe("203.0.113.7");
+    expect(ipBucket("unknown")).toBe("unknown");
+    expect(ipBucket("not:an:address::x")).toBe("not:an:address::x");
+  });
+});
+
+describe("known-device marker", () => {
+  const key = "device-key-0123456789abcdefghijklmnopqr";
+  it("is valid only for its account, its key and 400 days", async () => {
+    const marker = await signKnownDevice(key, "account-a", 0);
+    expect(await isKnownDevice([key], marker, "account-a", 1000)).toBe(true);
+    expect(await isKnownDevice([key], marker, "account-b", 1000)).toBe(false);
+    expect(await isKnownDevice(["other-key-0123456789abcdefghijklmnop"], marker, "account-a", 1000)).toBe(false);
+    expect(await isKnownDevice([key], marker, "account-a", 400 * 24 * 3600 * 1000)).toBe(false);
+    expect(await isKnownDevice([key], `${marker}x`, "account-a", 1000)).toBe(false);
+    expect(await isKnownDevice([key], undefined, "account-a", 1000)).toBe(false);
   });
 });

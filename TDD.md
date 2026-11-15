@@ -223,6 +223,7 @@ CREATE TABLE sessions (
   refresh_token_hash TEXT NOT NULL UNIQUE,
   session_epoch INTEGER NOT NULL,    -- must equal users.session_epoch to stay valid
   previous_refresh_hash TEXT,        -- 30-second grace window after rotation (§8.1)
+  retired_refresh_hashes TEXT,       -- JSON: last 5 rotated-away hashes; only these count as reuse
   rotated_at INTEGER,
   user_agent TEXT,
   device_label TEXT,
@@ -1569,13 +1570,14 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - Minimum length 10, checked against a bundled list of common passwords. No composition rules.
 - **Sessions:**
   - Cookies as in §3.1.
-  - Refresh-token rotation with reuse detection: presenting an old refresh token revokes the session, **except within a 30-second grace window** after rotation, when the previous token returns the same successor (two tabs refreshing at once).
+  - Refresh-token rotation with reuse detection: presenting an old refresh token revokes the session, **except within a 30-second grace window** after rotation, when the previous token returns the same successor (two tabs refreshing at once). Only a token the session really issued (one of its last 5 rotated-away hashes) counts as reuse; any other token is refused without revoking, so knowing a session ID isn't a way to sign someone out.
+  - Revocation (sign out, a device signed out from My devices, sign out everywhere) takes effect at once on the isolate that handled it and within the 60-second cache bound everywhere else.
   - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets. The same check covers the session row itself, so a session signed out from "My devices" stops working within the same bound rather than when its access token expires.
   - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
 - **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
 - **Rate limiting** (mechanisms per platform §8):
   - The Workers Rate Limiting binding supports periods of exactly 10 or 60 seconds, counts per Cloudflare location, and is approximate. The wrapper treats it as advisory and returns `rate_limited` with retry-after equal to the period. Longer windows and exact quotas use D1 or Durable Object counters.
-  - Sign-in: 5 attempts per minute per IP (binding) and 10 per hour per account (D1 counter `sign_in_throttle`), with progressive delays. An attempt made before its delay has passed is refused with `rate_limited` and a retry-after instead of being held open; the attempt is counted atomically before the password is checked, so parallel guesses can't slip past the schedule. There is no hard lockout, which would let attackers lock users out.
+  - Sign-in **(default, Identity §2)**: 5 attempts per minute per IP (binding); a progressive delay per **account and client IP** (D1 counter `sign_in_throttle`, IPv6 by /64), so an attacker's guesses only slow the attacker's own IP; and a cross-IP ceiling of 50 attempts per account per hour, after which only browsers with a signed known-device cookie for that account (set by a successful sign-in) keep signing in until the hour ends. An attempt made before its delay has passed is refused with `rate_limited` and a retry-after instead of being held open. Only attempts that reach the password check count, and the per-IP count is taken atomically before verification, so parallel guesses can't slip past the schedule. There is no hard lockout of the account's owner, which would let attackers lock users out.
   - Setup, recovery, invitation acceptance and password reset are limited the same way.
 - **Tokens:** invitation, reset and recovery tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days and resets after 1 hour.
 - **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: reset one owner's password and MFA. The action is audited, and a banner shows until the secret is deleted.

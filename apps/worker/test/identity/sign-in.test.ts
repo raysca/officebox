@@ -119,6 +119,13 @@ describe("POST /api/auth/password", () => {
 });
 
 describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
+  // The per-IP binding (5 per minute, real time) would stop these schedules at the 6th attempt from
+  // one IP; the binding has its own test below, so these use a binding that always allows.
+  const openBinding = { ...env, AUTH_RATE_LIMITER: { limit: () => Promise.resolve({ success: true }) } };
+  type Call = ReturnType<typeof makeApp>["call"];
+  const attemptFrom = (call: Call, email: string, password: string, ip: string, jar?: CookieJar) =>
+    call("POST", "/api/auth/password", { email, password }, { ip, env: openBinding, jar });
+
   it("the 6th attempt within a minute from one IP is refused with a retry-after", async () => {
     const { call } = makeApp();
     const ip = uniqueIp();
@@ -137,12 +144,12 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
   });
 
-  it("per account: attempts 1–5 are immediate, then 1 s, 2 s, 4 s, 8 s, 16 s, 30 s (cap); no lockout", async () => {
+  it("per account and IP: attempts 1–5 are immediate, then 1 s, 2 s, 4 s, 8 s, 16 s, 30 s (cap); no lockout", async () => {
     const user = await createUser();
     const clock = new Clock();
     const { call } = makeApp(clock);
-    const attempt = (password = "wrong-password") =>
-      call("POST", "/api/auth/password", { email: user.email, password }, { ip: uniqueIp() });
+    const ip = uniqueIp();
+    const attempt = (password = "wrong-password") => attemptFrom(call, user.email, password, ip);
 
     for (let i = 0; i < 5; i++) expect((await attempt()).status).toBe(401);
 
@@ -156,55 +163,133 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
       expect((await attempt()).status).toBe(401);
     }
 
-    // The 13th attempt within the hour, with the right password after the wait, succeeds.
+    // The right password after the wait succeeds, and success resets the schedule.
     clock.advance(30_000);
     expect((await attempt(user.password)).status).toBe(200);
-    // Success resets the schedule.
     for (let i = 0; i < 5; i++) expect((await attempt()).status).toBe(401);
     expect((await attempt()).status).toBe(429);
   });
 
-  it("the 11th failure within an hour is delayed; an hour of quiet starts afresh", async () => {
+  it("the 11th failure within an hour from one IP is delayed; an hour of quiet starts afresh", async () => {
     const user = await createUser();
     const clock = new Clock();
     const { call } = makeApp(clock);
-    const attempt = () =>
-      call("POST", "/api/auth/password", { email: user.email, password: "bad-password" }, { ip: uniqueIp() });
+    const ip = uniqueIp();
+    const attempt = () => attemptFrom(call, user.email, "bad-password", ip);
     for (let i = 0; i < 10; i++) {
       expect((await attempt()).status).toBe(401);
       clock.advance(30_000); // always waiting long enough
     }
     clock.advance(-30_000);
-    const eleventh = await attempt();
-    expect(eleventh.status).toBe(429);
+    expect((await attempt()).status).toBe(429);
     clock.advance(60 * 60 * 1000);
     for (let i = 0; i < 5; i++) expect((await attempt()).status).toBe(401);
   });
 
-  it("unknown emails are throttled exactly like real accounts", async () => {
-    const clock = new Clock();
-    const { call } = makeApp(clock);
-    const email = uniqueEmail();
-    const statuses: number[] = [];
-    for (let i = 0; i < 6; i++) {
-      statuses.push(
-        (await call("POST", "/api/auth/password", { email, password: "whatever-pw" }, { ip: uniqueIp() })).status,
-      );
-    }
-    expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
-  });
-
-  it("parallel guesses can't slip past the schedule", async () => {
+  it("an attacker hammering the account from one IP doesn't stop the user from another", async () => {
     const user = await createUser();
     const clock = new Clock();
     const { call } = makeApp(clock);
+    const attacker = uniqueIp();
+    // The attacker takes every slot the schedule allows them, for ten minutes.
+    for (let second = 0; second < 600; second += 1) {
+      await attemptFrom(call, user.email, "guess-guess", attacker);
+      clock.advance(1000);
+    }
+    expect((await attemptFrom(call, user.email, "guess-guess", attacker)).status).toBe(429);
+    // The real user, elsewhere, signs in at once.
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp())).status).toBe(200);
+  });
+
+  it("IPv6 addresses in one /64 share a bucket", async () => {
+    const user = await createUser();
+    const { call } = makeApp(new Clock());
+    for (let i = 1; i <= 5; i++) {
+      expect((await attemptFrom(call, user.email, "nope-nope", `2001:db8:1:2::${i}`)).status).toBe(401);
+    }
+    expect((await attemptFrom(call, user.email, "nope-nope", "2001:db8:1:2:ffff::9")).status).toBe(429);
+    expect((await attemptFrom(call, user.email, "nope-nope", "2001:db8:1:3::1")).status).toBe(401);
+  });
+
+  it("the cross-IP ceiling trips after 50 attempts in an hour, but a known device still signs in", async () => {
+    const user = await createUser();
+    const clock = new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+    const { call } = makeApp(clock);
+
+    // The owner signed in on this browser before: it carries a known-device marker for the account.
+    const owner = await signIn(call, user, { env: openBinding });
+    expect(owner.get("ob_device")).toBeTruthy();
+    const knownDevice = new CookieJar();
+    knownDevice.values.set("ob_device", owner.get("ob_device") ?? "");
+
+    // A distributed attack: one wrong guess from each of 50 IPs.
+    for (let i = 0; i < 50; i++) expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401);
+
+    // Unknown devices are now held back until the hour ends, even with the right password...
+    const blocked = await attemptFrom(call, user.email, user.password, uniqueIp());
+    expect(blocked.status).toBe(429);
+    expect(Number(blocked.headers.get("Retry-After"))).toBe(59 * 60);
+    // ...a marker for another account doesn't help...
+    const other = await createUser();
+    const otherJar = await signIn(call, other, { env: openBinding });
+    const wrongMarker = new CookieJar();
+    wrongMarker.values.set("ob_device", otherJar.get("ob_device") ?? "");
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), wrongMarker)).status).toBe(429);
+    // ...but the known device keeps the normal schedule and signs in.
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), knownDevice)).status).toBe(200);
+
+    // A new hour starts afresh.
+    clock.advance(60 * 60 * 1000);
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp())).status).toBe(200);
+  });
+
+  it("successful sign-ins don't count towards the ceiling", async () => {
+    const user = await createUser();
+    const clock = new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+    const { call } = makeApp(clock);
+    for (let i = 0; i < 55; i++) {
+      expect((await attemptFrom(call, user.email, user.password, uniqueIp())).status).toBe(200);
+    }
+  });
+
+  it("unknown emails are throttled exactly like real accounts, per IP and across IPs", async () => {
+    const clock = new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+    const { call } = makeApp(clock);
+    const email = uniqueEmail();
+    const ip = uniqueIp();
+    const perIp: number[] = [];
+    for (let i = 0; i < 6; i++) perIp.push((await attemptFrom(call, email, "whatever-pw", ip)).status);
+    expect(perIp).toEqual([401, 401, 401, 401, 401, 429]);
+
+    const other = uniqueEmail();
+    for (let i = 0; i < 50; i++) expect((await attemptFrom(call, other, "guess", uniqueIp())).status).toBe(401);
+    const tripped = await attemptFrom(call, other, "guess", uniqueIp());
+    expect(tripped.status).toBe(429);
+    expect(Number(tripped.headers.get("Retry-After"))).toBe(59 * 60);
+  });
+
+  it("parallel guesses from one IP can't slip past the schedule", async () => {
+    const user = await createUser();
+    const { call } = makeApp(new Clock());
+    const ip = uniqueIp();
     const results = await Promise.all(
-      Array.from({ length: 12 }, () =>
-        call("POST", "/api/auth/password", { email: user.email, password: "guess-guess" }, { ip: uniqueIp() }),
-      ),
+      Array.from({ length: 12 }, () => attemptFrom(call, user.email, "guess-guess", ip)),
     );
     expect(results.filter((r) => r.status === 401)).toHaveLength(5);
     expect(results.filter((r) => r.status === 429)).toHaveLength(7);
+  });
+
+  it("sets the known-device marker only after a successful sign-in, HttpOnly and scoped to /api/auth", async () => {
+    const user = await createUser();
+    const { call } = makeApp();
+    const failed = await attemptFrom(call, user.email, "wrong-password", uniqueIp());
+    expect(failed.headers.getSetCookie().some((c) => c.startsWith("ob_device="))).toBe(false);
+    const ok = await attemptFrom(call, user.email, user.password, uniqueIp());
+    const marker = ok.headers.getSetCookie().find((c) => c.startsWith("ob_device="));
+    expect(marker).toMatch(/HttpOnly/);
+    expect(marker).toMatch(/Secure/);
+    expect(marker).toMatch(/Path=\/api\/auth/);
+    expect(marker).toMatch(/Max-Age=34560000/);
   });
 });
 
