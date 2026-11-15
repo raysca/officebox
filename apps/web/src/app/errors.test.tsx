@@ -45,6 +45,11 @@ describe("toasts", () => {
     expect(alert.parentElement?.closest("[role], [aria-live]")).toBeNull();
     expect(status.parentElement?.closest("[role], [aria-live]")).toBeNull();
     expect(alert.querySelector("[role], [aria-live]")).toBeNull();
+    // New toasts are read on their own, not with earlier ones and their buttons.
+    for (const region of [alert, status]) {
+      expect(region.getAttribute("aria-atomic")).toBe("false");
+      expect(region.getAttribute("aria-relevant")).toBe("additions");
+    }
   });
 
   it("puts errors in the alert region, de-duplicates them and dismisses on request", async () => {

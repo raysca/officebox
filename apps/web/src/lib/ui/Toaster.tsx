@@ -2,42 +2,50 @@ import { useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "./Button";
 import { cx } from "./cx";
-import { DIALOG_EXEMPT_ATTRIBUTE } from "./Dialog";
+import { dialogToastSlot } from "./dialog-stack";
 import { AlertIcon, CloseIcon } from "./icons";
 import { toastStore, type Toast } from "./toast-store";
 
 /**
  * Renders toasts from `toastStore`.
  *
- * - Two live regions are always in the page, so screen readers announce a toast when it's added:
- *   a polite `status` region for information and an `alert` region for errors. The container itself
- *   is a plain div, so live regions never nest.
- * - It's rendered in a portal directly under <body> and marked exempt from the Dialog's `inert`, so a
- *   toast raised while a dialog is open is still announced and can be dismissed with a pointer (or
- *   from the keyboard once the dialog closes; toasts stay until dismissed).
+ * - Two live regions are always mounted, so screen readers announce a toast when it's added: an
+ *   `alert` region for errors and a polite `status` region for information. The container is a plain
+ *   div, so live regions never nest. Both regions are `aria-atomic="false"` with
+ *   `aria-relevant="additions"`, so a new toast is read on its own, not with the earlier ones.
+ * - With no dialog open, toasts float at the bottom of the window (index.css keeps scroll-padding
+ *   clear of them). While a dialog is open they render inside the top dialog's toast slot instead:
+ *   below its content, in the layout rather than floating over its actions, inside its focus trap
+ *   (so the dismiss buttons are reachable with Tab) and outside the inert page.
  */
 export function Toaster() {
   const toasts = useSyncExternalStore(toastStore.subscribe, toastStore.getSnapshot, toastStore.getSnapshot);
+  const slot = useSyncExternalStore(dialogToastSlot.subscribe, dialogToastSlot.getSnapshot, () => null);
   const errors = toasts.filter((t) => t.tone === "error");
   const info = toasts.filter((t) => t.tone === "info");
+  const inDialog = slot !== null;
 
   return createPortal(
     <div
-      {...{ [DIALOG_EXEMPT_ATTRIBUTE]: "" }}
-      className="pointer-events-none fixed right-4 bottom-4 left-4 z-[60] flex flex-col items-end gap-2 sm:left-auto sm:w-96"
+      data-toaster={inDialog ? "dialog" : "window"}
+      className={
+        inDialog
+          ? "flex flex-col gap-2 border-t-0 has-[[data-toast]]:border-t has-[[data-toast]]:border-border has-[[data-toast]]:p-3"
+          : "pointer-events-none fixed right-4 bottom-4 left-4 z-40 flex flex-col items-end gap-2 sm:left-auto sm:w-96"
+      }
     >
-      <div role="alert" className="flex w-full flex-col gap-2">
+      <div role="alert" aria-atomic="false" aria-relevant="additions" className="flex w-full flex-col gap-2">
         {errors.map((toast) => (
           <ToastItem key={toast.id} toast={toast} />
         ))}
       </div>
-      <div role="status" className="flex w-full flex-col gap-2">
+      <div role="status" aria-atomic="false" aria-relevant="additions" className="flex w-full flex-col gap-2">
         {info.map((toast) => (
           <ToastItem key={toast.id} toast={toast} />
         ))}
       </div>
     </div>,
-    document.body,
+    slot ?? document.body,
   );
 }
 
@@ -55,7 +63,12 @@ function ToastItem({ toast }: { toast: Toast }) {
       <IconButton
         label="Dismiss notification"
         icon={<CloseIcon />}
-        onClick={() => toastStore.dismiss(toast.id)}
+        onClick={(event) => {
+          // Inside a dialog, keep focus in it once the button disappears.
+          const dialog = event.currentTarget.closest<HTMLElement>('[role="dialog"]');
+          toastStore.dismiss(toast.id);
+          dialog?.focus();
+        }}
         className="shrink-0"
       />
     </div>
