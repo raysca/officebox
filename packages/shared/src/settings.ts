@@ -1,0 +1,37 @@
+import { z } from "zod";
+import { emailStatusSchema } from "./email";
+
+/**
+ * Admin settings over the API (Platform §7, §15): `GET /api/admin/settings` lists every key with its
+ * value, default and who may change it; `PATCH /api/admin/settings` changes one key. Values are
+ * validated against the key's own schema on the Worker (core `SETTINGS` registry), so the body here
+ * carries `unknown`.
+ */
+
+export const settingChangerSchema = z.enum(["admin", "owner"]);
+
+export const settingEntrySchema = z.object({
+  key: z.string(),
+  value: z.unknown(),
+  isDefault: z.boolean(),
+  changeableBy: settingChangerSchema,
+  /** Whether the signed-in person may change it (owner-only keys are aria-disabled for admins). */
+  canChange: z.boolean(),
+});
+export type SettingEntryView = z.infer<typeof settingEntrySchema>;
+
+export const settingsListSchema = z.object({
+  settings: z.array(settingEntrySchema),
+  /** Whether email works, and what the chosen driver still needs (secret names only). */
+  email: emailStatusSchema,
+});
+export type SettingsList = z.infer<typeof settingsListSchema>;
+
+export const SETTING_KEY_REGEX = /^[a-z][a-z0-9_]*$/;
+
+/** `PATCH /api/admin/settings`: one key at a time, each with its own audit event. */
+export const patchSettingBodySchema = z.strictObject({
+  key: z.string().regex(SETTING_KEY_REGEX).max(64),
+  value: z.unknown(),
+});
+export type PatchSettingBody = z.infer<typeof patchSettingBodySchema>;

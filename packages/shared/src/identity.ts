@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ulidSchema } from "./ids";
-import { FRESH_AUTH_METHODS, workspaceRoleSchema } from "./permissions";
+import { FRESH_AUTH_METHODS, INVITABLE_WORKSPACE_ROLES, workspaceRoleSchema } from "./permissions";
 
 /**
  * Identity & Access schemas for M1a (Identity §4.1, §4.4, §4.5, §4.6a, §6): first-run setup with a
@@ -154,6 +154,9 @@ export const securityNoticeDetailsSchema = z.object({
   createdVia: passkeyCreatedViaSchema.optional(),
   /** On an owner's copy of someone else's notice (a clone detected): whose account. */
   subjectName: z.string().optional(),
+  /** A new-device magic-link sign-in: the browser and system, and the approximate place (Identity §4.4). */
+  deviceLabel: z.string().nullable().optional(),
+  approxLocation: z.string().nullable().optional(),
 });
 export type SecurityNoticeDetails = z.infer<typeof securityNoticeDetailsSchema>;
 
@@ -271,3 +274,142 @@ export type ReauthBody = z.infer<typeof reauthBodySchema>;
 
 export const reauthResultSchema = z.object({ freshAuthAt: z.number().int() });
 export type ReauthResult = z.infer<typeof reauthResultSchema>;
+
+// ---- Invitations (Identity §4.2, §4.3, §6) ----------------------------------------------------
+
+/** Invitations are single-use and expire after 7 days (Identity §2, Platform §10). */
+export const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const invitableRoleSchema = z.enum(INVITABLE_WORKSPACE_ROLES);
+export type InvitableRole = z.infer<typeof invitableRoleSchema>;
+
+/**
+ * `POST /api/admin/invitations`. The link is always returned for copying; `sendEmail` also emails it
+ * when email is configured (Identity §4.2). The email is bound to the link and can't be changed.
+ */
+export const createInvitationBodySchema = z.strictObject({
+  email: emailSchema,
+  role: invitableRoleSchema,
+  sendEmail: z.boolean(),
+});
+export type CreateInvitationBody = z.infer<typeof createInvitationBodySchema>;
+
+/**
+ * What happened to the email part of an invitation (the copy link always works). `limited`: the
+ * workspace reached today's invitation-email limit (Platform §8, 200 per UTC day); copy the link.
+ */
+export const invitationEmailOutcomeSchema = z.enum(["queued", "not_requested", "not_configured", "limited"]);
+export type InvitationEmailOutcome = z.infer<typeof invitationEmailOutcomeSchema>;
+
+/** `expired` is shown until it's revoked; `accepting` means accepted but the account isn't finished. */
+export const invitationStatusSchema = z.enum(["pending", "expired", "accepting"]);
+export type InvitationStatus = z.infer<typeof invitationStatusSchema>;
+
+export const invitationSummarySchema = z.object({
+  id: ulidSchema,
+  email: z.string(),
+  role: invitableRoleSchema,
+  invitedBy: z.object({ id: z.string(), displayName: z.string() }).nullable(),
+  createdAt: z.number().int(),
+  expiresAt: z.number().int(),
+  lastSentAt: z.number().int().nullable(),
+  status: invitationStatusSchema,
+});
+export type InvitationSummary = z.infer<typeof invitationSummarySchema>;
+
+export const invitationListSchema = z.object({ invitations: z.array(invitationSummarySchema) });
+export type InvitationList = z.infer<typeof invitationListSchema>;
+
+/** The copy link, built from the canonical origin with the token in the fragment (Identity §2). */
+export const invitationLinkSchema = z.object({ link: z.string() });
+export type InvitationLink = z.infer<typeof invitationLinkSchema>;
+
+export const createInvitationResultSchema = z.object({
+  invitation: invitationSummarySchema,
+  link: z.string(),
+  email: invitationEmailOutcomeSchema,
+});
+export type CreateInvitationResult = z.infer<typeof createInvitationResultSchema>;
+
+export const resendInvitationResultSchema = z.object({ email: invitationEmailOutcomeSchema });
+export type ResendInvitationResult = z.infer<typeof resendInvitationResultSchema>;
+
+/** A link token as it travels in a JSON body: base64url of 32 random bytes (43 characters). */
+export const linkTokenSchema = z
+  .string()
+  .min(16)
+  .max(128)
+  .regex(/^[A-Za-z0-9_-]+$/);
+
+/** `POST /api/invitations/lookup`. */
+export const invitationLookupBodySchema = z.strictObject({ token: linkTokenSchema });
+export type InvitationLookupBody = z.infer<typeof invitationLookupBodySchema>;
+
+export const invitationLookupSchema = z.object({
+  /** Shown prominently, so nobody accepts an invitation meant for someone else (Identity §4.3). */
+  email: z.string(),
+  role: invitableRoleSchema,
+  workspaceName: z.string(),
+  /** `resume`: the account exists without a passkey; accepting again only registers the passkey. */
+  state: z.enum(["new", "resume"]),
+});
+export type InvitationLookup = z.infer<typeof invitationLookupSchema>;
+
+/** `POST /api/invitations/accept`. Name and handle are ignored when the invitation is being resumed. */
+export const acceptInvitationBodySchema = z.strictObject({
+  token: linkTokenSchema,
+  name: displayNameSchema,
+  handle: handleSchema,
+});
+export type AcceptInvitationBody = z.infer<typeof acceptInvitationBodySchema>;
+
+/** The answer to an accept: an enrolment ticket cookie is set; register a passkey next. */
+export const acceptInvitationResultSchema = z.object({
+  email: z.string(),
+  enrolmentExpiresInSeconds: z.number().int().positive(),
+  resumed: z.boolean(),
+});
+export type AcceptInvitationResult = z.infer<typeof acceptInvitationResultSchema>;
+
+// ---- Magic links (Identity §4.4) --------------------------------------------------------------
+
+/** Magic links are single-use and valid for 15 minutes (`expiresIn: 900`). */
+export const MAGIC_LINK_TTL_SECONDS = 900;
+
+/**
+ * `POST /api/auth/sign-in/magic-link` (better-auth's request route behind our middleware). Only the
+ * email is accepted: callback URLs are refused, because the emailed link is always our own page.
+ */
+export const magicLinkRequestBodySchema = z.strictObject({ email: emailSchema });
+export type MagicLinkRequestBody = z.infer<typeof magicLinkRequestBodySchema>;
+
+/** `POST /api/sign-in/link`: the confirmation page's POST. */
+export const magicLinkConfirmBodySchema = z.strictObject({ token: linkTokenSchema });
+export type MagicLinkConfirmBody = z.infer<typeof magicLinkConfirmBodySchema>;
+
+export const magicLinkConfirmResultSchema = z.object({ signedIn: z.literal(true) });
+export type MagicLinkConfirmResult = z.infer<typeof magicLinkConfirmResultSchema>;
+
+// ---- Allowed invite domains (Identity §4.2, Platform §7) --------------------------------------
+
+/** A bare domain such as `example.com`, lower-cased. */
+export const inviteDomainSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(253)
+  .regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/, {
+    message: "A domain such as example.com.",
+  });
+
+/** `allowed_invite_domains`: empty means any domain (the default, off). */
+export const allowedInviteDomainsSchema = z.array(inviteDomainSchema).max(50);
+
+/** Whether an email's domain is allowed by the setting (an empty list allows every domain). */
+export function isInviteDomainAllowed(email: string, allowed: readonly string[]): boolean {
+  if (allowed.length === 0) return true;
+  const at = email.lastIndexOf("@");
+  if (at < 0) return false;
+  const domain = normaliseEmail(email.slice(at + 1));
+  return allowed.includes(domain);
+}
