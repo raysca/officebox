@@ -26,12 +26,20 @@ function storage(): Storage | null {
   }
 }
 
+/**
+ * The choice made in this page when storage is unavailable (blocked site data, some private modes),
+ * so it survives components unmounting and remounting until the page reloads.
+ */
+let memoryPreference: ThemePreference | null = null;
+
 export function readThemePreference(): ThemePreference {
   try {
-    const value = storage()?.getItem(THEME_STORAGE_KEY);
+    const store = storage();
+    if (!store) return memoryPreference ?? "system";
+    const value = store.getItem(THEME_STORAGE_KEY);
     return isThemePreference(value) ? value : "system";
   } catch {
-    return "system";
+    return memoryPreference ?? "system";
   }
 }
 
@@ -42,10 +50,14 @@ export function applyThemePreference(preference: ThemePreference, root: HTMLElem
 
 function storeThemePreference(preference: ThemePreference) {
   try {
-    if (preference === "system") storage()?.removeItem(THEME_STORAGE_KEY);
-    else storage()?.setItem(THEME_STORAGE_KEY, preference);
+    const store = storage();
+    if (!store) throw new Error("no storage");
+    if (preference === "system") store.removeItem(THEME_STORAGE_KEY);
+    else store.setItem(THEME_STORAGE_KEY, preference);
+    memoryPreference = null;
   } catch {
     // Storage unavailable: the choice lasts until the page is reloaded.
+    memoryPreference = preference;
   }
 }
 
@@ -78,7 +90,10 @@ export const themeStore = {
       }
     };
   },
+  // The app is a client-only SPA: getSnapshot also serves as the server snapshot and may touch the
+  // DOM. The guard keeps it harmless if it's ever rendered without a document (SSR, a worker).
   getSnapshot: (): ThemePreference => {
+    if (typeof document === "undefined") return "system";
     if (current === null) {
       current = readThemePreference();
       applyThemePreference(current);

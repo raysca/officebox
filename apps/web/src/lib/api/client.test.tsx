@@ -140,6 +140,8 @@ describe("Retry-After", () => {
     expect(parseRetryAfter("")).toBeUndefined();
     expect(parseRetryAfter("120")).toBe(120);
     expect(parseRetryAfter("soon")).toBeUndefined();
+    // Not delay-seconds and not an HTTP-date; Date.parse would read these as dates in 2001.
+    for (const odd of ["-5", "1.5", "1e3", "2026-11-15"]) expect(parseRetryAfter(odd)).toBeUndefined();
     const now = Date.parse("2026-11-15T10:00:00Z");
     expect(parseRetryAfter("Sun, 15 Nov 2026 10:00:30 GMT", now)).toBe(30);
     expect(parseRetryAfter("Sun, 15 Nov 2026 09:00:00 GMT", now)).toBe(0);
@@ -229,16 +231,30 @@ describe("query retries", () => {
     expect(shouldRetry(0, new Error("bug"))).toBe(false);
   });
 
+  it("doesn't retry when Retry-After is longer than the cap, so the error shows instead", () => {
+    const wait = (retryAfterSeconds: number) => e({ kind: "http", status: 429, retryAfterSeconds });
+    expect(shouldRetry(0, wait(MAX_RETRY_DELAY_MS / 1000))).toBe(true);
+    expect(shouldRetry(0, wait(MAX_RETRY_DELAY_MS / 1000 + 1))).toBe(false);
+    const api503 = e({
+      kind: "api",
+      status: 503,
+      error: { code: "unavailable", message: "x" },
+      retryAfterSeconds: 3600,
+    });
+    expect(shouldRetry(0, api503)).toBe(false);
+  });
+
   it("stops after two retries", () => {
     expect(shouldRetry(1, e({ kind: "network" }))).toBe(true);
     expect(shouldRetry(2, e({ kind: "network" }))).toBe(false);
   });
 
+  // TanStack passes the failures before the current one: 0 for the first failure, 1 for the second.
   it("waits for Retry-After, capped, and otherwise backs off exponentially", () => {
     expect(retryDelay(0, e({ kind: "http", status: 429, retryAfterSeconds: 5 }))).toBe(5_000);
     expect(retryDelay(0, e({ kind: "http", status: 429, retryAfterSeconds: 3600 }))).toBe(MAX_RETRY_DELAY_MS);
-    expect(retryDelay(0, e({ kind: "network" }))).toBe(1_000);
-    expect(retryDelay(2, e({ kind: "network" }))).toBe(4_000);
+    expect(retryDelay(0, e({ kind: "network" }))).toBe(1_000); // after the first failure
+    expect(retryDelay(1, e({ kind: "network" }))).toBe(2_000); // after the second
     expect(retryDelay(10, new Error("x"))).toBe(10_000);
   });
 

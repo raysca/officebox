@@ -12,11 +12,20 @@ export const MAX_RETRY_DELAY_MS = 30_000;
  * Whether a failed query is worth retrying: network errors, timeouts, 5xx, 408 (request timeout) and
  * 429 (rate limited, after its Retry-After) are; other 4xx responses (the request itself is wrong,
  * or not allowed), invalid responses and cancellations are not. Mutations never retry.
+ *
+ * A Retry-After longer than MAX_RETRY_DELAY_MS isn't retried at all: the error shows inline (or as a
+ * toast) rather than retrying sooner than the server asked.
+ *
+ * TanStack Query (query-core 5.107 retryer.js) calls `retry` and `retryDelay` with the number of
+ * failures before the current one: 0 on the first failure, 1 on the second.
  */
 export function shouldRetry(failureCount: number, error: unknown): boolean {
   if (failureCount >= MAX_QUERY_RETRIES) return false;
   if (!(error instanceof ApiRequestError)) return false;
   const { detail } = error;
+  if ("retryAfterSeconds" in detail && detail.retryAfterSeconds !== undefined) {
+    if (detail.retryAfterSeconds * 1000 > MAX_RETRY_DELAY_MS) return false;
+  }
   switch (detail.kind) {
     case "network":
     case "timeout":
@@ -30,13 +39,16 @@ export function shouldRetry(failureCount: number, error: unknown): boolean {
   }
 }
 
-/** Waits for the server's Retry-After when it gave one, else backs off exponentially; capped. */
-export function retryDelay(attempt: number, error: unknown): number {
+/**
+ * Waits for the server's Retry-After when it gave one, else backs off exponentially: 1 s after the
+ * first failure (failureCount 0), 2 s after the second, at most 10 s.
+ */
+export function retryDelay(failureCount: number, error: unknown): number {
   if (error instanceof ApiRequestError && "retryAfterSeconds" in error.detail) {
     const seconds = error.detail.retryAfterSeconds;
     if (seconds !== undefined) return Math.min(seconds * 1000, MAX_RETRY_DELAY_MS);
   }
-  return Math.min(1000 * 2 ** attempt, 10_000);
+  return Math.min(1000 * 2 ** failureCount, 10_000);
 }
 
 /**

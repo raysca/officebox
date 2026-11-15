@@ -1,6 +1,6 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderApp } from "../test/render-app";
 import { THEME_STORAGE_KEY, useThemePreference } from "./theme";
 
@@ -76,6 +76,25 @@ describe("theme toggle", () => {
     });
     expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Theme" }).value).toBe("system");
     expect(root.hasAttribute("data-theme")).toBe(false);
+  });
+
+  it("remembers the choice for this page when storage is blocked", async () => {
+    const user = userEvent.setup();
+    const blocked = vi.spyOn(window, "localStorage", "get").mockImplementation(() => {
+      throw new DOMException("Blocked", "SecurityError");
+    });
+    try {
+      const first = await renderApp("/");
+      await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "dark");
+      expect(root.getAttribute("data-theme")).toBe("dark");
+      // Every consumer unmounts, then the shell mounts again.
+      first.unmount();
+      await renderApp("/");
+      expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Theme" }).value).toBe("dark");
+      await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "system");
+    } finally {
+      blocked.mockRestore();
+    }
   });
 
   it("keeps every consumer in sync", async () => {

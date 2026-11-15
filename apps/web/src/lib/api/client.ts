@@ -117,11 +117,20 @@ export async function apiRequest<S extends z.ZodType>(
   }
 }
 
-/** Seconds from a Retry-After header: either delay-seconds or an HTTP date. */
+/** RFC 9110 IMF-fixdate, the only HTTP-date form senders may generate: "Sun, 06 Nov 1994 08:49:37 GMT". */
+const IMF_FIXDATE =
+  /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
+/**
+ * Seconds from a Retry-After header: delay-seconds (digits only) or an HTTP date. Anything else
+ * ("-5", "1.5", "1e3", which Date.parse would happily read as a date) is undefined, so the normal
+ * backoff applies.
+ */
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
-  if (value === null || value.trim() === "") return undefined;
-  if (/^\d+$/.test(value.trim())) return Number(value.trim());
-  const date = Date.parse(value);
+  const trimmed = value?.trim() ?? "";
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  if (!IMF_FIXDATE.test(trimmed)) return undefined;
+  const date = Date.parse(trimmed);
   if (Number.isNaN(date)) return undefined;
   return Math.max(0, Math.ceil((date - now) / 1000));
 }
