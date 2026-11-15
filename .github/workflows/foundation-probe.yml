@@ -1,0 +1,91 @@
+name: Foundation probe
+
+# Runs the M0d production probe (spikes/foundation/probe, README "Production probe") against the
+# Cloudflare account in the "production" environment: deploy → check → destroy, in one run.
+# Manual only: Actions → Foundation probe → Run workflow (on main).
+#
+# The probe creates a Worker and a queue named officebox-foundation-probe, refuses to run if either
+# already exists, and destroy deletes only what that run created (it is always attempted, even after
+# a failure). The report redacts the account's workers.dev subdomain and is written to the job
+# summary and uploaded as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch holding spikes/foundation (main once M0d is merged)
+        required: true
+        default: feat/m0d-foundation-spike
+        type: choice
+        options:
+          - feat/m0d-foundation-spike
+          - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foundation-probe
+  cancel-in-progress: false
+
+env:
+  WRANGLER_SEND_METRICS: "false"
+
+jobs:
+  probe:
+    name: Deploy, check and destroy the probe
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+    defaults:
+      run:
+        working-directory: spikes/foundation
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install the spike's dependencies
+        run: npm ci --legacy-peer-deps
+
+      # The secrets are exposed only to the steps that call Cloudflare.
+      - name: Deploy the probe
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy:probe
+
+      - name: Check
+        run: |
+          set -o pipefail
+          npm run check:probe 2>&1 | tee probe/probe-report.md
+
+      - name: Destroy the probe
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run destroy:probe
+
+      - name: Add the report to the job summary
+        if: always()
+        run: |
+          if [ -f probe/probe-report.md ]; then cat probe/probe-report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: foundation-probe-report
+          path: |
+            spikes/foundation/probe/probe-report.md
+            spikes/foundation/probe/probe-report.json
+          if-no-files-found: ignore
+          retention-days: 30
