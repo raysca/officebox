@@ -145,8 +145,11 @@ export function Dialog({
           <IconButton label={closeLabel} icon={<CloseIcon />} onClick={onClose} />
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
-        {/* The Toaster renders here while this is the top dialog (in the layout, not floating). */}
-        <div ref={toastSlotRef} data-toast-slot="" className="shrink-0 empty:hidden" />
+        {/*
+          The Toaster's root moves in here while this is the top dialog (in the layout, not floating).
+          It takes no space until a toast appears.
+        */}
+        <div ref={toastSlotRef} data-toast-slot="" className="shrink-0" />
       </div>
     </div>,
     document.body,

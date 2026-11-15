@@ -179,4 +179,76 @@ describe("Dialog", () => {
     expect(outside.hasAttribute("inert")).toBe(true);
     outside.remove();
   });
+  it("keeps the same live regions and toasts when a dialog opens and closes", async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <Toaster />
+        <Nested />
+      </>,
+    );
+    act(() => {
+      toastStore.show("First problem.", "error");
+    });
+    const alert = screen.getByRole("alert");
+    const status = screen.getByRole("status");
+    const toast = alert.querySelector("[data-toast]");
+
+    await user.click(screen.getByRole("button", { name: "Open outer" }));
+    // Moved into the dialog, not re-created: screen readers have nothing new to announce.
+    expect(screen.getByRole("dialog", { name: "Outer" }).contains(alert)).toBe(true);
+    expect(screen.getByRole("alert")).toBe(alert);
+    expect(screen.getByRole("status")).toBe(status);
+    expect(alert.querySelector("[data-toast]")).toBe(toast);
+
+    // A toast raised while the dialog is open lands in the same region.
+    act(() => {
+      toastStore.show("Second problem.", "error");
+    });
+    expect(alert.querySelectorAll("[data-toast]")).toHaveLength(2);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("alert")).toBe(alert);
+    expect(alert.querySelector("[data-toast]")).toBe(toast);
+    expect(alert.querySelectorAll("[data-toast]")).toHaveLength(2);
+    expect(alert.closest("[inert]")).toBeNull();
+    expect(alert.closest("[data-toaster]")?.getAttribute("data-toaster")).toBe("window");
+  });
+
+  it("moves focus to the next toast after a dismissal, then to the dialog", async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <Toaster />
+        <Nested />
+      </>,
+    );
+    await user.click(screen.getByRole("button", { name: "Open outer" }));
+    act(() => {
+      toastStore.show("One.", "error");
+      toastStore.show("Two.", "error");
+    });
+    const dialog = screen.getByRole("dialog", { name: "Outer" });
+    const [first, second] = within(dialog).getAllByRole("button", { name: "Dismiss notification" });
+    first!.focus();
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(second);
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it("makes elements added to the page while a dialog is open inert too", async () => {
+    const user = userEvent.setup();
+    render(<Nested />);
+    await user.click(screen.getByRole("button", { name: "Open outer" }));
+    const late = document.createElement("div");
+    document.body.appendChild(late);
+    await act(() => Promise.resolve()); // MutationObserver callbacks run as microtasks
+    expect(late.hasAttribute("inert")).toBe(true);
+
+    await user.keyboard("{Escape}");
+    expect(late.hasAttribute("inert")).toBe(false);
+    late.remove();
+  });
 });

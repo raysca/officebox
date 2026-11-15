@@ -77,4 +77,23 @@ describe("toasts", () => {
     const texts = Array.from(screen.getByRole("status").querySelectorAll("[data-toast] p")).map((p) => p.textContent);
     expect(texts).toEqual(["Message 2", "Message 3", "Message 4"]);
   });
+
+  it("moves focus to the next toast after a dismissal, then to main", async () => {
+    const user = userEvent.setup();
+    render(
+      <main tabIndex={-1}>
+        <Toaster />
+      </main>,
+    );
+    act(() => {
+      toastStore.show("One.", "info");
+      toastStore.show("Two.", "info");
+    });
+    const [first, second] = screen.getAllByRole("button", { name: "Dismiss notification" });
+    first!.focus();
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(second);
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+  });
 });
