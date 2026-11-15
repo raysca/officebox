@@ -6,12 +6,13 @@ import {
   healthResponseSchema,
 } from "@officebox/shared";
 import { expect, test } from "@playwright/test";
+import { OWNER } from "./fixtures";
 
 test("the app shell loads", async ({ page }) => {
   await page.goto("/");
   await expect(page).toHaveTitle("Home · Officebox");
   await expect(page.getByRole("heading", { level: 1, name: "Home" })).toBeVisible();
-  await expect(page.getByRole("banner")).toContainText("Officebox");
+  await expect(page.getByRole("banner")).toContainText(OWNER.workspace);
 });
 
 test("client-side routes fall back to the web app", async ({ page }) => {
