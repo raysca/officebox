@@ -1,10 +1,10 @@
 # Spec: Documents, Whiteboards & Files
 
 **Status:** Draft for review
-**Revision:** Revised after independent review, and again after the second review (14 Nov 2026)
+**Revision:** Revised after independent review, and again after the second review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: idempotency key on create, `expectedVersion` on update, call notes in Activity, derived text and vectors in Trash and purge)
 **Feature name:** Documents (marketing name to be decided later)
 **Milestone:** M6 ([PLAN](../PLAN.md)), in slices M6a–M6c (§12). Chat attachments ship with Chat (M3b) and are message-owned, not drive files.
-**Related:** PRD §5.5, §5.7, §10.1; TDD §2.4, §4, §8.3; [Permissions](permissions.md), [Notifications](notifications.md), [Platform](platform.md), [Chat](chat.md), [Calls](calls.md) (present mode)
+**Related:** PRD §5.5, §5.7, §10.1; TDD §2.4, §4, §8.3; [Permissions](permissions.md), [Notifications](notifications.md), [Platform](platform.md), [Chat](chat.md), [Calls](calls.md) (present mode), [Assistant](assistant.md) (§5.1 writes, §9 derived text, §12.3 call notes)
 
 Decisions marked **(default)** were not discussed; change them on review.
 
@@ -121,6 +121,7 @@ Collaborative documents and whiteboards, and the files around them, organised in
 
 - Restoring returns an item to its original folder if it still exists, otherwise to the drive root.
 - Deleting a drive puts the whole drive in Trash. Restoring the drive restores items deleted with it; items deleted before the drive keep their own Trash timers.
+- **Assistant retrieval** ([Assistant §9](assistant.md)): moving an item to Trash removes its search text, derived file text and vectors from retrieval; restoring re-indexes them; purging deletes them. Purging a document also deletes its call notes, transcripts and their vectors (platform §4), and fans out to `assistant-purge` ([Assistant §4.4](assistant.md)).
 
 ## 4. Documents
 
@@ -241,6 +242,7 @@ There are three kinds of file (platform §14):
   - "Upload new version" keeps previous versions, listed with uploader and date. Members can **download or restore** an older one; restoring makes it the new latest version.
   - Links and embeds always point to the **latest** version.
   - Old versions count towards storage and are purged with the file (platform §5).
+- **Derived text** (M9a, [Assistant §9](assistant.md)): while the assistant is enabled, PDF and Office files are converted to text per file version (`file_derived_text`) for search and the assistant; images and audio are read on demand. Derived text follows the file's permissions, Trash, purge and retention, and is deleted when its version is dropped or purged.
 - **Details panel:** name, type, size, owner, location, created and modified, versions, sharing and activity (§6.1).
 
 ### 6.1 Activity
@@ -250,13 +252,14 @@ Every document, whiteboard and file has an **Activity** section in its details p
 - **comments** (counts, with links to threads)
 - **sharing changes** (who granted what to whom)
 - **versions** (named versions, restores, new file versions)
-- **calls held** on the document: start time, duration and participants (Calls §3, §7).
+- **calls held** on the document: start time, duration and participants (Calls §3, §7)
+- **call notes** (M9c) from document calls: the summary, decisions and action items, with a link to the transcript ([Assistant §12.3](assistant.md)).
 
-Activity is visible to anyone who can view the item. It is kept for the life of the item **(default)**.
+Activity is visible to anyone who can view the item; call notes and transcripts likewise follow the document's access. It is kept for the life of the item **(default)**.
 
 ## 7. Search
 
-- FTS5 over document titles and content, whiteboard titles and text, and drive file names (TDD §2.4). Permission-filtered, including inheritance through folders and drives (permissions §5).
+- FTS5 over document titles and content, whiteboard titles and text, and drive file names (TDD §2.4), plus derived file text from M9a while the assistant is enabled (§6). Permission-filtered, including inheritance through folders and drives (permissions §5).
 - **Filters:**
   - type (document, whiteboard, file)
   - drive or folder
@@ -292,6 +295,9 @@ ALTER TABLE folders ADD COLUMN channel_id TEXT REFERENCES channels(id);   -- cha
 ALTER TABLE documents ADD COLUMN folder_id TEXT REFERENCES folders(id);
 ALTER TABLE documents ADD COLUMN drive_id TEXT REFERENCES drives(id);
 ALTER TABLE documents ADD COLUMN created_by TEXT REFERENCES users(id);     -- for the channel-deletion move
+ALTER TABLE documents ADD COLUMN version INTEGER NOT NULL DEFAULT 0;       -- metadata version (title, location, access); compared with expectedVersion (§10)
+ALTER TABLE documents ADD COLUMN idempotency_key TEXT;                     -- create idempotency key (§10); cleared after 24 hours (default)
+CREATE UNIQUE INDEX documents_idempotency ON documents(created_by, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- files: three kinds, kept apart (platform §14)
 --   drive files:     folder_id + drive_id set, parent_type NULL, versioned
@@ -353,7 +359,7 @@ CREATE TABLE comments (
 CREATE TABLE item_activity (                         -- details-panel activity (§6.1)
   id TEXT PRIMARY KEY,
   object_type TEXT NOT NULL, object_id TEXT NOT NULL,
-  kind TEXT NOT NULL,                                -- 'edit' | 'comment' | 'share' | 'version' | 'call'; Zod-validated, CHECK omitted
+  kind TEXT NOT NULL,                                -- 'edit' | 'comment' | 'share' | 'version' | 'call' | 'call_notes'; Zod-validated, CHECK omitted
   actor_id TEXT REFERENCES users(id),
   day TEXT,                                          -- YYYY-MM-DD, for grouping edits
   detail TEXT,                                       -- JSON
@@ -365,6 +371,7 @@ CREATE INDEX item_activity_object ON item_activity(object_type, object_id, creat
 - `resource_grants` takes `resource_type` values `drive` and `folder`, and the role `manager`, as defined in permissions §3 and platform §14. These are part of the baseline value lists (validated with Zod, not CHECK constraints; platform §14), not added later.
 - The permission engine walks drive → folders → item and **unions** the grants (§3.4).
 - **Embeds** are editor nodes holding `{ type, id }`. They're rendered client-side through permission-checked API calls; no content is copied into the document.
+- **Call notes** for document calls live in `call_notes` (`context_type = 'document'`) and `call_transcript_segments` ([Assistant §14.2](assistant.md)); Activity links to them. **Derived file text** lives in `file_derived_text` (same section).
 - Retention and purge of every table above follow platform §5. Export coverage (drives, folders, file versions, comments, activity) follows platform §6.
 
 ## 10. API (summary)
@@ -375,7 +382,7 @@ CREATE INDEX item_activity_object ON item_activity(object_type, object_id, creat
 | `PUT /drives/:id/grants` | Drive managers and access |
 | `GET /folders/:id` · `POST /folders` · `PATCH /folders/:id` · `DELETE /folders/:id` | Folder contents (paged), create, rename, delete |
 | `GET /items?view=recent\|shared\|starred\|trash` | Recent, shared with me, starred, Trash |
-| `POST /documents` · `GET /documents/:id` · `PATCH /documents/:id` · `DELETE /documents/:id` | Documents and whiteboards (type in body): create, metadata, rename, delete |
+| `POST /documents` · `GET /documents/:id` · `PATCH /documents/:id` · `DELETE /documents/:id` | Documents and whiteboards (type in body): create, metadata, rename, delete. Create accepts `idempotencyKey`; update accepts `expectedVersion` (below). |
 | `POST /items/:type/:id/move` · `POST /items/:type/:id/copy` | Move (returns the access diff for the warning, then confirm) and duplicate |
 | `POST /items/:type/:id/restore` | Restore from Trash |
 | `POST /files/uploads` · `PUT /files/uploads/:id/parts/:n` · `POST /files/uploads/:id/complete` | Multipart upload into a folder |
@@ -395,6 +402,10 @@ CREATE INDEX item_activity_object ON item_activity(object_type, object_id, creat
 | `PUT /stars/:type/:id` · `DELETE /stars/:type/:id` | Star and unstar |
 | `GET /items/:type/:id/activity` | Activity (§6.1) |
 | `GET /search?q=&type=&drive=&owner=&modified=` | Search (§7) |
+
+**Idempotency and versions** ([Assistant §5.1](assistant.md)):
+- `POST /documents` accepts an optional `idempotencyKey`. It's stored with the created document for **24 hours (default)**; a repeat with the same key returns the existing document instead of creating another.
+- `PATCH /documents/:id` accepts an optional `expectedVersion`. The change is applied only if `documents.version` still matches, as an atomic compare-and-set; otherwise it returns a typed `conflict` result and changes nothing. Every metadata change increments `version`.
 
 Realtime: document content goes through the DocRoom/BoardRoom sockets (TDD §4). Comments, sharing changes, tree changes and embed updates arrive as hub `activity` (platform §12).
 
@@ -440,7 +451,10 @@ Realtime: document content goes through the DocRoom/BoardRoom sockets (TDD §4).
 - **Trash:**
   - a deleted item restores to its original folder within 30 days and is purged after
   - deleting a shared drive and restoring it within 30 days brings back its contents
-  - only the item's owner, the person who deleted it, the drive's managers and admins can restore; anyone else gets 403.
+  - only the item's owner, the person who deleted it, the drive's managers and admins can restore; anyone else gets 403
+  - with the assistant enabled, a trashed file's derived text and vectors are absent from retrieval, restoring re-indexes them, and purging deletes them ([Assistant §16](assistant.md)).
+- **Idempotency and versions:** repeating `POST /documents` with the same idempotency key within 24 hours returns the same document; a `PATCH` with a stale `expectedVersion` returns `conflict` and changes nothing.
+- **Call notes (M9c):** notes from a document call appear in its Activity, visible to anyone who can open the document, and are deleted with it.
 - **Exports and import:**
   - Markdown export of a document with two images produces a zip with the `.md` file and both images, linked relatively
   - PDF export (print stylesheet) produces one page per printed A4 or Letter page, with no app chrome, and every heading and table visible

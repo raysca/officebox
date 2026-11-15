@@ -1,9 +1,18 @@
 # Officebox — Technical Design Document (TDD)
 
 **Status:** Draft for engineering review  
-**Version:** 1.5  
-**Date:** 14 November 2026  
+**Version:** 1.6  
+**Date:** 15 November 2026  
 **Companion to:** [Officebox PRD v1.5](PRD.md) and the feature and cross-cutting specs in [`specs/`](specs/)  
+**Changes in 1.6:** brought in line with the [Assistant spec](specs/assistant.md) (§17 there):
+- assistant tables, reserved `system` and `assistant` user rows, purge jobs and the `assistant-purge` fan-out (§2.1, §2.3)
+- ReminderScheduler kinds, the room-registry kind `assistant` and the `/ws/assistant` socket (§2.2, §3.1, §3.5)
+- derived file text and call notes in `search_index` and Vectorize, with ingestion gated on `assistant_enabled` (§2.4, §5.2, §5.3)
+- assistant messages and nudge opt-ins in the projection consumer (§3.3)
+- call notes, transcription and captions in the HuddleRoom (§3.6)
+- the assistant design: Assistant DO, memory search, source mirror and purge, queue consumers, confirmation, `ModelProvider`, AI Gateway controls and voice (§5.5–§5.11); the audit split (§5.4)
+- bindings and checklist (§6.1), export (§7.5), jobs and timers (§7.8), usage (§7.9), security (§8.2, §8.4), open questions (§10) and cost (Appendix B).
+
 **Changes in 1.5:** second independent review applied:
 - core DDL fixed (`group_dm`, inbox records, availability, refresh grace, admin-reset flag, three file kinds); new tables listed (§2.1)
 - channel config RPC, `call_chat`, Chat §4.6 system kinds, durable UserHub state and the ReminderScheduler outbox (§2.2)
@@ -94,6 +103,9 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 │                     │ │                    │ │                               │
 │  • HuddleRoom DO    │ │                    │ │                               │
 │    (per huddle)     │ │                    │ │                               │
+│                     │ │                    │ │                               │
+│  • Assistant DO     │ │                    │ │                               │
+│    (per member)     │ │                    │ │                               │
 └─────────────────────┘ └────────────────────┘ └───────────────────────────────┘
             │                     │                          │
             └─────────────────────┴──────────────────────────┘
@@ -120,10 +132,11 @@ Officebox is a single Cloudflare Worker application (with Durable Objects) plus 
 | D1 | Identity, roles, groups, permissions, object metadata, searchable message copy, inbox, audit | D1 |
 | R2 | Files, attachments, exports | R2 |
 | Vectorize | Embeddings for permission-aware retrieval | Vectorize |
-| HuddleRoom DO | Huddle roster, track registry, single-presenter control, host actions | Durable Object |
+| HuddleRoom DO | Huddle roster, track registry, single-presenter control, host actions; call notes and captions (M9c) | Durable Object |
+| Assistant DO | Per-member assistant: conversations, private memory, pending actions, live voice sessions (§5.5) | Durable Object + SQLite |
 | Realtime SFU | Audio, video and screen-share media; TURN | Cloudflare Realtime |
-| AI Gateway | BYOK provider proxy, fallback, rate limiting | AI Gateway |
-| Queues | Message and search projection to D1, purge jobs, email, AI indexing (each with a dead-letter queue) | Queues |
+| AI Gateway | BYOK provider proxy, fallback, rate limiting; logging and caching turned off for assistant calls (§5.10) | AI Gateway |
+| Queues | Message and search projection to D1, purge jobs, email, AI indexing, assistant mentions, nudges, proactive runs and purges (each with a dead-letter queue) | Queues |
 | Cron Triggers | Daily purge, retention, reconciliation and release check | Workers Cron Triggers |
 
 ### 1.2 Why Durable Objects for both chat and Yjs
@@ -148,6 +161,9 @@ Every kind of data has exactly one source of truth. Copies are derived from it, 
 | Identity, roles, groups, channel membership, grants, object metadata, inbox, audit | D1 | — |
 | File bytes | R2 | — (metadata in D1 `files`) |
 | Presence, typing, awareness | DO memory and WebSocket attachments | — (never persisted) |
+| Assistant conversations, memory and pending actions | Assistant DO SQLite, one per member (§5.5) | D1 `assistant_source_refs`: object references only, no content (§5.7) |
+| Call transcripts and notes | D1 `call_transcript_segments`, `call_notes` (the HuddleRoom holds segments only until their D1 write succeeds, §3.6) | Vectorize; `search_index` |
+| Derived file text | — (derived from the file bytes in R2) | D1 `file_derived_text`, `search_index`, Vectorize; rebuilt, not exported (§7.5) |
 
 The D1 `messages` copy can be fully rebuilt by replaying each ChatChannel DO's state (§3.3). Export reads channel messages from the DOs, not from D1.
 
@@ -163,7 +179,7 @@ Conventions:
 - The schema implements the role model and retention rules in PRD §10.1 and §10.2.
 - **Authority:**
   - This section is authoritative for the **core** tables: installation, users, sessions, invitations, groups, channels, channel members, the message copy, resource grants, audit, jobs.
-  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15.
+  - The **spec data-model sections** are authoritative for feature tables, and this document is the integration point that lists them: Identity §5, Chat §15, Calls §10, Calendar §12, Documents §9, Notifications §7, Permissions §9, Platform §8, §11, §12 and §15, and Assistant §14.2.
   - [Platform §14](specs/platform.md) reconciles every change.
 - **Enums that may grow are validated with Zod** in `packages/shared`, not with SQL `CHECK` constraints (Platform §14). The value lists are given as comments below. Fixed sets (for example `group_members.role`) may keep a `CHECK`.
 - **Baseline rule:** spec changes to a table are folded into the baseline migration of the milestone that first creates it, so no table is rebuilt. After a release, changes follow expand/contract (§6.5).
@@ -189,7 +205,7 @@ CREATE TABLE users (
   display_name TEXT NOT NULL,
   password_hash TEXT,                -- NULL once deleted (and for future SSO-only accounts)
   role TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member | guest (guest reserved for Phase 2; Zod)
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted', 'system')),
   session_epoch INTEGER NOT NULL DEFAULT 0,  -- increment to invalidate every session
   pending_security_notice TEXT,      -- shown on the sign-in page (Identity §4.6)
   admin_reset_at INTEGER,            -- no-email recovery flag shown to owners (Identity §4.6)
@@ -198,8 +214,12 @@ CREATE TABLE users (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   deleted_at INTEGER,
-  CHECK (status = 'deleted' OR email IS NOT NULL)
+  CHECK (status IN ('deleted', 'system') OR email IS NOT NULL)
 );
+-- Reserved rows: id 'system' and id 'assistant', status 'system', no email or password (default).
+-- They exist so messages.sender_id can reference them (Chat §4.6, Assistant §14.2). They are not
+-- members: excluded from the directory, seat counts, sign-in and the permission engine (§2.1
+-- "Permission resolution", step 1). The baseline migration inserts both with INSERT OR IGNORE.
 -- Profile columns, `handle` (copy of the authoritative `handles` table) and the
 -- `handles`, `passkeys` and `auth_tokens` tables are defined in Identity §5.
 -- `auth_tokens.kind`: magic_link | password_reset | recovery | email_change (Zod), with a `payload` column.
@@ -306,7 +326,7 @@ CREATE TABLE messages (
   channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
   seq INTEGER NOT NULL,              -- seq of the message.created event
   id TEXT NOT NULL UNIQUE,
-  sender_id TEXT REFERENCES users(id),
+  sender_id TEXT REFERENCES users(id),  -- a member, or the reserved 'system' / 'assistant' rows
   parent_id TEXT,                    -- thread root message ID
   body TEXT,                         -- NULL once deleted
   attachments TEXT,                  -- JSON array of file IDs
@@ -526,10 +546,11 @@ CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 | Timers | `scheduled_triggers` and `trigger_outbox` in the ReminderScheduler DO; D1 `pending_emails` | Platform §11 |
 | Platform | `rate_counters` (D1 counters), `ics_opt_outs`, the durable UserHub room registry | Platform §8, §12, §15 |
 | Files | Three kinds: message-owned (`parent_type = 'message'`), document-owned (`parent_type = 'document'`), drive files (`folder_id` set, versioned) | Platform §14, Documents §6 |
+| Assistant | New `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments`; `messages.kind` adds `assistant` and `call_notes` (sender `'assistant'`); `scheduled_triggers.kind` adds `assistant_brief`, `assistant_prep`, `personal_reminder`; `inbox_items.event_type` adds `assistant_brief`, `assistant_prep`, `assistant_nudge`, `assistant_reply`, `personal_reminder`; `rate_counters` scopes `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes`; reserved handles `assistant` and the display-name handle; reserved `users` rows `'system'` and `'assistant'` (`status = 'system'`, above) | Assistant §14.2 |
 
 **Permission resolution** ([Permissions](specs/permissions.md) §5). The Worker resolves access as follows:
 
-1. **Account:** the user's status must be `active`.
+1. **Account:** the user's status must be `active`. The reserved `status = 'system'` rows never pass, so the system sender and the assistant are never principals and can't be granted anything (Assistant §1).
 2. **Channels and messages** don't use grants. Access comes from channel type and membership, or DM participation. Members add people to private channels; channel admins remove them. Message-owned files inherit their message's access.
 3. **Documents, whiteboards, files, folders and drives use the union rule.** The effective role is the **highest** of:
    - grants on the item
@@ -611,11 +632,12 @@ Presence and typing state are not stored in SQLite (§3.4).
 **Deletion redaction.** A `message.deleted` event sets `messages.body`, `attachments`, `mentions` and `reactions` to NULL. In the same transaction it overwrites the `payload` of all earlier events for that message with `{"redacted":true}`. Deleted content is never served through replay.
 
 **Message state and new event types** (Chat §15, §16):
-- **Message state** adds `kind` (`user`, `call_chat`, or a system kind using the Chat §4.6 names, such as `member_joined`, `channel_renamed`, `call_started`, `call_ended`, `missed_call`, `poll_closed`, `message_pinned` or `welcome`), `format` (rich-text JSON), `body` (plain-text copy), `mentions`, `system_payload`, `reply_count`, `last_reply_at`, `thread_participants`, `also_in_channel`, `forwarded_from` (a live reference, never copied content) and `previews`.
+- **Message state** adds `kind` (`user`, `call_chat`, `assistant`, `call_notes`, or a system kind using the Chat §4.6 names, such as `member_joined`, `channel_renamed`, `call_started`, `call_ended`, `missed_call`, `poll_closed`, `message_pinned` or `welcome`), `format` (rich-text JSON), `body` (plain-text copy), `mentions`, `system_payload`, `reply_count`, `last_reply_at`, `thread_participants`, `also_in_channel`, `forwarded_from` (a live reference, never copied content) and `previews`.
 - **New event types:** `message.pinned` / `message.unpinned`, `poll.created` / `poll.voted` / `poll.closed`, `preview.attached` / `preview.removed`.
 - **Polls** live in the DO's `polls` table (with a per-poll `poll_secret`) and `poll_votes` (`poll_id`, `voter_key`, `option_ids`).
 - **Anonymous poll exception:** for `poll.voted` on an anonymous poll, the event's `actor_id` is the per-poll **`voter_key` = HMAC(poll_secret, user ID)**, never a user ID. The member's identity can't be recovered from the event log, the outbox or exports (`poll_secret` is excluded from exports).
 - **System messages** are written by typed RPCs, for example `postSystemEvent` from the HuddleRoom for `call_started`. They may post into announcement, read-only and archived channels.
+- **Assistant messages** (kinds `assistant` and `call_notes`, Assistant §6, §12.3) are written by a typed RPC with `sender_id = 'assistant'`, handled like `'system'`: no posting-policy check, `system_payload = { invoked_by, sources }`. Mention replies use `client_id = 'assistant:' + mentionMessageId`, so the existing `events_client` index makes repeated deliveries post one reply.
 - **`call_chat` messages** (in-call chat) are thread replies under `call_started` that create no thread follows, notifications, offline email or unread counts, with their own rate limit (Chat §4.7).
 - **Channel configuration** is pushed by the Worker with the RPC `applyConfig({ version, type, postingPolicy, archived, readOnly, posters, members? })` and stored in DO `meta` (Chat §3.4). The DO ignores a config with a lower `version` than the one it holds. Changes to an open socket's rights are sent as `access.changed`.
 - **Size caps:** rich-text JSON at most 100 KB, at most 50 distinct reactions and 3 previews per message, so the projected message state stays under 110 KB, inside the 128 KB queue message limit (Chat §4.1).
@@ -663,7 +685,7 @@ CREATE TABLE meta (
 Compaction, chunking and revision history are described in §4.3. A single SQLite row, string or BLOB can be up to 8 MB. Snapshots are split into 4 MB chunks so even large whiteboards fit with headroom. Binary assets such as images live in R2 and are referenced from the Yjs document, never embedded in it.
 
 **UserHub DO** — one per user (`idFromName(user_id)`). It holds the user's hub WebSockets and delivers inbox events, unread changes, presence changes, rings and revocations (§3.5). State that must survive hibernation is stored in its SQLite (Platform §12):
-- the **room registry** `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board` and `huddle`
+- the **room registry** `(kind, room_id, connection_id)`, with kinds `channel`, `doc`, `board`, `huddle` and `assistant` (the member's `/ws/assistant` sockets, §5.5)
 - live **ring state** and **`currentCall`** (Calls §4, §5)
 - **held-notification state** during DND, focus and time off (Notifications §5)
 - **derived availability**, recomputed by `refreshAvailability()` from `user_availability`, `user_preferences` and tab activity (Notifications §5.7).
@@ -682,12 +704,14 @@ CREATE TABLE online (
 ```
 
 **ReminderScheduler DO** — a single instance, which can be sharded by `hash(userId)` later. It holds `scheduled_triggers` (Platform §11.1):
-- **Trigger kinds:** `reminder`, `event_start` (raises `call_starting`), `focus_start` / `focus_end`, `time_off_start` / `time_off_end`, `status_expire`, `dnd_start` / `dnd_end`, `dnd_until_end`, `email_release`. Availability kinds call UserHub `refreshAvailability()`.
+- **Trigger kinds:** `reminder`, `event_start` (raises `call_starting`), `focus_start` / `focus_end`, `time_off_start` / `time_off_end`, `status_expire`, `dnd_start` / `dnd_end`, `dnd_until_end`, `email_release`, and from M9 `assistant_brief`, `assistant_prep` (both enqueue to `assistant-proactive`, §5.8) and `personal_reminder` (raises the `personal_reminder` inbox item, Assistant §7.1). Availability kinds call UserHub `refreshAvailability()`. `assistant_brief` and `assistant_prep` are suspended while the member is disabled or lacks assistant access, `personal_reminder` while disabled, and all three are deleted with the member (Assistant §10.1, §13).
 - **Filling:** a rolling 48-hour expansion of recurring events and per-attendee time zones. The calendar service updates triggers on every change, and an hourly refill job extends the window.
 - **Firing (outbox pattern):** one alarm, set to the earliest of the next unfired trigger and the next outbox retry. In one DO transaction the trigger is marked fired and a `trigger_outbox` row is written; the alarm drains the outbox to the queue, deleting rows only after a successful send. The consumer is idempotent on the trigger ID, so each trigger has at most one effect, retried until delivered (Platform §11.1).
 - **Catch-up:** triggers less than 1 hour overdue fire; older ones are dropped and logged.
 
 **HuddleRoom** keys calls by `context_key` (§3.6).
+
+**Assistant DO** — one per member (`idFromName(user_id)`), M9. Its SQLite schema (conversations, turns, memory items, source references, FTS tables, pending actions, prefs) is defined in [Assistant §14.1](specs/assistant.md), which is authoritative. The design is in §5.5–§5.11.
 
 ### 2.3 Deletion, retention and purge
 
@@ -699,17 +723,18 @@ This implements PRD §10.2.
 
 | Object | Purge stages |
 |---|---|
-| Channel | ChatChannel DO `purge()` (`ctx.storage.deleteAll()`), then attached files (R2 delete), then D1 `messages`, `channel_members`, `inbox_items`, `object_links` and `resource_grants` where the channel is the principal, then vectors (Phase 3), then the `channels` row. |
-| Document / whiteboard | DocRoom / BoardRoom DO `deleteAll()`, then R2 snapshot copies (prefix delete), then attached files, then grants, links and inbox items, then vectors, then the `documents` row. |
+| Channel | ChatChannel DO `purge()` (`ctx.storage.deleteAll()`), then attached files (R2 delete), then D1 `messages`, `channel_members`, `inbox_items`, `object_links` and `resource_grants` where the channel is the principal, then the channel's `call_notes` and transcripts (M9), then vectors, then the `channels` row. |
+| Document / whiteboard | DocRoom / BoardRoom DO `deleteAll()`, then R2 snapshot copies (prefix delete), then attached files, then grants, links and inbox items, then the document's `call_notes` and transcripts (M9), then vectors, then the `documents` row. |
 | Folder | Contained files and subfolders (each through its own job), then the row. |
-| File | R2 object, then the `files` row. |
+| File | R2 object(s), then `file_derived_text` and its vectors (M9), then the `files` row. |
 
 **Message deletion is immediate, not trashed.**
 
 1. The DO redacts the message (§2.2) and appends a `message.deleted` event.
 2. The D1 copy sets `body` to NULL via the normal projection (§3.3).
 3. Attached files get purge jobs with `run_after = now`.
-4. Vectors are invalidated (Phase 3).
+4. Vectors are invalidated (M9; this runs whether or not the assistant is enabled, §5.2).
+5. The `assistant-purge` fan-out runs (below).
 
 **Cascades for new containers** ([Platform](specs/platform.md) §4 defines each row):
 - **Channel purge** moves the documents in its channel folder to their creators' My files (an admin's if the creator was deleted), keeping explicit shares. It deletes message-owned files and link previews with the messages. It cleans up polls, pins, saved items, `thread_follows`, sidebar sections and grants where the channel is the principal. Huddle records keep their `context_id`.
@@ -720,10 +745,15 @@ This implements PRD §10.2.
 - **Event deletion** applies to a series or an occurrence.
 - **File purge** deletes every version.
 - **Comment threads** are deleted with their document.
+- **Call notes and transcripts** (M9) are deleted, with their vectors, when their channel, event or document is deleted (Platform §4). `call_notes` is keyed to the context and doesn't cascade from `huddles`.
 
-**Member lifecycle and personal-data erase.** [Platform](specs/platform.md) §3 defines, per feature, what happens on **disable** (everything kept; sign-in blocked; sockets closed, including calls) and **delete** (personal data erased). §3.1 there is the authoritative erase list. It covers profile fields, passkeys, auth tokens, sessions, preferences, follows, saved items, stars, recent items, time off, event notes and reminders, ICS feeds and subscriptions, inbox items, access requests, and the avatar object in R2. It also re-renders `@handle` text as "Former member" in message copies and the search index. Ownership transfers on delete: My files, organised events and owned calendars go to an admin. Messages keep `sender_id`.
+**Assistant copies follow deletion** (Assistant §4.4). Every pipeline that deletes content also feeds the `assistant-purge` queue: message deletion, channel purge, document or whiteboard purge, a file version dropped or purged, event deletion, and call notes or transcripts purged by retention or a context cascade. The pipeline looks up D1 `assistant_source_refs` for the deleted objects and enqueues one job per affected member; the consumer and the DO side are described in §5.7. These jobs run while the assistant is off and for disabled members, because they are housekeeping, not requests.
+
+**Member lifecycle and personal-data erase.** [Platform](specs/platform.md) §3 defines, per feature, what happens on **disable** (everything kept; sign-in blocked; sockets closed, including calls) and **delete** (personal data erased). §3.1 there is the authoritative erase list. It covers profile fields, passkeys, auth tokens, sessions, preferences, follows, saved items, stars, recent items, time off, event notes and reminders, ICS feeds and subscriptions, inbox items, access requests, and the avatar object in R2. It also re-renders `@handle` text as "Former member" in message copies and the search index. Ownership transfers on delete: My files, organised events and owned calendars go to an admin. Messages keep `sender_id`. From M9 the erase list adds the member's **Assistant DO storage** (`deleteAll()`), their `assistant_interactions`, `assistant_optins`, `assistant_source_refs` and `personal_reminders` rows and their assistant triggers; `call_notes.started_by` and `call_transcript_segments.speaker_id` show "Former member", like messages (Assistant §13). Every Worker path checks the member's status in D1 before addressing an Assistant DO, so a queued job never recreates a deleted member's DO.
 
 **Retention and Trash** for every object are in [Platform](specs/platform.md) §5, including who may restore from each container. The daily cron runs those rules: audit log, resolved inbox items, event-log horizons, expired invitations, sessions, tickets and auth tokens, huddle metadata (365 days), call rings, outside-attendee emails, access requests and link previews. **In-call chat** for document and event calls is kept for the life of its context, not with huddle metadata.
+
+**Assistant purge jobs** (M9, Assistant §14.3) run in the same daily cron: expired `assistant_interactions` (`assistant_interaction_retention_days`), `call_transcript_segments` past `call_transcript_retention_days` together with their vectors (notes stay for the life of the context), `file_derived_text` for purged versions, and `personal_reminders` 30 days after done or dismissed. Conversations and memory are swept inside each Assistant DO by its own `retention_sweep` timer (§5.5). All of these keep running while the assistant is turned off.
 
 **Platform recovery windows.** D1 Time Travel and Durable Object point-in-time recovery keep up to 30 days of history. Officebox recommends an R2 lifecycle rule that expires noncurrent object versions after 30 days. Purged data is therefore unrecoverable no more than about 30 days after purge, as stated in PRD §10.2.
 
@@ -744,9 +774,9 @@ CREATE TABLE document_text (
 CREATE VIRTUAL TABLE search_index USING fts5(
   title,
   body,
-  object_type UNINDEXED,   -- message, document, whiteboard, file
+  object_type UNINDEXED,   -- message, document, whiteboard, file, call_notes (M9)
   object_id UNINDEXED,
-  scope_id UNINDEXED,      -- channel ID for messages; document or folder ID otherwise
+  scope_id UNINDEXED,      -- channel ID for messages; document or folder ID otherwise; Assistant §9 for M9 types
   tokenize = 'unicode61 remove_diacritics 2'
 );
 ```
@@ -756,6 +786,11 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 - Messages: the message projection consumer (§3.3) inserts, replaces or deletes rows in `search_index` in the same D1 batch as the `messages` upsert.
 - Documents and whiteboards: once updates have been quiet for 5 seconds (and at most once every 60 seconds), the DO extracts the title and plain text and queues it through its outbox to the `search-projection` Queue. The consumer upserts `document_text` and `search_index` together.
 - File names are indexed when uploaded. File contents are not indexed in Phase 1.
+- **From M9** (Assistant §9), two more kinds of text are indexed, by the `indexing` consumer (§5.2):
+  - **derived file text** from `file_derived_text`, per file version (`scope_id`: the file's folder or drive, or its message's channel; checked as the file)
+  - **call notes and transcripts** as object type `call_notes` (`scope_id`: the channel for channel and DM calls, the document for document calls; checked as that context). Notes and transcripts of **event** calls are not indexed; they are reached through the event with event access checked.
+  - Because they come from the assistant pipeline, their **upserts** follow its gate (only while `assistant_enabled` is on, §5.2). Their **deletions** always run: Trash removes derived text from search, restore re-indexes it, purge and retention delete it, and **Delete assistant index** removes every derived-text row.
+- **Events are never indexed** (Assistant §9): their access depends on calendar role, attendee status and visibility, which no single scope can express.
 - When a member is deleted, `@handle` text in the plain-text message copy and in `search_index` is re-rendered as "Former member" (Platform §3).
 
 **Querying.**
@@ -764,7 +799,8 @@ CREATE VIRTUAL TABLE search_index USING fts5(
    - public channels
    - channels from `channel_members`
    - documents, whiteboards, drive files and folders reachable under the **union rule** (§2.1): grants on the item, its ancestor folders and its drive, built-in drive roles, the channel-folder rule (members of the channel, or everyone for public channels), and general access along the chain
-   - message-owned files, searchable by file name only within conversations the user can read.
+   - message-owned files, searchable by file name (and, from M9, derived text) only within conversations the user can read
+   - from M9, call notes in channels the user can read and documents the user can open (Assistant §9).
 2. The FTS `MATCH` results are joined to those scopes and ranked by `bm25()`, with `snippet()` for highlights.
 3. Results for deleted or trashed objects never appear, because deletion removes their rows from `search_index`.
 

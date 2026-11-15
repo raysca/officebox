@@ -1,12 +1,13 @@
 # Spec: Calls (huddles)
 
 **Status:** Draft for review
-**Revision:** Revised after independent review (14 Nov 2026); revised after the second review (`/calls` API with an explicit join step, `call_chat` messages, 4403 on lost access)
+**Revision:** Revised after independent review (14 Nov 2026); revised after the second review (`/calls` API with an explicit join step, `call_chat` messages, 4403 on lost access); updated for the [Assistant](assistant.md) spec (15 Nov 2026: call notes, mandatory join notice, live captions, notetaker participant)
 **Feature name:** Calls (marketing name to be decided later; "huddles" in the PRD and TDD)
 **Milestones** ([PLAN](../PLAN.md)):
 - M4: channel and DM calls
 - M5b: event calls
 - M6: document calls
+- M9c: call notes and live captions ([Assistant §12.3, §12.4](assistant.md))
 
 **Related specs:**
 - [Permissions](permissions.md) §4
@@ -15,6 +16,7 @@
 - [Chat](chat.md)
 - [Calendar](calendar.md)
 - [Documents](documents.md)
+- [Assistant](assistant.md) §12.3, §12.4
 
 **Related PRD and TDD sections:** PRD §5.8; TDD §3.6, §4.5
 
@@ -24,7 +26,7 @@ Decisions marked **(default)** were not discussed; change them on review.
 
 ## 1. Summary
 
-Instant, audio-first calls you can start from any conversation, document or calendar event, with optional video, screen sharing and present mode. Media goes through the Cloudflare Realtime SFU. Signalling and call state go through Officebox (TDD §3.6). No recording.
+Instant, audio-first calls you can start from any conversation, document or calendar event, with optional video, screen sharing and present mode. Media goes through the Cloudflare Realtime SFU. Signalling and call state go through Officebox (TDD §3.6). No recording. From M9c, a participant can turn on **call notes** (a transcript and summary written by the assistant) or **live captions** for themselves; audio is never stored ([Assistant §12.3, §12.4](assistant.md)).
 
 **Gate:** the real-media run (`spikes/realtime`, `npm run test:media`) must pass on a real Realtime app before M4 starts.
 
@@ -47,6 +49,9 @@ Instant, audio-first calls you can start from any conversation, document or cale
 | Concurrency | **One call at a time**. Joining another asks "Leave the current call and join?", enforced by `POST /calls/:id/join` (§11). |
 | API prefix | **`/calls`** for REST and **`/ws/calls/:id`** for the WebSocket. TDD §3.6's `/huddles` paths change to these. |
 | Screen sharing / present mode | As specified in PRD §5.8 and TDD §3.6 / §4.5 |
+| Call notes (M9c) | **Visible and stoppable.** Any participant with assistant access can start notes; everyone sees a persistent banner and can stop them; **joining while notes are on requires acknowledging a notice first** ([Assistant §12.3](assistant.md)). |
+| Live captions (M9c) | **Per participant, never stored.** Everyone sees a "Captions on" indicator ([Assistant §12.4](assistant.md)) **(default)**. |
+| Recording | **Out of scope.** No audio, video or screen content is recorded. |
 
 ## 3. Where calls happen
 
@@ -70,6 +75,7 @@ Instant, audio-first calls you can start from any conversation, document or cale
 - **Channels and DMs:** start and end **system messages**. The end message shows duration and participants.
 - **Events:** recorded on the event (shown in the event detail).
 - **Documents:** recorded in the **document details panel → Activity** ([Documents](documents.md) §6.1 Activity) **(default)**.
+- **Call notes** (M9c), when taken, go to the same context: a `call_notes` message in the channel or DM ([Chat](chat.md) §4.6), a "Call notes" section on the event ([Calendar](calendar.md) §9), or the document's Activity section. They are visible to that context's audience ([Assistant §12.3](assistant.md)).
 - The channel `call_started` system message is posted by the HuddleRoom through a **typed-result RPC to the ChatChannel DO** ([Chat](chat.md) §4.6 System messages).
 
 ## 4. Ringing (DMs and group DMs)
@@ -89,7 +95,12 @@ Instant, audio-first calls you can start from any conversation, document or cale
   - Mic on and camera off by default.
   - Joining a call that already has 6 or more participants starts **muted**, with a hint "You're muted — the call has *N* people" (*N* is 6 or more).
   - DM calls never auto-mute.
-- **Device choice:** microphone, camera and speaker can be picked from the call controls at any time. The last choice is remembered per device. A **pre-join screen** appears only when the browser hasn't granted permission, or the remembered device is missing **(default)**.
+- **Device choice:** microphone, camera and speaker can be picked from the call controls at any time. The last choice is remembered per device. A **pre-join screen** appears only when the browser hasn't granted permission, or the remembered device is missing **(default)**. The call-notes notice below is shown even when the pre-join screen is skipped.
+- **Joining while notes are on (M9c):** `POST /calls/:id/join` returns **`notes_ack_required`** with the notice text instead of joining ([Assistant §12.3](assistant.md)).
+  - The client shows a **modal dialog**, with focus trapped and Escape meaning "Don't join". It offers **Join** or **Don't join**, even if the member's devices would otherwise skip the pre-join screen. The notice also mentions captions when anyone has them on.
+  - **Join** repeats the request with **`ackNotes: true`**. "Don't join" leaves cleanly.
+  - Until then the member isn't in the call, so no audio is sent or transcribed.
+  - If notes start while someone is joining, the same check applies.
 - **Two devices (handoff):**
   - Joining from a second device while already in the call shows "**Move call here?**". Confirming moves the person, and the first device leaves with "Call moved to another device".
   - The HuddleRoom enforces **one connection per person**.
@@ -108,7 +119,14 @@ Instant, audio-first calls you can start from any conversation, document or cale
 
 ### 6.1 Controls
 
-Mute, camera, share screen, reactions, raise hand, in-call chat, participants list, layout switch, device settings, noise suppression and leave.
+Mute, camera, share screen, reactions, raise hand, in-call chat, participants list, layout switch, device settings, noise suppression and leave. From M9c, also **Take notes / Stop notes** and **Captions** ([Assistant §12.3, §12.4](assistant.md)).
+
+**Notes and captions (M9c):**
+- **Take notes** is shown to participants with assistant access when `assistant_call_notes` is on. It's disabled, with an explanation, when the workspace call-notes cap is reached. **Stop** is available to every participant. After a stop, notes can be restarted after **10 seconds (default)**.
+- **Banner:** while notes are on, everyone sees a persistent banner, "Butler is taking notes — started by *Name*", with **Stop**, naming who will see the notes for this context. It's a labelled region announced once (`role="status"`) and doesn't steal focus.
+- **Notetaker:** the assistant appears in the participants list as a **notetaker** with no camera or microphone. It's a virtual entry in HuddleRoom state, **not a `huddle_participants` row**, and **isn't counted toward the 25-person limit**.
+- **Captions** are turned on per participant, for themselves, when `call_captions` is on. While anyone has captions on, all participants see a **"Captions on"** indicator. Others can't turn off someone's captions **(default)**.
+- In channel and DM calls, a system message in the in-call chat records each start and stop of notes.
 
 **Keyboard shortcuts:**
 
@@ -187,6 +205,7 @@ As specified in **PRD §5.8** and **TDD §3.6 / §4.5**, and validated in the sp
 
 - A call ends **30 seconds after the last participant leaves** (TDD §3.6). The end record shows duration and who attended (§3).
 - **Huddle records** are **metadata only** (context, participants, times, whether a screen was shared) and are purged after 365 days ([Platform](platform.md) §5). No audio, video or screen content is ever recorded. In-call chat is separate and follows its context (§6.4).
+- **Call notes and transcripts** (M9c) are also separate from the huddle record and never cascade from it. Notes stop when the call ends, or when no human participants remain; they're finalised after the call. Notes stay for the life of the context; transcripts are purged after `call_transcript_retention_days` ([Assistant §12.3](assistant.md)).
 
 ## 8. Errors and edge cases
 
@@ -251,6 +270,15 @@ CREATE TABLE call_rings (                                   -- durable record; l
 - participant removal
 - registration in the UserHub room registry, and `updateAccess(userId, role | null)` (null closes with 4403).
 
+**Call notes (M9c):** tables `call_notes` and `call_transcript_segments` are defined in [Assistant §14.2](assistant.md). `call_notes` holds the context (`context_type`, `context_id`), is reparented to the context and **must not cascade from `huddles`** (Platform §5). Transcript segments are written in batches through the outbox, and D1 is their only lasting copy.
+
+**HuddleRoom DO** additions for M9c ([Assistant §12.3, §12.4](assistant.md)):
+- notes state: the **notetaker virtual participant** (not a `huddle_participants` row, not counted toward 25), the open transcription window, and who started and stopped notes; start and stop are serialised in arrival order
+- per-track transcription only while a window is open (by HuddleRoom server time); "transcription gap" markers after eviction
+- the set of participants with captions on, for the "Captions on" indicator; captions are never stored
+- the join check that returns `notes_ack_required`
+- named timers **`notes_idle`** (stop when no humans remain) and **`notes_finalize`** (write the notes after the call ends or after a crash).
+
 **UserHub** additions (persisted in its storage):
 - `currentCall` (the one-call-at-a-time rule), set by `POST /calls/:id/join`
 - live ring state and delivery: `call.ring`, `call.ring.cancel`, `call.accepted-elsewhere`, and call waiting.
@@ -262,7 +290,7 @@ All routes need a session. State-changing routes need the CSRF header (TDD §8.2
 | Method and path | Purpose |
 |---|---|
 | `POST /calls` `{ contextType, contextId, occurrence? }` | Start a call in a context, or get the active one. Returns `{ huddleId, created }`. DM contexts start ringing. Starting doesn't join: the client then calls `/join`. |
-| `POST /calls/:id/join` `{ leaveCurrent? }` | Join: checks access, capacity (25) and the one-call rule. Returns `200 { connectUrl: "/ws/calls/:id" }`, `409 { currentCallId }` if already in another call (unless `leaveCurrent: true`), `409 { full: true }` when full, or `403`. |
+| `POST /calls/:id/join` `{ leaveCurrent?, ackNotes? }` | Join: checks access, capacity (25) and the one-call rule. Returns `200 { connectUrl: "/ws/calls/:id" }`, `409 { currentCallId }` if already in another call (unless `leaveCurrent: true`), `409 { full: true }` when full, or `403`. While notes are on (M9c), returns **`notes_ack_required`** with the notice text unless the request has `ackNotes: true` (§5). |
 | `POST /calls/:id/leave` | Leave (also happens when the socket closes) |
 | `GET /calls/:id` | Call state: context, participants, presenter |
 | `GET /calls/:id/ice-servers` | STUN, and short-lived TURN credentials if configured |
@@ -274,6 +302,9 @@ All routes need a session. State-changing routes need the CSRF header (TDD §8.2
 | `POST /calls/:id/ring/accept` · `POST /calls/:id/ring/decline` | Answer a ring |
 | `POST /calls/:id/participants/:connId/remove` | Moderator removes a participant |
 | `GET /calls/:id/chat` · `GET /contexts/:type/:id/call-chat?before=…` | In-call chat history for the live call, or saved chat for a document or event |
+| `POST /calls/:id/notes` · `DELETE /calls/:id/notes` | Start or stop call notes (M9c): any participant; starting needs assistant access ([Assistant §15](assistant.md)) |
+| `POST /calls/:id/captions` · `DELETE /calls/:id/captions` | Turn your own captions on or off (M9c) |
+| `GET /calls/:id/notes` · `GET /call-notes/:id/transcript` | Call notes and transcript, permission-checked against the call's context (M9c) |
 
 **WebSocket** (`/ws/calls/:id`, authenticated as in TDD §3.1).
 
@@ -344,9 +375,20 @@ Hub → client (UserHub): `call.ring`, `call.ring.cancel`, `call.accepted-elsewh
 - The call appears in the document details panel → Activity.
 - In-call chat is stored against the document and is deleted only with the document.
 
+**M9c: call notes and captions** (full criteria in [Assistant §16](assistant.md), M9c)
+- `POST /calls/:id/join` without `ackNotes` returns `notes_ack_required` while notes are on, even when devices would skip pre-join; nothing is sent or transcribed before Join; the dialog traps focus and Escape means Don't join.
+- Any participant can stop notes; a start and stop arriving together resolve in arrival order; no segment comes from audio received outside an open window.
+- The notetaker appears in the participants list, isn't a `huddle_participants` row, and doesn't count toward the 25-person limit.
+- Evicting the HuddleRoom mid-call records a gap and still produces notes through `notes_finalize`.
+- Notes post to the right context and are visible only to its audience; `POST`/`DELETE /calls/:id/notes` return `forbidden` to non-participants, and `GET /call-notes/:id/transcript` to people outside the context.
+- Captions work with notes off, store nothing, and show the "Captions on" indicator to everyone.
+- The notes banner, joining notice and captions region pass axe and keyboard checks; `test:media` passes before merging.
+
 ## 13. Later
 
-External participants by link (with guest accounts) · background blur and virtual backgrounds · transcription and summaries · push-notification ringing · persistent rooms · files in in-call chat.
+External participants by link (with guest accounts) · background blur and virtual backgrounds · push-notification ringing · persistent rooms · files in in-call chat.
+
+Transcription and summaries moved from here to **M9c** as call notes and live captions ([Assistant §12.3, §12.4](assistant.md)). Recording stays out of scope.
 
 ## 14. Open questions
 
