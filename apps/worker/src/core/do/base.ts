@@ -111,6 +111,8 @@ export const TIMER_BATCH = 100;
 export const DEFAULT_TIMER_TIMEOUT_MS = 30_000;
 /** Outbox drains send to Queues and may take longer than an ordinary timer. */
 const OUTBOX_TIMER_TIMEOUT_MS = 5 * 60_000;
+/** How often an object whose schema migration failed wakes to check again. */
+export const MIGRATION_FAILURE_RECHECK_MS = 15 * 60_000;
 /** From this many failed runs, each further failure logs at error level. */
 export const TIMER_ERROR_ATTEMPTS = 5;
 
@@ -198,6 +200,7 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
   private alarmFlushQueued = false;
   /** True while `alarm()` runs; it re-derives the alarm itself when it finishes. */
   private alarmRunning = false;
+  private alarmWriteFailures = 0;
 
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
@@ -421,19 +424,47 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
     const due = row?.due ?? null;
     if (due === this.alarmAt) return;
     this.alarmAt = due;
-    const write = due === null ? this.ctx.storage.deleteAlarm() : this.ctx.storage.setAlarm(due);
-    write.catch((error: unknown) => {
-      // Forget what we believe the alarm is, so the next flush writes it again.
-      this.alarmAt = undefined;
-      this.log.error("could not update the alarm", { error });
-    });
+    this.writeAlarm(due).then(
+      () => {
+        this.alarmWriteFailures = 0;
+      },
+      (error: unknown) => {
+        // Forget what we believe the alarm is, and try again after a bounded backoff, so timers
+        // don't stay unscheduled until some unrelated change. (A short-lived timer that only runs
+        // after a storage failure; it doesn't keep a healthy object awake.)
+        this.alarmAt = undefined;
+        this.alarmWriteFailures += 1;
+        const delay = this.alarmRetryDelayMs(this.alarmWriteFailures);
+        this.log.error("could not update the alarm; retrying", { error, failures: this.alarmWriteFailures, delay });
+        setTimeout(() => this.syncAlarm(), delay);
+      },
+    );
+  }
+
+  /** Writes the alarm (or clears it when `due` is null). Separate so tests can simulate failures. */
+  protected writeAlarm(due: number | null): Promise<void> {
+    return due === null ? this.ctx.storage.deleteAlarm() : this.ctx.storage.setAlarm(due);
+  }
+
+  /** Wait before retrying a failed alarm write: 1 s, 2 s, 4 s, … capped at 1 minute. */
+  protected alarmRetryDelayMs(failures: number): number {
+    return Math.min(1000 * 2 ** (failures - 1), 60_000);
   }
 
   /** Runs due timers. Subclasses register handlers with `onTimer` instead of overriding this. */
   override async alarm(): Promise<void> {
     // The alarm that woke us has been consumed; re-derive it from the table when we're done.
     this.alarmAt = null;
-    if (this.migrationFailure !== null) return;
+    if (this.migrationFailure !== null) {
+      // Timers can't run on a schema that failed to migrate. Check again later, so that once a fixed
+      // release is deployed the object wakes, migrates and runs its timers without waiting for a
+      // request. (alarmAt becomes unknown so the next healthy flush re-derives it.)
+      this.alarmAt = undefined;
+      void this.writeAlarm(Date.now() + MIGRATION_FAILURE_RECHECK_MS).catch((error: unknown) => {
+        this.log.error("could not set the recheck alarm", { error });
+      });
+      return;
+    }
     const due = this.sql
       .exec<TimerRow>(
         "SELECT name, due_at, payload, attempts, generation FROM core_timers WHERE due_at <= ? ORDER BY due_at, name LIMIT ?",

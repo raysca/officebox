@@ -298,6 +298,19 @@ describe("alarm multiplexer", () => {
   });
 });
 
+describe("alarm writes", () => {
+  it("retries a failed alarm write until the alarm is set", async () => {
+    const s = stub();
+    await s.version();
+    await s.meta("alarm_write_failures", "2");
+    const due = Date.now() + HOUR;
+    await s.timer("record:retry", due);
+    for (let i = 0; i < 200 && (await s.alarmTime()) !== due; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(await s.alarmTime()).toBe(due);
+    expect(await s.metaValue("alarm_write_failures")).toBe("0");
+  });
+});
+
 describe("migration failures and newer schemas", () => {
   it("refuses work when a core migration fails", async () => {
     const s = stub();
@@ -311,6 +324,23 @@ describe("migration failures and newer schemas", () => {
     await evictDurableObject(s);
     const result = await s.version();
     expect(!result.ok && result.error.code).toBe("unavailable");
+  });
+
+  it("sets a recheck alarm instead of running timers while a migration has failed", async () => {
+    const s = stub();
+    await s.timer("record:blocked", Date.now() + HOUR);
+    await s.meta("fail_v2", "1");
+    await runInDurableObject(s, (_i: TestObject, state) => {
+      state.storage.sql.exec("ALTER TABLE items DROP COLUMN note");
+      state.storage.sql.exec("UPDATE meta SET value = '1' WHERE key = 'schema_version'");
+    });
+    await s.rewind(HOUR);
+    await evictDurableObject(s);
+    expect((await s.version()).ok).toBe(false);
+    const before = Date.now();
+    expect(await runDurableObjectAlarm(s)).toBe(true);
+    expect(await s.alarmTime()).toBeGreaterThanOrEqual(before + 14 * 60_000);
+    expect(await s.timerLog()).toEqual([]);
   });
 
   it("keeps serving reads and writes on a schema newer than the code", async () => {

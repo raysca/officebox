@@ -48,7 +48,11 @@ export class TestObject extends CoreDurableObject {
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
-    this.outbox = this.createOutbox({ stream: "test", send: (bodies) => this.fakeSend(bodies), sendTimeoutMs: 100 });
+    this.outbox = this.createOutbox({
+      stream: "test",
+      send: (bodies) => this.fakeSend(bodies),
+      sendTimeoutMs: () => Number(this.getMeta("send_timeout_ms") ?? "100"),
+    });
     this.onTimer("record", (timer) => this.record(timer));
     this.onTimer("flaky", (timer) => {
       if (this.getMeta("flaky_fail") === "1") throw new Error("flaky handler failed");
@@ -89,20 +93,18 @@ export class TestObject extends CoreDurableObject {
    * Fake queue `sendBatch`: fails while `meta.outbox_fail` is "1", or when the batch holds a body
    * with `poison: true`; otherwise records the batch.
    */
-  private fakeSend(bodies: unknown[]): Promise<void> {
+  private async fakeSend(bodies: unknown[]): Promise<void> {
     this.sendCalls += 1;
-    if (this.getMeta("outbox_hang") === "1") return new Promise<void>(() => {});
-    if (this.getMeta("outbox_fail") === "1") return Promise.reject(new Error("queue unavailable"));
+    // Held until the test releases it (or the outbox's send timeout gives up first).
+    if (this.getMeta("outbox_hang") === "1") await this.hangUntilReleased();
+    if (this.getMeta("outbox_fail") === "1") throw new Error("queue unavailable");
     const failAfter = Number(this.getMeta("outbox_fail_after") ?? "-1");
-    if (failAfter >= 0 && this.sendCalls > failAfter) return Promise.reject(new Error("queue went down"));
-    if (bodies.some((b) => (b as { poison?: boolean }).poison === true)) {
-      return Promise.reject(new Error("message rejected"));
-    }
+    if (failAfter >= 0 && this.sendCalls > failAfter) throw new Error("queue went down");
+    if (bodies.some((b) => (b as { poison?: boolean }).poison === true)) throw new Error("message rejected");
     this.batches += 1;
     for (const body of bodies) {
       this.sql.exec("INSERT INTO sent (batch, body) VALUES (?, ?)", this.batches, JSON.stringify(body));
     }
-    return Promise.resolve();
   }
 
   // ------------------------------------------------------------------ RPC
@@ -179,6 +181,33 @@ export class TestObject extends CoreDurableObject {
     this.gateOpen = true;
   }
 
+  /** Fails while `meta.alarm_write_failures` is above zero, counting it down. */
+  protected override writeAlarm(due: number | null): Promise<void> {
+    const failures = Number(this.getMeta("alarm_write_failures") ?? "0");
+    if (failures > 0) {
+      this.setMeta("alarm_write_failures", String(failures - 1));
+      return Promise.reject(new Error("alarm write failed"));
+    }
+    return super.writeAlarm(due);
+  }
+
+  protected override alarmRetryDelayMs(): number {
+    return 20;
+  }
+
+  /** Waits (polling real timers) until `meta.outbox_hang` is no longer "1", then succeeds. */
+  private async hangUntilReleased(): Promise<void> {
+    while (this.getMeta("outbox_hang") === "1") await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  metaValue(key: string): string | null {
+    return this.getMeta(key);
+  }
+
+  alarmTime(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
+
   /** Runs a drain directly (as the timer would). */
   drainNow(): Promise<number | null> {
     return this.outbox.drain(this.log);
@@ -218,6 +247,7 @@ export class TestObject extends CoreDurableObject {
   rewind(ms: number): void {
     this.sql.exec("UPDATE core_timers SET due_at = due_at - ?", ms);
     this.sql.exec("UPDATE core_outbox SET next_attempt_at = next_attempt_at - ?", ms);
+    this.sql.exec("UPDATE meta SET value = CAST(value AS INTEGER) - ? WHERE key LIKE 'outbox_outage_until:%'", ms);
   }
 
   /** Reads schema state without the readiness guard. */
