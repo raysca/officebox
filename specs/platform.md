@@ -175,7 +175,7 @@ This extends TDD §7.5.
 | Excluded | Reason |
 |---|---|
 | `sessions`, `auth_tokens`, `ws_tickets` | Credentials |
-| `pending_emails`, `notify_anyway_log`, `scheduled_triggers` | Transient operational state, rebuilt after restore |
+| `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `rate_counters`, `sign_in_throttle`, `cron_leases` | Transient operational state, rebuilt after restore |
 | `passkeys` | Bound to the domain (WebAuthn relying-party ID). Members **re-register** after restoring to a new domain. Owners can sign in with their required password (§2). |
 | `mfa_factors` | Encrypted with an installation key |
 | `ics_feeds` tokens | Credentials. Members create new feed URLs after a restore. |
@@ -227,7 +227,7 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Action | Limit | Mechanism | Source |
 |---|---|---|---|
 | Sign-in attempts, per IP | 5 per minute | binding | TDD §8.1 |
-| Sign-in attempts, per account | 10 per hour; attempts 1–5 immediate, then a progressive delay of 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s; no lockout | D1 counter | TDD §8.1, Identity §4.4 |
+| Sign-in attempts, per account | 10 per hour; attempts 1–5 immediate, then a progressive delay of 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s; no lockout. An attempt made before its delay has passed is refused with `rate_limited` and the remaining wait, without checking the password or counting it **(default)**; an hour without attempts, or a successful sign-in, resets the count | D1 counter (`sign_in_throttle`, keyed by an HMAC of the email, so unknown emails behave like real ones) | TDD §8.1, Identity §4.4 |
 | Magic-link and password-reset requests | 3 per 15 minutes per account; 20 per hour per IP **(default)** | D1 counter | Identity §4.4 |
 | Setup, recovery, invitation acceptance | 5 per minute per IP | binding | TDD §8.1 |
 | Message sends | 10 per 10 seconds per user per conversation **(default)** | DO (ChatChannel) | Chat §20 |
@@ -486,6 +486,8 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `inbox_items` | Replace | As Notifications §7: adds `count`, `preview` (redactable, up to 140 characters), `last_event_at` and a `message_id` index; `UNIQUE (user_id, dedupe_key)`, with resolved records reopened in place | Notifications §3.1, §7 |
 | `scheduled_triggers`, `trigger_outbox` | New tables (ReminderScheduler DO SQLite) | §11.1 | §11 |
 | `pending_emails`, `rate_counters`, `ics_opt_outs` | New D1 tables | §11, §8, §15 | here |
+| `sign_in_throttle` | New D1 table (M1a) | `(account_key, attempts, last_attempt_at)`: the per-account sign-in counter and its progressive delay. `account_key` is `HMAC(TOKEN_HASH_KEY, lower-cased email)`. Pruned daily; excluded from export. | §8, Identity §4.4 |
+| `users`, `handles`, `sessions` | Baseline (M1a) | Created with every Identity §5 column in the baseline `CREATE TABLE`, so later slices add no columns to them | Identity §5 |
 | `cron_leases` | New D1 table (M0b) | One lease per cron schedule `(schedule, holder, expires_at)`; overlap guard for the dispatcher. `schedule` is Zod-validated (no `CHECK`). Excluded from export as a job table. | TDD §2.1, §7.8 |
 | Spec DDL `CHECK`s on growable enums | Rule | `calendars.kind`, `events.type`, `huddle_messages.context_type`, `auth_tokens.kind`, `drives.kind`, `item_activity.kind`, `pending_emails.state` and similar are **Zod-validated; the `CHECK` is omitted in migrations**, even where a spec's illustrative DDL shows one | here |
 
@@ -523,8 +525,9 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 
 | Secret | Purpose | Required | Rotation |
 |---|---|---|---|
-| `SESSION_SIGNING_KEY` | Signs access tokens (session cookie) | Yes | Rotating signs everyone out once access tokens expire (15 min); refresh tokens survive. Support a previous-key slot for overlap **(default)**. |
-| `TOKEN_HASH_KEY` | HMAC key for stored token hashes (`auth_tokens`, RSVP and opt-out tokens, `ws_tickets`) and email hashes | Yes | Rotation invalidates outstanding emailed links; schedule with care |
+| `SESSION_SIGNING_KEY` | Signs access tokens (session cookie) | Yes | Move the old value to `SESSION_SIGNING_KEY_PREVIOUS` and set a new one: tokens signed with either verify, so nobody is signed out. Delete the previous key after 15 minutes (the access-token lifetime) **(default)**. |
+| `SESSION_SIGNING_KEY_PREVIOUS` | The previous signing key during a rotation | No | Delete 15 minutes after the rotation |
+| `TOKEN_HASH_KEY` | HMAC key for stored token hashes (refresh tokens in `sessions`, `auth_tokens`, RSVP and opt-out tokens, `ws_tickets`), the sign-in throttle key and email hashes | Yes | Rotation signs everyone out (refresh tokens no longer match) and invalidates outstanding emailed links; schedule with care |
 | `DATA_ENCRYPTION_KEY` | Encrypts ICS-in URLs (and MFA secrets later) | Yes (from M5c) | Re-encrypt on rotation (migration job) |
 | `POLL_SECRET_KEY` | Derives per-poll secrets for anonymous voter keys (alternatively, per-poll secrets are generated and stored in the channel DO) **(default: derive)** | Yes (from M3b) | Never rotated for existing polls; rotating changes keys only for new polls |
 | `SETUP_TOKEN` | First-run setup | Optional (generated if absent) | Ignored after setup; delete it |

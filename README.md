@@ -2,7 +2,7 @@
 
 A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar, documents and files in one deployment. It runs in your own Cloudflare account, is open source under AGPL-3.0, and has no per-seat fees.
 
-> **Status:** early development (milestone M0, Foundation). The deployed app is the application shell (navigation, themes, empty areas) and a `/health` endpoint; there's no sign-in yet. See [`PLAN.md`](PLAN.md) for the roadmap.
+> **Status:** early development (milestone M1, Identity). The deployed app has first-run setup, email and password sign-in, "My devices" and the application shell (navigation, themes, empty areas). See [`PLAN.md`](PLAN.md) for the roadmap.
 
 ## Deploy
 
@@ -15,7 +15,7 @@ npm run build    # builds the web app and checks the Worker bundle
 npm run deploy   # preflight → wrangler d1 migrations apply DB --remote → wrangler deploy
 ```
 
-R2 must be enabled on the Cloudflare account (dashboard → R2) before the first deploy. After deploying, open `https://<your-worker>.workers.dev/health`; it returns `{ "status": "ok", "version": "…" }`.
+R2 must be enabled on the Cloudflare account (dashboard → R2) before the first deploy. Sign-in needs **Workers Paid**: password hashing takes about 12 ms of CPU, above the Free plan's 10 ms limit. After deploying, open `https://<your-worker>.workers.dev/health`; it returns `{ "status": "ok", "version": "…" }`. Then set the [secrets](#secrets) and [set up the workspace](#first-run-setup).
 
 To deploy by hand instead: `npx wrangler login`, create the database with `npx wrangler d1 create officebox` and add its `database_id` to `wrangler.jsonc`, then run `npm run build && npm run deploy`.
 
@@ -50,13 +50,38 @@ If a step fails, the run stops and the previous Worker version stays live. Migra
 
 Only the deploy step can read the token. Never paste it into an issue, pull request or chat; it belongs only in the GitHub secret.
 
+## Secrets
+
+Officebox reads these Worker secrets (full inventory and rotation rules: [platform §16](specs/platform.md#16-secrets-inventory)). Set each with `npx wrangler secret put <NAME>`, or in the dashboard (your Worker → Settings → Variables and Secrets → Add → Secret). Generate random values with `openssl rand -base64 32`; each must be at least 32 bytes, and no two may be the same.
+
+| Secret | Required | Notes |
+|---|---|---|
+| `SESSION_SIGNING_KEY` | Yes | Signs the session cookie. To rotate, move the old value to `SESSION_SIGNING_KEY_PREVIOUS`, set a new one, and delete the previous key after 15 minutes (people stay signed in). |
+| `TOKEN_HASH_KEY` | Yes | Keys the stored hashes of refresh tokens and other tokens. Changing it signs everyone out. |
+| `PEPPER_1` | Yes | Mixed into every password hash and never stored in the database. **Keep a copy somewhere safe:** restoring an export to another installation needs the same `PEPPER_*` secrets, or every password must be reset. |
+| `SETUP_TOKEN` | No | First-run setup token (at least 32 characters). Leave it unset to get a one-time token in the logs instead. Delete it after setup. |
+
+Until the three required secrets are set, setup and sign-in answer "isn't configured yet", and the Worker logs which secret is missing (never its value).
+
+**Rotating the password pepper.** Add `PEPPER_2` (then `PEPPER_3`, …): new and changed passwords use the highest number, and each person's password is re-hashed with it the next time they sign in. Announce a deadline; after it, delete the old pepper. Anyone who hasn't signed in by then can no longer sign in with their password and needs a reset (or a magic link or passkey, once those exist).
+
+## First-run setup
+
+Open your workspace's address. Until setup is done, every page leads to **Set up your workspace**, which asks for the setup token, the workspace name and the first owner's name, handle, email and password. Setup works exactly once; afterwards `/setup` is gone for good.
+
+The setup token is either:
+- the `SETUP_TOKEN` secret, if you set one, or
+- a one-time token the Worker generates on the first visit. Find it in the dashboard: Workers & Pages → your Worker → Logs, in the entry **officebox setup token** (only members of your Cloudflare account can read these logs). It expires after 24 hours; visiting the setup page again after that writes a new one.
+
+Setup is rate-limited and recorded in the audit log. For extra protection while the workspace is unclaimed, you can put Cloudflare Access in front of it until setup is done.
+
 ## Develop
 
 Requires Node 22.22 or later.
 
 ```sh
 npm install --legacy-peer-deps   # npm 10.9 crashes resolving peer dependencies without it (.npmrc sets it too)
-cp .dev.vars.example .dev.vars   # local Worker secrets
+cp .dev.vars.example .dev.vars   # local Worker secrets: fill in each value (openssl rand -base64 32)
 npm run dev                      # Worker on :8787, web app with hot reload on http://localhost:5173
 ```
 

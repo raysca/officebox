@@ -826,7 +826,7 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 
 1. The client signs in with `POST /auth/password`, a magic link or a passkey (below). The Worker sets two cookies, both `HttpOnly`, `Secure` and `SameSite=Lax`:
    - `ob_session`: a short-lived (15-minute) signed access token carrying user ID, session ID and `session_epoch`.
-   - `ob_refresh`: a 30-day rotating refresh token, scoped to `/auth/refresh` and stored hashed in `sessions`.
+   - `ob_refresh`: a 30-day rotating refresh token, `<session id>.<32 random bytes>`, scoped to `/api/auth` (the refresh and sign-out endpoints; sign-out needs it once the access token has expired) and stored as an HMAC in `sessions`. The successor of a token is derived from it (`HMAC(TOKEN_HASH_KEY, session id + token)`), so two tabs refreshing with the same token inside the grace window get the same successor without it being stored.
 
    JavaScript can't read either token, and neither ever appears in a URL.
 2. The client opens WebSockets to `/ws/hub`, `/ws/channels/:id`, `/ws/docs/:id` or `/ws/calls/:id` (after `POST /calls/:id/join`, §3.6). Browsers send same-origin cookies with the upgrade request.
@@ -1332,7 +1332,7 @@ Until `installation.setup_completed_at` is set, every route except `/setup`, `/h
 **Token source:**
 
 1. **`SETUP_TOKEN` secret set:** it is used as the token. It must be at least 32 characters.
-2. **No secret:** on the first request, the Worker generates a 32-byte random token. It stores the SHA-256 hash and a 24-hour expiry with `INSERT … ON CONFLICT DO NOTHING`, so concurrent first requests produce a single token. It logs the token once to Workers Logs with a clear marker. Only members of the Cloudflare account can see these logs. An expired token is replaced and logged again on the next visit.
+2. **No secret** (unset or empty): on the first request, the Worker generates a 32-byte random token. It stores the SHA-256 hash and a 24-hour expiry with `INSERT … ON CONFLICT DO NOTHING`, so concurrent first requests produce a single token. This creates the installation row before setup, with its `installation_id` and an empty name; everything that asks "is setup done?" (including the settings store) reads `setup_completed_at`, never the row's existence. It logs the token once to Workers Logs with a clear marker (`logUnredacted`, the only unredacted log path). Only members of the Cloudflare account can see these logs. An expired token is replaced (a compare-and-set on the old hash and expiry) and logged again on the next visit.
 
 **Setup submission:** `POST /setup` with `{ token, workspaceName, ownerEmail, ownerName, ownerHandle, password }`. Setup creates **identity objects only** (installation, the owner user, their handle, settings). `#general`, calendars and drives are created by the milestones that own them, with backfill jobs (Platform §13).
 
@@ -1350,6 +1350,8 @@ Until `installation.setup_completed_at` is set, every route except `/setup`, `/h
    WHERE id = 1 AND setup_claim = :nonce;
   ```
 - An audit entry is written.
+
+**Before setup**, authenticated API routes answer the typed error `setup_required` (HTTP 409), which the web app turns into a redirect to `/setup`.
 
 **After setup:** `/setup` returns 404 permanently and `SETUP_TOKEN` is ignored. The admin UI recommends deleting the secret.
 
@@ -1566,12 +1568,12 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - **Sessions:**
   - Cookies as in §3.1.
   - Refresh-token rotation with reuse detection: presenting an old refresh token revokes the session, **except within a 30-second grace window** after rotation, when the previous token returns the same successor (two tabs refreshing at once).
-  - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets.
+  - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets. The same check covers the session row itself, so a session signed out from "My devices" stops working within the same bound rather than when its access token expires.
   - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
 - **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
 - **Rate limiting** (mechanisms per platform §8):
   - The Workers Rate Limiting binding supports periods of exactly 10 or 60 seconds, counts per Cloudflare location, and is approximate. The wrapper treats it as advisory and returns `rate_limited` with retry-after equal to the period. Longer windows and exact quotas use D1 or Durable Object counters.
-  - Sign-in: 5 attempts per minute per IP (binding) and 10 per hour per account (D1 counter), with progressive delays. There is no hard lockout, which would let attackers lock users out.
+  - Sign-in: 5 attempts per minute per IP (binding) and 10 per hour per account (D1 counter `sign_in_throttle`), with progressive delays. An attempt made before its delay has passed is refused with `rate_limited` and a retry-after instead of being held open; the attempt is counted atomically before the password is checked, so parallel guesses can't slip past the schedule. There is no hard lockout, which would let attackers lock users out.
   - Setup, recovery, invitation acceptance and password reset are limited the same way.
 - **Tokens:** invitation, reset and recovery tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days and resets after 1 hour.
 - **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: reset one owner's password and MFA. The action is audited, and a banner shows until the secret is deleted.

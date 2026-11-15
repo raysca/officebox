@@ -1,7 +1,20 @@
 # Worker secrets. Copy to .dev.vars for local development (`npm run dev`); never commit .dev.vars.
 # The Deploy to Cloudflare button reads this file to prompt for secrets at deploy time.
-# Full inventory, purpose and rotation: specs/platform.md §16.
+# Full inventory, purpose and rotation: specs/platform.md §16; admin notes in README.md ("Secrets").
+#
+# Generate each random value with:  openssl rand -base64 32
+# Values must be at least 32 bytes. Use different values for every secret and every installation.
 
-# First-run setup token (TDD §6.8). Optional. An empty value is treated as unset (M1 implements
-# this): a one-time token is then generated and written to Workers Logs on the first visit.
+# First-run setup token (TDD §6.8). Optional, at least 32 characters. Empty or unset: a one-time token
+# is generated on the first visit and written to Workers Logs instead. Ignored after setup; delete it.
 SETUP_TOKEN=
+
+# Signs the session cookie (access tokens). Required.
+SESSION_SIGNING_KEY=
+
+# HMAC key for stored token hashes (refresh tokens, sign-in throttle keys, audit email hashes). Required.
+TOKEN_HASH_KEY=
+
+# Password pepper (Identity §4.4). Required. Never change or delete it while passwords use it: to rotate,
+# add PEPPER_2 (new hashes use the highest number) and keep PEPPER_1 until the published deadline.
+PEPPER_1=

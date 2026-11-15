@@ -323,6 +323,8 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 
 ## 6. API (summary)
 
+Paths are relative to the Worker's `/api` prefix (for example `POST /api/setup`).
+
 | Method and path | Who | Purpose |
 |---|---|---|
 | `POST /setup` | Setup token | Create workspace and owner (name, @handle, email, password) |
@@ -332,6 +334,7 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
 | `GET /auth/magic-link/:token` · `POST /auth/magic-link/:token` | Public | GET shows the confirmation page (doesn't use the token); POST signs in |
 | `POST /auth/passkey/options` · `POST /auth/passkey/verify` | Public | WebAuthn sign-in |
 | `POST /auth/refresh` · `POST /auth/sign-out` | Session | Rotate (with the 30 s grace window), or sign out |
+| `POST /auth/sign-out-everywhere` | Member | Sign out every session, this one included (bumps `session_epoch`; TDD §8.1 "Sign out everywhere") |
 | `POST /auth/ws-ticket` | Member | One-time WebSocket ticket for non-browser clients (realtime API, TDD §3.1; listed here for completeness) |
 | `GET /me/sessions` · `DELETE /me/sessions/:id` · `POST /me/sessions/sign-out-others` | Member | My devices |
 | `POST /me/passkeys/options` · `POST /me/passkeys` · `PATCH/DELETE /me/passkeys/:id` | Member | Manage passkeys |
@@ -432,4 +435,4 @@ TOTP two-factor · Google/Microsoft or SSO sign-in · guests · member self-serv
 3. **Welcome post wording and channel.** Always `#general`, or configurable?
 4. ~~**WebAuthn library and PBKDF2 limit.**~~ Answered by the M0 foundation spike ([foundation spike](../spikes/foundation/README.md)): `@simplewebauthn/server` runs in Workers; PBKDF2 uses 100k plus an HMAC pepper (§4.4); the production probe confirmed the 100k cap.
 
-**Still pending in other documents:** TDD §3.1 and §8.1 should add the refresh grace window, the per-request `session_epoch` check and the `email_change` token kind. (The PBKDF2 decision is now in TDD §8.1.)
+**Other documents:** TDD §3.1 and §8.1 now carry the refresh grace window, the per-request `session_epoch` check and the `email_change` token kind, and the PBKDF2 decision (updated in M1a).
