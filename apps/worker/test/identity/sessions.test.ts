@@ -165,6 +165,16 @@ describe("refresh rotation and reuse detection", () => {
     expect((await sessionRow(sessionIdOf(jar)))?.revoked_at).not.toBeNull();
   });
 
+  it("a token older than the remembered five is refused without revoking (boundary)", async () => {
+    const { call, clock, jar } = await setup();
+    const oldest = jar.clone();
+    for (let i = 0; i < 6; i++) await refresh(call, jar); // the first token is now 6th-oldest
+    clock.advance(REFRESH_GRACE_MS + 1);
+    expect((await refresh(call, oldest)).status).toBe(401);
+    expect((await sessionRow(sessionIdOf(jar)))?.revoked_at).toBeNull();
+    expect((await refresh(call, jar)).status).toBe(200);
+  });
+
   it("five truly parallel refreshes with one token all succeed with the same successor", async () => {
     const { call, jar } = await setup();
     const tabs = Array.from({ length: 5 }, () => jar.clone());

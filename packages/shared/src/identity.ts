@@ -69,7 +69,8 @@ export const newPasswordSchema = z
   });
 
 /** Email addresses are stored and compared trimmed, NFC-normalised and lower-cased **(default)**. */
-export const emailSchema = z.string().trim().normalize("NFC").toLowerCase().max(MAX_EMAIL_LENGTH).pipe(z.email());
+// Lower-case first, then normalise: lower-casing can produce decomposed sequences (İ → i + U+0307).
+export const emailSchema = z.string().trim().toLowerCase().normalize("NFC").max(MAX_EMAIL_LENGTH).pipe(z.email());
 
 export const displayNameSchema = z
   .string()

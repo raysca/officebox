@@ -125,6 +125,21 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
   type Call = ReturnType<typeof makeApp>["call"];
   const attemptFrom = (call: Call, email: string, password: string, ip: string, jar?: CookieJar) =>
     call("POST", "/api/auth/password", { email, password }, { ip, env: openBinding, jar });
+  /** A clock a minute into an hour, so the hour-based tests don't straddle a boundary. */
+  const hourClock = () => new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+  /** 20 distinct IPs each fail once: the account goes into slow mode. */
+  async function tripSlowMode(call: Call, email: string) {
+    for (let i = 0; i < 20; i++) expect((await attemptFrom(call, email, "guess", uniqueIp())).status).toBe(401);
+  }
+  /** A jar holding only the known-device marker from a successful sign-in. */
+  async function knownDeviceFor(call: Call, user: { email: string; password: string }) {
+    const jar = new CookieJar();
+    const res = await attemptFrom(call, user.email, user.password, uniqueIp(), jar);
+    expect(res.status).toBe(200);
+    const device = new CookieJar();
+    device.values.set("ob_device", jar.get("ob_device") ?? "");
+    return device;
+  }
 
   it("the 6th attempt within a minute from one IP is refused with a retry-after", async () => {
     const { call } = makeApp();
@@ -144,7 +159,7 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
   });
 
-  it("per account and IP: attempts 1–5 are immediate, then 1 s, 2 s, 4 s, 8 s, 16 s, 30 s (cap); no lockout", async () => {
+  it("per account and IP: attempts 1–5 are immediate, then 1 s, 2 s, 4 s, 8 s, 16 s, 30 s (cap)", async () => {
     const user = await createUser();
     const clock = new Clock();
     const { call } = makeApp(clock);
@@ -178,7 +193,7 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     const attempt = () => attemptFrom(call, user.email, "bad-password", ip);
     for (let i = 0; i < 10; i++) {
       expect((await attempt()).status).toBe(401);
-      clock.advance(30_000); // always waiting long enough
+      clock.advance(30_000);
     }
     clock.advance(-30_000);
     expect((await attempt()).status).toBe(429);
@@ -186,18 +201,19 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     for (let i = 0; i < 5; i++) expect((await attempt()).status).toBe(401);
   });
 
-  it("an attacker hammering the account from one IP doesn't stop the user from another", async () => {
+  it("one IP can't trip slow mode: after an hour of max-rate guessing, a new browser elsewhere signs in at once", async () => {
     const user = await createUser();
-    const clock = new Clock();
+    const clock = hourClock();
     const { call } = makeApp(clock);
     const attacker = uniqueIp();
-    // The attacker takes every slot the schedule allows them, for ten minutes.
-    for (let second = 0; second < 600; second += 1) {
-      await attemptFrom(call, user.email, "guess-guess", attacker);
-      clock.advance(1000);
+    const end = clock.value + 58 * 60_000;
+    let counted = 0;
+    while (clock.value < end) {
+      const res = await attemptFrom(call, user.email, "guess-guess", attacker);
+      if (res.status === 401) counted++;
+      else clock.advance(Number(res.headers.get("Retry-After")) * 1000);
     }
-    expect((await attemptFrom(call, user.email, "guess-guess", attacker)).status).toBe(429);
-    // The real user, elsewhere, signs in at once.
+    expect(counted).toBeGreaterThan(100); // every slot the schedule allowed
     expect((await attemptFrom(call, user.email, user.password, uniqueIp())).status).toBe(200);
   });
 
@@ -211,49 +227,106 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     expect((await attemptFrom(call, user.email, "nope-nope", "2001:db8:1:3::1")).status).toBe(401);
   });
 
-  it("the cross-IP ceiling trips after 50 attempts in an hour, but a known device still signs in", async () => {
+  it("20 distinct failing IPs slow unknown devices to one shared slot per 30 s; they still get in", async () => {
     const user = await createUser();
-    const clock = new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+    const clock = hourClock();
     const { call } = makeApp(clock);
+    await tripSlowMode(call, user.email);
 
-    // The owner signed in on this browser before: it carries a known-device marker for the account.
-    const owner = await signIn(call, user, { env: openBinding });
-    expect(owner.get("ob_device")).toBeTruthy();
-    const knownDevice = new CookieJar();
-    knownDevice.values.set("ob_device", owner.get("ob_device") ?? "");
-
-    // A distributed attack: one wrong guess from each of 50 IPs.
-    for (let i = 0; i < 50; i++) expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401);
-
-    // Unknown devices are now held back until the hour ends, even with the right password...
-    const blocked = await attemptFrom(call, user.email, user.password, uniqueIp());
-    expect(blocked.status).toBe(429);
-    expect(Number(blocked.headers.get("Retry-After"))).toBe(59 * 60);
-    // ...a marker for another account doesn't help...
-    const other = await createUser();
-    const otherJar = await signIn(call, other, { env: openBinding });
-    const wrongMarker = new CookieJar();
-    wrongMarker.values.set("ob_device", otherJar.get("ob_device") ?? "");
-    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), wrongMarker)).status).toBe(429);
-    // ...but the known device keeps the normal schedule and signs in.
-    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), knownDevice)).status).toBe(200);
-
-    // A new hour starts afresh.
-    clock.advance(60 * 60 * 1000);
-    expect((await attemptFrom(call, user.email, user.password, uniqueIp())).status).toBe(200);
+    // The attacker takes the open slot; the owner, on a new browser, waits for the next one.
+    expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401);
+    const owner = uniqueIp();
+    const waiting = await attemptFrom(call, user.email, user.password, owner);
+    expect(waiting.status).toBe(429);
+    expect(waiting.headers.get("Retry-After")).toBe("30");
+    clock.advance(30_000);
+    expect((await attemptFrom(call, user.email, user.password, owner)).status).toBe(200);
   });
 
-  it("successful sign-ins don't count towards the ceiling", async () => {
+  it("after the trip, 200 parallel requests from 200 IPs: exactly one per slot reaches the password check", async () => {
     const user = await createUser();
-    const clock = new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+    const clock = hourClock();
     const { call } = makeApp(clock);
-    for (let i = 0; i < 55; i++) {
+    await tripSlowMode(call, user.email);
+    const results = await Promise.all(
+      Array.from({ length: 200 }, () => attemptFrom(call, user.email, "guess", uniqueIp())),
+    );
+    expect(results.filter((r) => r.status === 401)).toHaveLength(1);
+    expect(results.filter((r) => r.status === 429)).toHaveLength(199);
+    clock.advance(30_000);
+    const next = await Promise.all(
+      Array.from({ length: 20 }, () => attemptFrom(call, user.email, "guess", uniqueIp())),
+    );
+    expect(next.filter((r) => r.status === 401)).toHaveLength(1);
+  });
+
+  it("known devices are unaffected by slow mode, and a marker for another account doesn't help", async () => {
+    const user = await createUser();
+    const clock = hourClock();
+    const { call } = makeApp(clock);
+    const device = await knownDeviceFor(call, user);
+    const other = await createUser();
+    const otherDevice = await knownDeviceFor(call, other);
+    await tripSlowMode(call, user.email);
+    expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401); // slot taken
+
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), otherDevice)).status).toBe(429);
+    for (let i = 0; i < 3; i++) {
+      expect((await attemptFrom(call, user.email, user.password, uniqueIp(), device)).status).toBe(200);
+    }
+  });
+
+  it("sign out everywhere and a password re-hash invalidate the known-device marker", async () => {
+    const user = await createUser();
+    const clock = hourClock();
+    const { call } = makeApp(clock);
+    const device = await knownDeviceFor(call, user);
+    await tripSlowMode(call, user.email);
+    expect((await attemptFrom(call, user.email, "guess", uniqueIp())).status).toBe(401); // slot taken
+
+    await env.DB.prepare("UPDATE users SET session_epoch = session_epoch + 1 WHERE id = ?").bind(user.id).run();
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), device)).status).toBe(429);
+
+    clock.advance(30_000);
+    const fresh = await knownDeviceFor(call, user); // takes the open slot and gets a new marker
+    // A sign-in on the known device after a pepper rotation re-hashes the password...
+    const rehash = await attemptFrom(call, user.email, user.password, uniqueIp(), fresh.clone());
+    expect(rehash.status).toBe(200); // known device: no slot needed
+    const rotatedEnv = { ...openBinding, PEPPER_2: "rotated-pepper-two-0123456789abcdefghijklmnop" };
+    const before = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(user.id).first();
+    const rotated = await call(
+      "POST",
+      "/api/auth/password",
+      { email: user.email, password: user.password },
+      { ip: uniqueIp(), env: rotatedEnv, jar: fresh.clone() },
+    );
+    expect(rotated.status).toBe(200);
+    const after = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?").bind(user.id).first();
+    expect(after).not.toEqual(before);
+    // ...so the marker issued before it no longer counts: back to the shared slot, which is taken.
+    expect((await attemptFrom(call, user.email, user.password, uniqueIp(), fresh)).status).toBe(429);
+  });
+
+  it("a known device behind a shared IP isn't delayed by others failing from that IP", async () => {
+    const user = await createUser();
+    const { call } = makeApp(new Clock());
+    const office = uniqueIp();
+    const device = await knownDeviceFor(call, user);
+    for (let i = 0; i < 5; i++) expect((await attemptFrom(call, user.email, "guess", office)).status).toBe(401);
+    expect((await attemptFrom(call, user.email, "guess", office)).status).toBe(429);
+    expect((await attemptFrom(call, user.email, user.password, office, device)).status).toBe(200);
+  });
+
+  it("successful sign-ins never count towards slow mode", async () => {
+    const user = await createUser();
+    const { call } = makeApp(hourClock());
+    for (let i = 0; i < 25; i++) {
       expect((await attemptFrom(call, user.email, user.password, uniqueIp())).status).toBe(200);
     }
   });
 
-  it("unknown emails are throttled exactly like real accounts, per IP and across IPs", async () => {
-    const clock = new Clock(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+  it("unknown emails behave exactly like real accounts, per IP and in slow mode", async () => {
+    const clock = hourClock();
     const { call } = makeApp(clock);
     const email = uniqueEmail();
     const ip = uniqueIp();
@@ -262,10 +335,11 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     expect(perIp).toEqual([401, 401, 401, 401, 401, 429]);
 
     const other = uniqueEmail();
-    for (let i = 0; i < 50; i++) expect((await attemptFrom(call, other, "guess", uniqueIp())).status).toBe(401);
-    const tripped = await attemptFrom(call, other, "guess", uniqueIp());
-    expect(tripped.status).toBe(429);
-    expect(Number(tripped.headers.get("Retry-After"))).toBe(59 * 60);
+    await tripSlowMode(call, other);
+    expect((await attemptFrom(call, other, "guess", uniqueIp())).status).toBe(401);
+    const slowed = await attemptFrom(call, other, "guess", uniqueIp());
+    expect(slowed.status).toBe(429);
+    expect(slowed.headers.get("Retry-After")).toBe("30");
   });
 
   it("parallel guesses from one IP can't slip past the schedule", async () => {
@@ -288,6 +362,7 @@ describe("rate limits (Identity §4.4, §9; Platform §8)", () => {
     const marker = ok.headers.getSetCookie().find((c) => c.startsWith("ob_device="));
     expect(marker).toMatch(/HttpOnly/);
     expect(marker).toMatch(/Secure/);
+    expect(marker).toMatch(/SameSite=Lax/);
     expect(marker).toMatch(/Path=\/api\/auth/);
     expect(marker).toMatch(/Max-Age=34560000/);
   });

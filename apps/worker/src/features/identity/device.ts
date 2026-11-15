@@ -104,5 +104,11 @@ export function ipBucket(ip: string): string {
   const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
   if (mapped?.[1]) return mapped[1];
   const groups = expandIpv6(ip);
-  return groups ? `${groups.slice(0, 4).join(":")}::/64` : ip;
+  if (!groups) return ip;
+  // ::ffff:0102:0304, the hex spelling of an IPv4-mapped address, is 1.2.3.4 too.
+  if (groups.slice(0, 5).every((g) => g === "0000") && groups[5] === "ffff") {
+    const [hi = 0, lo = 0] = [parseInt(groups[6] ?? "0", 16), parseInt(groups[7] ?? "0", 16)];
+    return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  }
+  return `${groups.slice(0, 4).join(":")}::/64`;
 }

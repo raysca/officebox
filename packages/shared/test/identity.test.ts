@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  emailSchema,
   handleSchema,
   MAX_PASSWORD_LENGTH,
   newPasswordSchema,
@@ -88,5 +89,11 @@ describe("Unicode normalisation", () => {
     const composed = "caf\u00e9 au lait!";
     expect(newPasswordSchema.parse(decomposed)).toBe(composed);
     expect(passwordSignInBodySchema.parse({ email: "a@b.co", password: decomposed }).password).toBe(composed);
+    // Emails are lower-cased, then normalised. Zod's email format is ASCII-only, so a non-ASCII address
+    // such as İSIL@… (which lower-cases to i + U+0307) is refused consistently rather than stored in
+    // two spellings; the normalisation is defence in depth.
+    expect(emailSchema.safeParse("\u0130SIL@example.com").success).toBe(false);
+    expect(emailSchema.safeParse("i\u0307sil@example.com").success).toBe(false);
+    expect(emailSchema.parse("  Sam.Lee@Example.COM ")).toBe("sam.lee@example.com");
   });
 });

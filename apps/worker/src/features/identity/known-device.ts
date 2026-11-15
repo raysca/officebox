@@ -1,57 +1,100 @@
 import { z } from "zod";
-import { base64url, fromBase64url, hmacSha256, timingSafeEqual } from "./crypto";
+import { base64url, fromBase64url, hmacSha256, randomToken, timingSafeEqual } from "./crypto";
 
 /**
- * The "known device" marker (Identity §4.4, sign-in throttling **(default)**): a signed, long-lived
- * `ob_device` cookie set after a successful password sign-in in this browser, bound to that account.
- * When an account is under a distributed guessing attack and its cross-IP ceiling trips, browsers that
- * carry a valid marker for the account keep the normal per-IP schedule, so its owner can still sign
- * in; everyone else waits for the window to pass.
+ * The "known device" marker (Identity §2 Decisions, §4.4, §4.5 **(default)**): a signed, long-lived
+ * `ob_device` cookie set after a successful password sign-in in this browser.
  *
- * It grants nothing on its own: it is not a session and never skips the password. It is signed with
- * `SESSION_SIGNING_KEY` (the previous key verifies too) under its own context string, and names the
- * account only by the same HMAC of the email that keys the throttle.
+ * - **What it does:** when an account is in slow mode (a distributed guessing attack), browsers with a
+ *   valid marker for the account skip the shared 30-second slot, and their per-IP delay is keyed by
+ *   the device too, so others failing from the same IP (a shared NAT) don't delay them.
+ * - **What it doesn't do:** it is not a session and never skips the password.
+ * - **Bound to:** the account (the HMAC of the email that keys the throttle), the user's
+ *   `session_epoch` and a password version (an HMAC of the stored hash). Sign out everywhere, a
+ *   password change or re-hash, and disabling the member (status is checked too) all invalidate it.
+ * - **Signed** with `SESSION_SIGNING_KEY` (the previous key verifies too) under its own context
+ *   string. It carries a random device ID and its issue time, and expires after 400 days.
  */
 
 export const KNOWN_DEVICE_COOKIE = "ob_device";
 /** Browsers cap cookie lifetimes at 400 days. */
 export const KNOWN_DEVICE_TTL_MS = 400 * 24 * 60 * 60 * 1000;
-const CONTEXT = "ob_device.v1.";
+const CONTEXT = "ob_device.v2.";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const payloadSchema = z.strictObject({ v: z.literal(1), a: z.string().max(100), iat: z.number().int() });
+const payloadSchema = z.strictObject({
+  v: z.literal(2),
+  a: z.string().max(100), // account key
+  d: z.string().regex(/^[A-Za-z0-9_-]{22}$/), // device ID
+  e: z.number().int().nonnegative(), // session_epoch
+  p: z.string().max(100), // password version
+  iat: z.number().int(),
+});
 
-export async function signKnownDevice(key: string, accountKey: string, now: number): Promise<string> {
-  const body = base64url(encoder.encode(JSON.stringify({ v: 1, a: accountKey, iat: now })));
+export interface DeviceBinding {
+  accountKey: string;
+  sessionEpoch: number;
+  passwordVersion: string;
+}
+
+/** A short, non-reversible version of the stored password hash: changes whenever the hash does. */
+export async function passwordVersion(tokenHashKey: string, passwordHash: string | null): Promise<string> {
+  return base64url(await hmacSha256(tokenHashKey, `pw-version:${passwordHash ?? ""}`)).slice(0, 22);
+}
+
+export function newDeviceId(): string {
+  return randomToken(16);
+}
+
+export async function signKnownDevice(
+  key: string,
+  binding: DeviceBinding,
+  deviceId: string,
+  now: number,
+): Promise<string> {
+  const payload = {
+    v: 2,
+    a: binding.accountKey,
+    d: deviceId,
+    e: binding.sessionEpoch,
+    p: binding.passwordVersion,
+    iat: now,
+  };
+  const body = base64url(encoder.encode(JSON.stringify(payload)));
   return `${body}.${base64url(await hmacSha256(key, CONTEXT + body))}`;
 }
 
-/** Whether `cookie` is a valid, unexpired marker for `accountKey`. Never throws. */
-export async function isKnownDevice(
+const same = (a: string, b: string) => timingSafeEqual(encoder.encode(a), encoder.encode(b));
+
+/** The device ID of a valid, unexpired marker matching `binding`, or null. Never throws. */
+export async function knownDeviceId(
   keys: readonly string[],
   cookie: string | undefined,
-  accountKey: string,
+  binding: DeviceBinding,
   now: number,
-): Promise<boolean> {
-  if (!cookie || cookie.length > 512) return false;
+): Promise<string | null> {
+  if (!cookie || cookie.length > 1024) return null;
   const [body, signature, extra] = cookie.split(".");
-  if (!body || !signature || extra !== undefined) return false;
+  if (!body || !signature || extra !== undefined) return null;
   const presented = fromBase64url(signature);
-  if (!presented) return false;
+  if (!presented) return null;
   let signed = false;
   for (const key of keys) if (timingSafeEqual(await hmacSha256(key, CONTEXT + body), presented)) signed = true;
-  if (!signed) return false;
+  if (!signed) return null;
   const bytes = fromBase64url(body);
-  if (!bytes) return false;
+  if (!bytes) return null;
   try {
     const parsed = payloadSchema.safeParse(JSON.parse(decoder.decode(bytes)));
-    return (
-      parsed.success &&
-      timingSafeEqual(encoder.encode(parsed.data.a), encoder.encode(accountKey)) &&
-      now - parsed.data.iat < KNOWN_DEVICE_TTL_MS
-    );
+    if (!parsed.success) return null;
+    const p = parsed.data;
+    const valid =
+      same(p.a, binding.accountKey) &&
+      p.e === binding.sessionEpoch &&
+      same(p.p, binding.passwordVersion) &&
+      now - p.iat < KNOWN_DEVICE_TTL_MS;
+    return valid ? p.d : null;
   } catch {
-    return false;
+    return null;
   }
 }

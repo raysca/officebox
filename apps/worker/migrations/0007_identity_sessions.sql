@@ -3,6 +3,7 @@
 -- refresh at once the same successor for 30 seconds. The daily identity.prune_sessions job deletes
 -- rows once expired or revoked, taking the device label and location with them.
 -- Safe to re-run (TDD §6.5).
+-- Edited before its first merge (M1a review added retired_refresh_hashes); no deployment ever ran the earlier version.
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

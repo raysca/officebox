@@ -15,7 +15,7 @@ import {
 } from "../../src/features/identity/password";
 import { identitySecrets, resetSecretsLogThrottle } from "../../src/features/identity/secrets";
 import { ipBucket } from "../../src/features/identity/device";
-import { isKnownDevice, signKnownDevice } from "../../src/features/identity/known-device";
+import { knownDeviceId, newDeviceId, signKnownDevice } from "../../src/features/identity/known-device";
 import { throttleDelayMs } from "../../src/features/identity/sign-in";
 
 const P1 = "unit-pepper-one-0123456789abcdefghijklmnop";
@@ -269,6 +269,9 @@ describe("IP buckets for the per-IP throttle", () => {
     expect(ipBucket("2001:db8:1:2::5")).toBe("2001:0db8:0001:0002::/64");
     expect(ipBucket("2001:DB8:1:2:aaaa:bbbb:cccc:dddd")).toBe("2001:0db8:0001:0002::/64");
     expect(ipBucket("::ffff:203.0.113.7")).toBe("203.0.113.7");
+    expect(ipBucket("::ffff:0102:0304")).toBe("1.2.3.4");
+    expect(ipBucket("::FFFF:CB00:7107")).toBe("203.0.113.7");
+    expect(ipBucket("0:0:0:0:0:ffff:cb00:7107")).toBe("203.0.113.7");
     expect(ipBucket("unknown")).toBe("unknown");
     expect(ipBucket("not:an:address::x")).toBe("not:an:address::x");
   });
@@ -276,13 +279,19 @@ describe("IP buckets for the per-IP throttle", () => {
 
 describe("known-device marker", () => {
   const key = "device-key-0123456789abcdefghijklmnopqr";
-  it("is valid only for its account, its key and 400 days", async () => {
-    const marker = await signKnownDevice(key, "account-a", 0);
-    expect(await isKnownDevice([key], marker, "account-a", 1000)).toBe(true);
-    expect(await isKnownDevice([key], marker, "account-b", 1000)).toBe(false);
-    expect(await isKnownDevice(["other-key-0123456789abcdefghijklmnop"], marker, "account-a", 1000)).toBe(false);
-    expect(await isKnownDevice([key], marker, "account-a", 400 * 24 * 3600 * 1000)).toBe(false);
-    expect(await isKnownDevice([key], `${marker}x`, "account-a", 1000)).toBe(false);
-    expect(await isKnownDevice([key], undefined, "account-a", 1000)).toBe(false);
+  const binding = { accountKey: "account-a", sessionEpoch: 2, passwordVersion: "pw-v1" };
+
+  it("is valid only for its account, epoch, password version, key and 400 days", async () => {
+    const id = newDeviceId();
+    const marker = await signKnownDevice(key, binding, id, 0);
+    expect(await knownDeviceId([key], marker, binding, 1000)).toBe(id);
+    expect(await knownDeviceId([key], marker, { ...binding, accountKey: "account-b" }, 1000)).toBeNull();
+    // Sign out everywhere (epoch bump) and a password change or re-hash invalidate it.
+    expect(await knownDeviceId([key], marker, { ...binding, sessionEpoch: 3 }, 1000)).toBeNull();
+    expect(await knownDeviceId([key], marker, { ...binding, passwordVersion: "pw-v2" }, 1000)).toBeNull();
+    expect(await knownDeviceId(["other-key-0123456789abcdefghijklmnop"], marker, binding, 1000)).toBeNull();
+    expect(await knownDeviceId([key], marker, binding, 400 * 24 * 3600 * 1000)).toBeNull();
+    expect(await knownDeviceId([key], `${marker}x`, binding, 1000)).toBeNull();
+    expect(await knownDeviceId([key], undefined, binding, 1000)).toBeNull();
   });
 });

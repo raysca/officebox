@@ -4,7 +4,7 @@ import { Database, expectOk } from "../../core/db";
 import { checkLimit } from "../../core/rate-limit";
 import { base64url, hmacSha256 } from "./crypto";
 import { clientIp, deviceInfo, ipBucket } from "./device";
-import { isKnownDevice, signKnownDevice } from "./known-device";
+import { knownDeviceId, newDeviceId, passwordVersion, signKnownDevice, type DeviceBinding } from "./known-device";
 import { IDENTITY_LIMITS } from "./limits";
 import { hashPassword, verifyPassword } from "./password";
 import type { IdentitySecrets } from "./secrets";
@@ -15,23 +15,26 @@ import { isSetupComplete } from "./setup-state";
  * Email and password sign-in (Identity §4.4; throttling design in Identity §2 Decisions, **default**).
  *
  * 1. **Per IP:** 5 attempts per minute (Rate Limiting binding, advisory; Platform §8).
- * 2. **Per account and IP:** a D1 counter keyed by an HMAC of the email **and** the client's IP bucket
- *    (the address for IPv4, its /64 for IPv6). Attempts 1–5 go ahead immediately; after that each
- *    attempt must wait 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s (the cap) after the previous one from that
- *    IP. An attempt made too soon is refused with `rate_limited` and a retry-after, without checking
- *    the password and without counting. An attacker's attempts therefore only slow the attacker's own
- *    IP for that account: the real user, from another IP, is unaffected (no lockout, TDD §8.1).
- * 3. **Per account, across IPs:** a ceiling of 50 attempts that reached the password check per fixed
- *    hour (successes are taken back off). When it trips, browsers **without** a valid known-device
- *    cookie for the account (`known-device.ts`) are refused until the hour ends; known devices keep
- *    the normal per-IP schedule, so the owner can still sign in during a distributed attack.
- * 4. **Counting:** only attempts that reach the password check count. The per-IP counter is taken
- *    atomically before verification, so parallel guesses can't slip past it. The ceiling is checked
- *    before and counted after that reservation; parallel requests can overshoot it slightly, which is
- *    harmless for a limit this generous.
+ * 2. **Per account and IP:** a D1 counter keyed by an HMAC of the email and the client's IP bucket (the
+ *    address for IPv4, its /64 for IPv6), plus the device ID for a known device (so others failing
+ *    behind the same NAT don't delay it). Attempts 1–5 go ahead immediately; after that each attempt
+ *    must wait 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s (the cap) after the previous one. An attempt made
+ *    too soon is refused with `rate_limited` and a retry-after, without checking the password and
+ *    without counting. An attacker's attempts only slow the attacker's own IP for that account.
+ * 3. **Slow mode, across IPs:** when 20 distinct IP buckets have had a failed attempt on the account in
+ *    the current hour, browsers **without** a valid known-device cookie share one sign-in slot per
+ *    account every 30 seconds. The slot is reserved in one guarded upsert, so parallel requests can't
+ *    slip through, and refused requests never reach PBKDF2. This bounds distributed guessing at about
+ *    120 attempts an hour per account. One IP can never trip it. Known devices are unaffected.
+ *    **Limit, stated plainly:** during a distributed attack, sign-in from new browsers can be slowed to
+ *    roughly one attempt per 30 seconds per account, shared with the attacker; magic links (M1c) and
+ *    admin recovery links aren't throttled this way and remain the way in.
+ * 4. **Counting:** only attempts that reach the password check count towards the per-IP schedule (taken
+ *    atomically before verification), and only failed ones add an IP bucket.
  * 5. **No enumeration:** every key is derived from the submitted email whether or not an account
- *    exists, verification costs one full PBKDF2 derivation either way (`password.ts`), and both
- *    failures return the same `invalid_credentials` error.
+ *    exists, the user row is read either way, verification costs one full PBKDF2 derivation either way
+ *    (`password.ts`), and both failures return the same `invalid_credentials` error. An unknown email
+ *    can never have a known device, exactly like a real account seen from a new browser.
  * 6. **Disabled and deleted members** get a generic "can't sign in", only after the right password.
  * 7. **Pepper rotation:** a hash on an older pepper or policy is re-hashed after a successful sign-in.
  */
@@ -39,9 +42,10 @@ import { isSetupComplete } from "./setup-state";
 export const FREE_ATTEMPTS = 5;
 export const MAX_DELAY_MS = 30_000;
 export const THROTTLE_WINDOW_MS = 60 * 60 * 1000;
-/** Cross-IP attempts per account per hour before unknown devices are held back (default). */
-export const ACCOUNT_CEILING = 50;
-const CEILING_SCOPE = "sign_in_account";
+/** Distinct failing IP buckets per account per hour that switch on slow mode (default). */
+export const SLOW_MODE_BUCKETS = 20;
+/** In slow mode, unknown devices share one attempt per account per this interval (default). */
+export const SLOW_MODE_SLOT_MS = 30_000;
 
 /** The wait required after `attempts` recorded attempts: 0 for the first five, then 1 s doubling to 30 s. */
 export function throttleDelayMs(attempts: number): number {
@@ -64,14 +68,23 @@ function tooMany(waitMs: number): ApiError {
   });
 }
 
+const hmac = async (secrets: IdentitySecrets, value: string) =>
+  base64url(await hmacSha256(secrets.tokenHashKey, value));
+
 /** The account's throttle identity: an HMAC of the email, the same whether or not the account exists. */
-export async function accountKey(secrets: IdentitySecrets, email: string): Promise<string> {
-  return base64url(await hmacSha256(secrets.tokenHashKey, `sign-in:${email.toLowerCase()}`));
+export function accountKey(secrets: IdentitySecrets, email: string): Promise<string> {
+  return hmac(secrets, `sign-in:${email.toLowerCase()}`);
 }
 
-/** The per-account, per-IP throttle key. */
-export async function accountIpKey(secrets: IdentitySecrets, email: string, ip: string): Promise<string> {
-  return base64url(await hmacSha256(secrets.tokenHashKey, `sign-in-ip:${email.toLowerCase()}|${ipBucket(ip)}`));
+/** The per-account, per-IP (and, for a known device, per-device) throttle key. */
+export function accountIpKey(
+  secrets: IdentitySecrets,
+  email: string,
+  ip: string,
+  deviceId: string | null,
+): Promise<string> {
+  const device = deviceId ? `|device:${deviceId}` : "";
+  return hmac(secrets, `sign-in-ip:${email.toLowerCase()}|${ipBucket(ip)}${device}`);
 }
 
 /** Counts an attempt for `key` if the schedule allows one now; otherwise says how long to wait. */
@@ -102,44 +115,59 @@ export async function reserveAttempt(ctx: CoreContext, key: string): Promise<Res
   return err(tooMany(row ? row.last_attempt_at + throttleDelayMs(row.attempts) - now : 1000));
 }
 
-function ceilingWindow(now: number): { start: number; end: number } {
-  const start = Math.floor(now / THROTTLE_WINDOW_MS) * THROTTLE_WINDOW_MS;
-  return { start, end: start + THROTTLE_WINDOW_MS };
+function hourStart(at: number): number {
+  return Math.floor(at / THROTTLE_WINDOW_MS) * THROTTLE_WINDOW_MS;
 }
 
-/** Refuses an unknown device while the account's cross-IP ceiling is tripped. */
-async function checkCeiling(ctx: CoreContext, key: string): Promise<Result<void, ApiError>> {
-  const now = ctx.now();
-  const { start, end } = ceilingWindow(now);
+/** Whether the account is in slow mode: enough distinct IP buckets failed on it this hour. */
+async function inSlowMode(ctx: CoreContext, account: string): Promise<boolean> {
   const row = expectOk(
-    await new Database(ctx.env.DB).first<{ count: number }>(
-      "SELECT count FROM rate_counters WHERE scope = ? AND key = ? AND window_start = ?",
-      CEILING_SCOPE,
-      key,
-      start,
+    await new Database(ctx.env.DB).first<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM sign_in_failure_buckets WHERE account_key = ? AND window_start = ?",
+      account,
+      hourStart(ctx.now()),
     ),
   );
-  return (row?.count ?? 0) >= ACCOUNT_CEILING ? err(tooMany(end - now)) : ok();
+  return (row?.n ?? 0) >= SLOW_MODE_BUCKETS;
 }
 
-async function adjustCeiling(ctx: CoreContext, key: string, delta: 1 | -1): Promise<void> {
-  const { start } = ceilingWindow(ctx.now());
+/** Takes the account's shared slow-mode slot in one statement, or says when the next one opens. */
+export async function reserveSlot(ctx: CoreContext, account: string): Promise<Result<void, ApiError>> {
+  const now = ctx.now();
   const db = new Database(ctx.env.DB);
+  const taken = expectOk(
+    await db.first<{ next_allowed_at: number }>(
+      `INSERT INTO sign_in_slots (account_key, next_allowed_at) VALUES (?1, ?2)
+       ON CONFLICT (account_key) DO UPDATE SET next_allowed_at = ?2 WHERE next_allowed_at <= ?3
+       RETURNING next_allowed_at`,
+      account,
+      now + SLOW_MODE_SLOT_MS,
+      now,
+    ),
+  );
+  if (taken) return ok();
+  const row = expectOk(
+    await db.first<{ next_allowed_at: number }>(
+      "SELECT next_allowed_at FROM sign_in_slots WHERE account_key = ?",
+      account,
+    ),
+  );
+  return err(tooMany((row?.next_allowed_at ?? now + 1000) - now));
+}
+
+/**
+ * Records that this IP bucket failed on the account in the hour of the attempt. The set only grows
+ * within an hour and nothing is refunded on success, so a correct password can never let an extra
+ * unknown device through.
+ */
+async function recordFailure(ctx: CoreContext, secrets: IdentitySecrets, account: string, ip: string, at: number) {
   expectOk(
-    delta === 1
-      ? await db.run(
-          `INSERT INTO rate_counters (scope, key, window_start, count) VALUES (?, ?, ?, 1)
-           ON CONFLICT (scope, key, window_start) DO UPDATE SET count = count + 1`,
-          CEILING_SCOPE,
-          key,
-          start,
-        )
-      : await db.run(
-          "UPDATE rate_counters SET count = count - 1 WHERE scope = ? AND key = ? AND window_start = ? AND count > 0",
-          CEILING_SCOPE,
-          key,
-          start,
-        ),
+    await new Database(ctx.env.DB).run(
+      "INSERT OR IGNORE INTO sign_in_failure_buckets (account_key, window_start, bucket_key) VALUES (?, ?, ?)",
+      account,
+      hourStart(at),
+      await hmac(secrets, `sign-in-bucket:${ipBucket(ip)}`),
+    ),
   );
 }
 
@@ -148,19 +176,22 @@ async function resetAttempts(ctx: CoreContext, key: string): Promise<void> {
 }
 
 /**
- * Deletes throttle state that can no longer affect anything: per-IP rows idle for the window, and
- * ceiling counters for past windows. Runs hourly, which bounds the rows unknown emails can leave behind.
+ * Deletes throttle state that can no longer affect anything: per-IP rows idle for the window, failure
+ * buckets of past hours and slots that opened over an hour ago. Runs hourly, which bounds the rows
+ * unknown emails can leave behind.
  */
 export async function pruneSignInThrottle(ctx: CoreContext): Promise<number> {
-  const cutoff = ctx.now() - THROTTLE_WINDOW_MS;
+  const now = ctx.now();
+  const cutoff = now - THROTTLE_WINDOW_MS;
   const db = new Database(ctx.env.DB);
-  const [rows, counters] = expectOk(
+  const results = expectOk(
     await db.batchRun([
       db.statement("DELETE FROM sign_in_throttle WHERE last_attempt_at <= ?", cutoff),
-      db.statement("DELETE FROM rate_counters WHERE scope = ? AND window_start < ?", CEILING_SCOPE, cutoff),
+      db.statement("DELETE FROM sign_in_failure_buckets WHERE window_start < ?", hourStart(now)),
+      db.statement("DELETE FROM sign_in_slots WHERE next_allowed_at <= ?", cutoff),
     ]),
   );
-  return (rows?.changes ?? 0) + (counters?.changes ?? 0);
+  return results.reduce((sum, r) => sum + r.changes, 0);
 }
 
 interface SignInUserRow {
@@ -189,51 +220,68 @@ export async function signInWithPassword(
   if (!(await isSetupComplete(ctx))) return err(apiError("setup_required", "This workspace hasn't been set up yet."));
 
   const account = await accountKey(secrets, body.email);
-  const known = await isKnownDevice(secrets.sessionKeys, knownDeviceCookie, account, ctx.now());
-  if (!known) {
-    const ceiling = await checkCeiling(ctx, account);
-    if (!ceiling.ok) return ceiling;
-  }
-  const throttleKey = await accountIpKey(secrets, body.email, ip);
-  const reserved = await reserveAttempt(ctx, throttleKey);
-  if (!reserved.ok) return reserved;
-  await adjustCeiling(ctx, account, 1);
-
   const db = new Database(ctx.env.DB);
+  // Read for every request, account or not, so both paths do the same work before verification.
   const user = expectOk(
     await db.first<SignInUserRow>(
       "SELECT id, password_hash, status, session_epoch FROM users WHERE email = ? AND status <> 'deleted'",
       body.email,
     ),
   );
+  const binding = async (row: SignInUserRow): Promise<DeviceBinding> => ({
+    accountKey: account,
+    sessionEpoch: row.session_epoch,
+    passwordVersion: await passwordVersion(secrets.tokenHashKey, row.password_hash),
+  });
+  // Checked the same way without an account (a binding nothing can match), so timing doesn't differ.
+  const checked = await knownDeviceId(
+    secrets.sessionKeys,
+    knownDeviceCookie,
+    await binding(user ?? { id: "", password_hash: null, status: "deleted", session_epoch: -1 }),
+    ctx.now(),
+  );
+  const deviceId = user?.status === "active" ? checked : null;
+
+  if (!deviceId && (await inSlowMode(ctx, account))) {
+    const slot = await reserveSlot(ctx, account);
+    if (!slot.ok) return slot;
+  }
+  const throttleKey = await accountIpKey(secrets, body.email, ip, deviceId);
+  const attemptAt = ctx.now();
+  const reserved = await reserveAttempt(ctx, throttleKey);
+  if (!reserved.ok) return reserved;
+
   const result = await verifyPassword(user?.password_hash ?? null, body.password, secrets.peppers);
   if (!result.valid || !user) {
     if (user && result.unknownPepper) {
       // A retired pepper's secret was deleted (or a restore lacks it): this account must reset.
       ctx.log.warn("password hash uses a pepper that isn't configured", { userId: user.id });
     }
+    await recordFailure(ctx, secrets, account, ip, attemptAt);
     return err(INVALID);
   }
   if (user.status !== "active") return err(CANT_SIGN_IN);
 
   await resetAttempts(ctx, throttleKey);
-  await adjustCeiling(ctx, account, -1);
+  let current = user;
   if (result.needsRehash && user.password_hash) {
     // Compare-and-set, so a password changed meanwhile isn't overwritten with the old one.
-    expectOk(
+    const rehashed = await hashPassword(body.password, secrets.peppers);
+    const meta = expectOk(
       await db.run(
         "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND password_hash = ?",
-        await hashPassword(body.password, secrets.peppers),
+        rehashed,
         ctx.now(),
         user.id,
         user.password_hash,
       ),
     );
+    if (meta.changes === 1) current = { ...user, password_hash: rehashed };
   }
   const signingKey = secrets.sessionKeys[0];
   if (!signingKey) throw new Error("No session signing key");
   return ok({
     session: await createSession(ctx, secrets, { id: user.id, sessionEpoch: user.session_epoch }, deviceInfo(request)),
-    knownDevice: await signKnownDevice(signingKey, account, ctx.now()),
+    knownDevice: await signKnownDevice(signingKey, await binding(current), deviceId ?? newDeviceId(), ctx.now()),
   });
 }

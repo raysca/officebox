@@ -3,7 +3,9 @@
 -- unknown emails are throttled exactly like real accounts (no enumeration) and an attacker only slows
 -- their own IP. attempts counts attempts that reached the password check since the last success, within
 -- an hour of the previous attempt; a success deletes the row. Rows idle for an hour are pruned hourly.
--- The cross-IP ceiling lives in rate_counters (scope sign_in_account). Excluded from export (Platform §6).
+-- A known device adds its device ID to the key, so others failing behind the same NAT don't delay it.
+-- The cross-IP slow mode lives in 0009. Excluded from export (Platform §6).
+-- Edited before its first merge (M1a review); no deployment ever ran the earlier version.
 -- Safe to re-run (TDD §6.5).
 CREATE TABLE IF NOT EXISTS sign_in_throttle (
   account_key TEXT PRIMARY KEY,
