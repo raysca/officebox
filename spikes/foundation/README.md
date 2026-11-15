@@ -6,16 +6,16 @@ Each answer is labelled with its evidence level:
 
 - **Verified locally:** a test or script in this folder shows it, in the local Workers runtime (workerd 1.20261113 via `@cloudflare/vitest-plugin` / `wrangler dev`) or in Playwright Chromium 153.
 - **Documented:** quoted from Cloudflare's documentation or source, with the URL (all read on 15 November 2026).
-- **Needs production run:** only a real Cloudflare deployment can answer it. The [production probe](#production-probe) does that in two commands.
+- **Confirmed in production:** the [production probe](#production-probe) ran on 15 November 2026 (colo DFW) and settled every "needs production run" item. Results are in [Production results](#production-results).
 
 ## Summary
 
 | # | Question | Answer | Evidence | Recommendation |
 |---|---|---|---|---|
-| 1 | Does production cap PBKDF2? | **Almost certainly yes, at 100,000.** Local workerd accepts 600,000 only because the standalone server removes the cap that the default limit enforcer applies. | Source + open issue (documented); local timings (verified); **production: needs production run** | M1 ships **PBKDF2-SHA256 100k + HMAC pepper** (`pbkdf2-sha256-hmac$…`). If the probe shows 600k works, switch to 600k with upgrade at next sign-in. Argon2id works too, but not with `hash-wasm` as published. |
+| 1 | Does production cap PBKDF2? | **Yes, at exactly 100,000.** Production refuses 100,001 and 600,000 with "iteration counts above 100000 are not supported". Local workerd accepts 600,000 only because the standalone server removes the cap. | **Confirmed in production** | M1 ships **PBKDF2-SHA256 100k + HMAC pepper** (`pbkdf2-sha256-hmac$…`). Final. Argon2id (precompiled `hash-wasm`) and scrypt also run in production, as later upgrade options. |
 | 2 | Does a maintained WebAuthn library run in Workers? | **Yes.** `@simplewebauthn/server` 14.0.3 (MIT) registers and verifies passkeys in workerd, including discoverable sign-in, replay refusal and `sign_count` clone detection. | Verified locally, end to end with a CDP virtual authenticator | Use SimpleWebAuthn (~87 KiB gzip) with `requireUserVerification: false`. Compare counters ourselves after signature verification (typed `clone_detected`), with a compare-and-set update in D1. |
-| 3 | Rate Limiting binding: periods, scope, consistency? | Periods **10 or 60 s only**; limits are **per Cloudflare location**; counts are **approximate and eventually consistent**. Miniflare is exact and single-location. | Documented; local behaviour verified; **production: needs production run** | Binding for abuse limits only (sign-in per IP, setup/recovery/invite, link previews, general API). Everything else stays DO or D1 as platform §8 says. [Table](#q3-rate-limiting-binding). |
-| 4 | Maximum queue `delaySeconds`? | **86,400 s (24 hours)** for `send`, `sendBatch` and retries, not the 12 hours the specs assumed. Miniflare rejects 86,401. | Documented; local verified | Holds of up to 24 h are queue messages; `email_release` handles longer ones (threshold now 24 h). Delays are Zod-validated (0–86,400) into typed results. Specs updated in this PR. |
+| 3 | Rate Limiting binding: periods, scope, consistency? | Periods **10 or 60 s only**; limits are **per Cloudflare location**; counts are **approximate**: in production a limit of 5 let **6** calls through (also within one request), and a 10-second window reset as expected. Miniflare is exact and single-location. | Documented; **confirmed in production** | Binding for abuse limits only (sign-in per IP, setup/recovery/invite, link previews, general API). Everything else stays DO or D1 as platform §8 says. [Table](#q3-rate-limiting-binding). |
+| 4 | Maximum queue `delaySeconds`? | **86,400 s (24 hours)** for `send`, `sendBatch` and retries, not the 12 hours the specs assumed. Miniflare and production both reject 86,401. | Documented; **confirmed in production** | Holds of up to 24 h are queue messages; `email_release` handles longer ones (threshold now 24 h). Delays are Zod-validated (0–86,400) into typed results. Specs updated in this PR. |
 | 5 | Does Chrome's PDF viewer render under `CSP: sandbox`? | **Yes**, directly and in an `<iframe>`. **But an `<iframe sandbox>` attribute blocks it** ("This page has been blocked by Chromium"), whatever tokens it allows. | Verified locally in full Chromium (new headless and headed under Xvfb); headless shell can't tell (no viewer) | Keep `Content-Security-Policy: sandbox` on file responses. Preview PDFs in a plain `<iframe>` without the `sandbox` attribute. Firefox and Safari not tested. |
 
 ## Running it
@@ -62,7 +62,7 @@ npm run bundle-size      # added bundle size per candidate
 >
 > "No ETA yet. … we still need to do more work on the production system to enable use." (jasnell, 2 February 2024); "Not yet." (19 April 2024)
 
-In the same issue, a user reported an error at 210,000 iterations "on the workers side" in January 2026 (the error text wasn't quoted). I found no changelog entry lifting the limit. **Production behaviour: needs production run** (probe check `PBKDF2 100,001` / `600,000`).
+In the same issue, a user reported an error at 210,000 iterations "on the workers side" in January 2026 (the error text wasn't quoted). I found no changelog entry lifting the limit. **Production: confirmed capped.** The probe's `PBKDF2 100,001` and `600,000` checks failed with `Pbkdf2 failed: iteration counts above 100000 are not supported`, and 100,000 succeeded (see [Production results](#production-results)).
 
 **CPU limits** ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): Workers Free "10 ms" CPU per request; Workers Paid "5 min (default: 30 seconds)"; memory "128 MB" per isolate. PBKDF2 100k already takes about 12 ms locally, so **sign-in on the Free plan would likely exceed its CPU limit**. Officebox targets Workers Paid (PRD §1), so this is fine, but the deploy docs should say so.
 
@@ -150,7 +150,7 @@ cloned:        credential re-added with signCount rewound -> authenticator repor
 
 **Local behaviour (verified, `test/platform.test.ts`):** Miniflare implements the binding as an **exact fixed window aligned to the wall clock** (`floor(now / period)`), in one location. With limit 5 / 60 s, calls go `true ×5` then `false`. Keys are independent. `delta: 5` uses up a limit of 5. Config with `period` other than 10/60 is rejected by Wrangler's validation, and a per-call `period: 30` is rejected with `unsupported period: 30`. **Tests written against Miniflare will see exact limits that production does not give.**
 
-**Production (needs production run):** whether limits really are per colo, how far over the limit a burst gets, and whether a per-call `period` is accepted. Probe checks: `ratelimit` (12 separate requests, 12 calls in one request, a 10-second window and its reset, period 30).
+**Production (confirmed, see [Production results](#production-results)):** a burst gets **one call over** the limit (6 of 12 succeeded at limit 5), both across requests and inside one request; the 10-second window resets; a per-call `period: 30` is accepted without error, so it is not validated and must not be relied on. Per-colo scope is documented, not measured (one colo, DFW). Probe checks: `ratelimit` (12 separate requests, 12 calls in one request, a 10-second window and its reset, period 30).
 
 **Proposed mechanism for each limit in platform §8.** None of the rows change mechanism; platform §8's description of the binding was corrected in this PR (below).
 
@@ -187,7 +187,7 @@ cloned:        credential re-added with signCount rewound -> authenticator repor
 - [JavaScript APIs](https://developers.cloudflare.com/queues/configuration/javascript-apis/): `QueueSendOptions.delaySeconds` and `MessageSendRequest.delaySeconds`: *"Must be an integer between 0 and 86400 (24 hours)."* `QueueSendBatchOptions` and `QueueRetryOptions` only say *"Must be a positive integer."*, but the limits page applies 24 hours to sending and retrying alike.
 - [Batching and retries](https://developers.cloudflare.com/queues/configuration/batching-retries/): *"Messages can be delayed by up to 24 hours."* `max_retries` *"defaults to 3"*.
 
-**Local (verified, `test/platform.test.ts`):** Miniflare accepts `delaySeconds: 86400` and **rejects 86,401** on both `send` and `sendBatch`. The error is the opaque `Unknown Internal Error (15000)`; Miniflare's schema is `z.number().int().min(0).max(86400)`. A 2-second delayed message was delivered after about 3 s. **Production rejection above 86,400: needs production run** (probe `queue` checks).
+**Local (verified, `test/platform.test.ts`):** Miniflare accepts `delaySeconds: 86400` and **rejects 86,401** on both `send` and `sendBatch`. The error is the opaque `Unknown Internal Error (15000)`; Miniflare's schema is `z.number().int().min(0).max(86400)`. A 2-second delayed message was delivered after about 3 s. **Production: confirmed.** 43,200 and 86,400 are accepted; 86,401 is rejected on `send` ("Invalid message delay: Expected a number between 0 and 86400", code 10210) and `sendBatch` (code 10202).
 
 **Implications for platform §11 (offline email and DND holds):**
 
@@ -265,6 +265,40 @@ No D1, KV, R2 or Durable Objects are created.
 `deploy:probe` stops with a clear message if no workers.dev URL appears in Wrangler's output, and tells you to pass `--url=` to `check:probe`.
 
 **Self-tested locally:** with `npx wrangler dev --config probe/wrangler.jsonc --port 8788 --var PROBE_TOKEN:local-probe-token` running, `node probe/check.mjs --local` produced the local equivalent of every row (wrong token → 403; `iterations=999999999` clamped to 1,000,000): PBKDF2 600k ok, scrypt 2^18 refused, `WebAssembly.compile` refused, rate limit `YYYYYnnnnnnn`, 10-second window reset, period 30 rejected, 86,401 rejected. `wrangler deploy --dry-run --config probe/wrangler.jsonc` bundles cleanly. **Not deployed:** this environment has no Cloudflare credentials, so `deploy.mjs` and `destroy.mjs` (queue lookup, `secret put`, `delete --force`, `queues delete`) haven't been run against a real account.
+
+## Production results
+
+The probe ran from GitHub Actions ([Foundation probe workflow](../../.github/workflows/foundation-probe.yml), run 1) on 15 November 2026, served from colo DFW. The report, with the account's subdomain redacted:
+
+**Q1 Password hashing** (3 runs each; round trip includes the network)
+
+| Check | Result | Expected | Error | median rtt ms |
+|---|---|---|---|---|
+| PBKDF2 100,000 | ok | ok | | 48 |
+| PBKDF2 100,001 | refused | refused if capped | `Pbkdf2 failed: iteration counts above 100000 are not supported (requested 100001).` | 33 |
+| PBKDF2 600,000 | refused | refused if capped | `… (requested 600000).` | 18 |
+| PBKDF2 100k + HMAC pepper | ok | ok | | 46 |
+| Argon2id m=19 MiB t=2 p=1 (hash-wasm + shim) | ok | ok | | 85 |
+| Argon2id m=46 MiB t=1 p=1 (hash-wasm + shim) | ok | ok | | 133 |
+| scrypt N=2^16 r=8 p=1 (64 MiB) | ok | ok | | 139 |
+| scrypt N=2^17 r=8 p=1 (128 MiB) | ok | ok, or memory exceeded | | 279 |
+| scrypt N=2^18 r=8 p=1 | refused | refused (cost cap) | `Scrypt failed: cost exceeds maximum (1048576).` | 17 |
+| `WebAssembly.compile(bytes)` at runtime | refused | refused (forbidden) | `Wasm code generation disallowed by embedder` | 17 |
+
+**Q3 Rate Limiting binding**
+- limit 5 / 60 s, 12 separate requests, one key: `YYYYYYnnnnnn` (6 successes)
+- limit 5 / 60 s, 12 calls inside one request: `YYYYYYnnnnnn`
+- limit 3 / 10 s: 6 calls `YYYYnn`, then 21 s later `YY`
+- per-call `period: 30`: accepted (not validated)
+
+**Q4 Queue `delaySeconds`**
+- `send` 43,200 s (12 h): accepted; 86,400 s (24 h): accepted
+- `send` 86,401 s: rejected (`Invalid message delay: Expected a number between 0 and 86400, received 86401 (10210)`)
+- `sendBatch` 86,401 s: rejected (`Invalid batch delay: … (10202)`)
+
+**What changes:** nothing in the decisions. They are now final rather than pending: PBKDF2 stays at 100k plus the HMAC pepper (the 600k switch is dropped), the rate-limit wrapper treats the binding as approximate (one extra call per window is normal), and the queue limit is 24 h.
+
+**Clean-up note:** the first run's `destroy:probe` failed because Cloudflare refuses to delete a Worker that consumes a queue (10064) or a queue bound to a Worker (11005). `destroy.mjs` now detaches the consumer first.
 
 ## Dependencies
 

@@ -113,7 +113,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - light and dark theme tokens and the accessibility baseline (focus rings, landmarks, reduced motion)
   - API client and error handling
 - **Shared package:** Zod schema conventions, message envelope `{ type, id?, ... }`, error codes.
-- **Foundation spike.** Short, throwaway checks on production Cloudflare, before M1 code depends on them. Each result is recorded in TDD §10. **Answered** in [`spikes/foundation`](spikes/foundation/README.md), **pending the production probe run** (`npm run deploy:probe` / `check:probe`) for the items that only a deployment can confirm.
+- **Foundation spike.** Short, throwaway checks on production Cloudflare, before M1 code depends on them. Each result is recorded in TDD §10. **Answered** in [`spikes/foundation`](spikes/foundation/README.md), and **confirmed in production** by the probe run of 15 November 2026 (PBKDF2 capped at 100k, rate limits approximate, queue delays up to 24 h).
   - **PBKDF2 limit:** answered: production very likely caps at 100k, so M1 adopts **100k plus an HMAC pepper** (Identity §4.4). *Pending production run* for the 600k question.
   - **WebAuthn:** answered: `@simplewebauthn/server` runs in Workers (verified end to end locally).
   - **Rate Limiting binding:** answered: periods are exactly 10 or 60 s, per location and approximate; platform §8 assignments unchanged. *Pending production run* for measured behaviour.
@@ -132,7 +132,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 **Must:**
 - **First-run setup** with the setup token, either the deploy secret or a generated token in the logs, and an atomic claim (TDD §6.8).
 - **Sign-in:**
-  - email and password, hashed with PBKDF2-SHA256 at 100k iterations plus an HMAC pepper, in a versioned format (Identity §4.4; 600k if the foundation spike's production probe allows it)
+  - email and password, hashed with PBKDF2-SHA256 at 100k iterations plus an HMAC pepper, in a versioned format (Identity §4.4; the production probe confirmed the 100k cap)
   - **magic links** by email and **passkeys** (members may be passkey-only; owners must keep a password)
   - `HttpOnly` session cookie plus rotating refresh cookie, reuse detection, and `session_epoch` revocation
   - sign out and sign out everywhere

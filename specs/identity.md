@@ -30,7 +30,7 @@ The permission engine that every feature relies on is specified in [Permissions]
 | Two-factor (TOTP) | **After launch** (Phase 2) |
 | Passkey-only accounts | **Allowed for members.** **Owners must keep a password** as well as any passkeys. |
 | Passkeys and domains | Passkeys are bound to the workspace's domain (WebAuthn relying-party ID). A domain change or restore elsewhere leaves them unusable; §4.4 covers the warning and recovery. |
-| Password hashing | **PBKDF2-SHA256, 100k iterations, plus an HMAC pepper** from Worker secrets (`pbkdf2-sha256-hmac$…`), because production Workers likely cap PBKDF2 at 100k (M0 foundation spike). Switch to 600k if the production probe allows it. Changed from "600k" after the spike (§4.4). |
+| Password hashing | **PBKDF2-SHA256, 100k iterations, plus an HMAC pepper** from Worker secrets (`pbkdf2-sha256-hmac$…`), because production Workers cap PBKDF2 at 100k (confirmed by the M0 foundation spike's production probe). Changed from "600k" after the spike (§4.4). |
 | Who can invite | **Admins invite members. Only owners invite or promote admins.** |
 | Admin actions on people | Admins act on **members only**. Recovery links, email changes, disable and delete on **admins or owners need an owner**. Every recovery link or email change **notifies the person** and **revokes their pending sign-in, reset and recovery tokens** (permissions §6 Admin powers). |
 | Magic link and email-link consumption | Links open a **confirmation page**; the token is used only by a POST from that page, so mail scanners can't use it up (platform §10 Email links) |
@@ -113,7 +113,7 @@ An invite opened by someone already signed in as another member shows "You're si
 - **Passwords:**
   - at least 10 characters, checked against a bundled common-password list, no composition rules **(default)**
   - **PBKDF2-SHA256 at 100k iterations plus an HMAC pepper** held in Worker secrets (TDD §8.1), stored as `pbkdf2-sha256-hmac$<pepperId>$100000$<salt>$<hash>`, where the PBKDF2 input is `HMAC-SHA256(PEPPER_<pepperId>, password)`.
-  - **Why not 600k:** the M0 foundation spike found that production Workers almost certainly cap PBKDF2 at 100k (workerd's default limit; local `wrangler dev` lifts it), and the open workerd issue confirms no change yet ([foundation spike](../spikes/foundation/README.md)). **Pending the production probe:** if deployed Workers accept 600k, switch to `pbkdf2-sha256$600000$…` and upgrade hashes at next sign-in. Argon2id in WASM remains a possible later upgrade.
+  - **Why not 600k:** production Workers cap PBKDF2 at 100k. The M0 foundation spike's production probe confirmed it: 100,001 and 600,000 are refused ([foundation spike](../spikes/foundation/README.md#production-results)). Argon2id in WASM (precompiled) also runs in production and remains a possible later upgrade.
   - **Pepper:** each `PEPPER_<n>` is at least **32 random bytes**, never stored in D1, exported or logged (platform §16).
   - **Pepper rotation:** add the new secret and write new hashes with it; re-hash each account at its next successful sign-in; after a published deadline, accounts still on a retired pepper must reset their password (or use a magic link or passkey). Old pepper secrets are kept until that deadline, then deleted.
   - **Restore:** restoring an export to another installation needs the same `PEPPER_*` secrets, otherwise every password must be reset (platform §6, §16).
@@ -430,6 +430,6 @@ TOTP two-factor · Google/Microsoft or SSO sign-in · guests · member self-serv
 1. **Team field.** Free text, or chosen from the member's groups (a "primary group")? The second keeps the directory consistent.
 2. **Allowed invite domains.** Off by default, or on and set to the owner's domain at setup?
 3. **Welcome post wording and channel.** Always `#general`, or configurable?
-4. ~~**WebAuthn library and PBKDF2 limit.**~~ Answered by the M0 foundation spike ([foundation spike](../spikes/foundation/README.md)): `@simplewebauthn/server` runs in Workers; PBKDF2 uses 100k plus an HMAC pepper (§4.4), **pending the production probe** for the 600k question.
+4. ~~**WebAuthn library and PBKDF2 limit.**~~ Answered by the M0 foundation spike ([foundation spike](../spikes/foundation/README.md)): `@simplewebauthn/server` runs in Workers; PBKDF2 uses 100k plus an HMAC pepper (§4.4); the production probe confirmed the 100k cap.
 
 **Still pending in other documents:** TDD §3.1 and §8.1 should add the refresh grace window, the per-request `session_epoch` check and the `email_change` token kind. (The PBKDF2 decision is now in TDD §8.1.)
