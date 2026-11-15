@@ -2,6 +2,7 @@
 // registration + authentication + sign_count) is in scripts/webauthn-e2e.mjs against wrangler dev.
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { isCounterRegression } from "../src/webauthn";
 
 const post = (path: string, body: unknown) =>
   exports.default.fetch(`http://localhost:8787${path}`, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
@@ -52,5 +53,18 @@ describe("@simplewebauthn/server in workerd", () => {
       response: { id: "bm9wZQ", rawId: "bm9wZQ", type: "public-key", response: { clientDataJSON: "e30", authenticatorData: "AA", signature: "AA" }, clientExtensionResults: {} },
     });
     expect(await res.json()).toMatchObject({ ok: false, error: "unknown_credential" });
+  });
+});
+
+describe("sign_count rule (isCounterRegression)", () => {
+  it("rejects a counter that goes backwards, repeats a non-zero value or resets to zero", () => {
+    expect(isCounterRegression(1, 3)).toBe(true);
+    expect(isCounterRegression(3, 3)).toBe(true);
+    expect(isCounterRegression(0, 3)).toBe(true);
+  });
+  it("accepts an increasing counter and authenticators that always report 0", () => {
+    expect(isCounterRegression(4, 3)).toBe(false);
+    expect(isCounterRegression(1, 0)).toBe(false);
+    expect(isCounterRegression(0, 0)).toBe(false);
   });
 });

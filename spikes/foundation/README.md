@@ -13,9 +13,9 @@ Each answer is labelled with its evidence level:
 | # | Question | Answer | Evidence | Recommendation |
 |---|---|---|---|---|
 | 1 | Does production cap PBKDF2? | **Almost certainly yes, at 100,000.** Local workerd accepts 600,000 only because the standalone server removes the cap that the default limit enforcer applies. | Source + open issue (documented); local timings (verified); **production: needs production run** | M1 ships **PBKDF2-SHA256 100k + HMAC pepper** (`pbkdf2-sha256-hmac$…`). If the probe shows 600k works, switch to 600k with upgrade at next sign-in. Argon2id works too, but not with `hash-wasm` as published. |
-| 2 | Does a maintained WebAuthn library run in Workers? | **Yes.** `@simplewebauthn/server` 14.0.3 (MIT) registers and verifies passkeys in workerd, including discoverable sign-in and `sign_count` clone detection. | Verified locally, end to end with a CDP virtual authenticator | Use SimpleWebAuthn. ~87 KiB gzip. Map its counter error to `clone_detected`. |
+| 2 | Does a maintained WebAuthn library run in Workers? | **Yes.** `@simplewebauthn/server` 14.0.3 (MIT) registers and verifies passkeys in workerd, including discoverable sign-in, replay refusal and `sign_count` clone detection. | Verified locally, end to end with a CDP virtual authenticator | Use SimpleWebAuthn (~87 KiB gzip) with `requireUserVerification: false`. Compare counters ourselves after signature verification (typed `clone_detected`), with a compare-and-set update in D1. |
 | 3 | Rate Limiting binding: periods, scope, consistency? | Periods **10 or 60 s only**; limits are **per Cloudflare location**; counts are **approximate and eventually consistent**. Miniflare is exact and single-location. | Documented; local behaviour verified; **production: needs production run** | Binding for abuse limits only (sign-in per IP, setup/recovery/invite, link previews, general API). Everything else stays DO or D1 as platform §8 says. [Table](#q3-rate-limiting-binding). |
-| 4 | Maximum queue `delaySeconds`? | **86,400 s (24 hours)** for `send`, `sendBatch` and retries, not the 12 hours the specs assume. Miniflare rejects 86,401. | Documented; local verified | Holds of up to 24 h can be queue messages. Keep `email_release` for longer holds, with the threshold raised from 12 h to 24 h (or kept at 12 h for margin). Validate the delay before sending. |
+| 4 | Maximum queue `delaySeconds`? | **86,400 s (24 hours)** for `send`, `sendBatch` and retries, not the 12 hours the specs assumed. Miniflare rejects 86,401. | Documented; local verified | Holds of up to 24 h are queue messages; `email_release` handles longer ones (threshold now 24 h). Delays are Zod-validated (0–86,400) into typed results. Specs updated in this PR. |
 | 5 | Does Chrome's PDF viewer render under `CSP: sandbox`? | **Yes**, directly and in an `<iframe>`. **But an `<iframe sandbox>` attribute blocks it** ("This page has been blocked by Chromium"), whatever tokens it allows. | Verified locally in full Chromium (new headless and headed under Xvfb); headless shell can't tell (no viewer) | Keep `Content-Security-Policy: sandbox` on file responses. Preview PDFs in a plain `<iframe>` without the `sandbox` attribute. Firefox and Safari not tested. |
 
 ## Running it
@@ -23,7 +23,7 @@ Each answer is labelled with its evidence level:
 ```sh
 cd spikes/foundation
 npm install --legacy-peer-deps
-npm test                 # 23 Vitest tests in workerd: hashing, WebAuthn routes, rate limits, queue delays
+npm test                 # 28 Vitest tests in workerd: hashing, WebAuthn routes and counter rule, rate limits, queue delays
 npm run typecheck
 npm run test:webauthn    # wrangler dev + Playwright Chromium virtual authenticator
 npm run test:pdf         # PDF viewer under CSP sandbox; re-runs itself under xvfb-run for headed mode
@@ -62,7 +62,7 @@ npm run bundle-size      # added bundle size per candidate
 >
 > "No ETA yet. … we still need to do more work on the production system to enable use." (jasnell, 2 February 2024); "Not yet." (19 April 2024)
 
-A user reported hitting the error at 210,000 iterations in production in January 2026, in the same issue. I found no changelog entry lifting the limit. **Production behaviour: needs production run** (probe check `PBKDF2 100,001` / `600,000`).
+In the same issue, a user reported an error at 210,000 iterations "on the workers side" in January 2026 (the error text wasn't quoted). I found no changelog entry lifting the limit. **Production behaviour: needs production run** (probe check `PBKDF2 100,001` / `600,000`).
 
 **CPU limits** ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)): Workers Free "10 ms" CPU per request; Workers Paid "5 min (default: 30 seconds)"; memory "128 MB" per isolate. PBKDF2 100k already takes about 12 ms locally, so **sign-in on the Free plan would likely exceed its CPU limit**. Officebox targets Workers Paid (PRD §1), so this is fine, but the deploy docs should say so.
 
@@ -75,14 +75,22 @@ hash  = PBKDF2-SHA256(input, salt, 100000, 32 bytes)
 ```
 
 - **What it buys:** a D1 dump or export on its own can't be attacked offline at all, because the pepper lives only in Worker secrets. With the secret too, the cost per guess equals plain PBKDF2 100k, 6× cheaper than OWASP's 600k.
-- **Rotation:** `pepperId` names the secret (`PEPPER_1`, `PEPPER_2`, …). Add the new secret, write new hashes with it, re-hash at next sign-in, and delete the old secret when no row uses it. Losing every pepper secret means every password must be reset, so the secrets inventory (platform §16) and the restore guide must cover it: an export restored to a new installation needs the same pepper secrets or passwords fall back to reset/magic link.
+- **Pepper size:** at least **32 random bytes** (for example `openssl rand -base64 32`); `pepperedPbkdf2` refuses shorter ones.
+- **Rotation policy:** `pepperId` names the secret (`PEPPER_1`, `PEPPER_2`, …).
+  1. Add the new secret and write all new hashes with it.
+  2. Re-hash each account at its next successful sign-in.
+  3. After a published deadline, accounts still on a retired pepper must reset their password (or use a magic link or passkey).
+  4. Only then is the old secret deleted. Until the deadline, every listed pepper secret is kept.
+- **Export and restore:** an export restored to another installation needs the same `PEPPER_*` secrets, or every password falls back to reset/magic link. The secrets inventory (platform §16) and the restore guide must say so.
+- **No timing enumeration:** an email with no account (or a passkey-only account) must run the same derivation. `dummyVerify()` does 100k iterations against a fixed salt and returns `false`.
+- **Bounded verify:** `verifyPeppered` refuses stored iteration counts outside 100,000–1,000,000, so a tampered row can't make verification burn CPU.
 - **Cost:** 0.5 KiB, no dependency, about 13 ms CPU.
-- Tested: hash and verify, wrong password, wrong secret, unknown pepper id.
+- Tested: hash and verify, wrong password, wrong secret, unknown pepper id, out-of-range iteration counts, short pepper, dummy path cost.
 
 ### Fallback B: Argon2id in WASM (`src/hash.ts`, `src/argon2-shim.ts`)
 
 - **`hash-wasm` (MIT, 4.12.0) does not run in Workers as published.** It embeds its WASM as base64 and calls `WebAssembly.compile(bytes)` at runtime, which Workers forbid. This is verified locally (`test/argon2-unshimmed.test.ts`), and the probe checks it in production. Per Cloudflare's [Node.js crypto docs](https://developers.cloudflare.com/workers/runtime-apis/nodejs/crypto/), "`argon2` and `argon2Sync` are not supported" natively either.
-- **Workaround, proven locally:** `scripts/extract-wasm.mjs` writes `hash-wasm`'s argon2 and blake2b binaries to `src/wasm/*.wasm`. Wrangler compiles imported `.wasm` files at upload time, and a small shim hands those precompiled modules to `hash-wasm`. For production, vendor `hash-wasm`'s ~200-line argon2 wrapper (MIT) and pass the modules in directly, instead of patching the global.
+- **Workaround, proven locally:** `scripts/extract-wasm.mjs` writes `hash-wasm`'s argon2 and blake2b binaries to `src/wasm/*.wasm`. Wrangler compiles imported `.wasm` files at upload time, and a small shim hands those precompiled modules to `hash-wasm`. **The shim must not ship:** it patches the global `WebAssembly.compile` and matches binaries by length. If Argon2id is ever adopted, vendor `hash-wasm`'s ~200-line argon2 wrapper (MIT) and pass the precompiled modules in directly.
 - **Cost:** 40–47 ms locally at m=19 MiB, t=2; **+25 KiB** (11.6 KiB gzip JS + 13.8 KiB WASM).
 - **Risk:** each hash allocates its memory (19–46 MiB) inside a 128 MB isolate. A few concurrent sign-ins in one isolate could approach the limit. Not measured.
 
@@ -95,29 +103,34 @@ This works with `nodejs_compat`, but the OWASP minimum (N=2^17, r=8) sits exactl
 1. **M1 default: Fallback A** (PBKDF2-SHA256 100k + HMAC pepper). It's native, tiny and fast, and works whether or not the cap exists.
 2. **Run the probe.** If production accepts 600,000, M1 can use `pbkdf2-sha256$600000$…` (pepper optional) instead. Either way the versioned format allows upgrade at next sign-in.
 3. **Argon2id stays the upgrade path** if a stronger KDF is wanted. It needs the vendored loader above and a concurrency check on memory.
-4. **Spec follow-up (not edited here):** Identity §4.4 / TDD §8.1 should name the chosen format, the `PEPPER_*` secrets (platform §16) and the restore implication.
+4. **Docs updated in this PR:** Identity §4.4, TDD §8.1 and platform §16 now name the format, the `PEPPER_*` secrets, the rotation policy and the restore implication.
 
 ## Q2 WebAuthn in Workers
 
-**Library:** `@simplewebauthn/server` **14.0.3** (MIT; 14.x released September–November 2026, so actively maintained). Its dependencies are all MIT, BSD-3-Clause, Apache-2.0 or 0BSD (`@peculiar/*`, `asn1js`, `@levischuck/tiny-cbor`, `@hexagon/base64`, `reflect-metadata`, `tsyringe`, `tslib`). It uses WebCrypto, which workerd provides. The browser side uses `@simplewebauthn/browser` 14.0.0 (MIT), dev dependency only.
+**Library:** `@simplewebauthn/server` **14.0.3** (MIT; npm shows 14.0.0–14.1.0 published between September and November 2026, so it is actively maintained). Its dependencies are all MIT, BSD-3-Clause, Apache-2.0 or 0BSD (`@peculiar/*`, `asn1js`, `@levischuck/tiny-cbor`, `@hexagon/base64`, `reflect-metadata`, `tsyringe`, `tslib`). It uses WebCrypto, which workerd provides. The browser side uses `@simplewebauthn/browser` 14.0.0 (MIT), dev dependency only.
 
-**Evidence: verified locally, end to end** (`npm run test:webauthn`, passing three runs in a row). `wrangler dev` serves `src/index.ts`. Playwright Chromium 153 attaches a CDP virtual authenticator (`WebAuthn.enable`, then `WebAuthn.addVirtualAuthenticator` with `protocol: "ctap2"`, `transport: "internal"`, `hasResidentKey`, `hasUserVerification`, `isUserVerified`, `automaticPresenceSimulation`) and drives `navigator.credentials.create` / `get` through `startRegistration` / `startAuthentication`:
+**Evidence: verified locally, end to end** (`npm run test:webauthn`, passing five runs in a row). `wrangler dev` serves `src/index.ts`. Playwright Chromium 153 attaches a CDP virtual authenticator (`WebAuthn.enable`, then `WebAuthn.addVirtualAuthenticator` with `protocol: "ctap2"`, `transport: "internal"`, `hasResidentKey`, `hasUserVerification`, `isUserVerified`, `automaticPresenceSimulation`) and drives `navigator.credentials.create` / `get` through `startRegistration` / `startAuthentication`:
 
 ```
 registration:  ok, fmt "none", userVerified true, counter 1, resident credential
 sign-in 1:     ok, discoverable (no email typed), right userId, counter 1 -> 2, userVerified true
 sign-in 2:     ok, counter 2 -> 3; stored counter = 3
+replay A->B:   assertion signed for flow A, submitted against fresh flow B (counter still valid)
+               -> {"error":"invalid_response","detail":"Unexpected authentication response challenge ..."}
+resubmit:      sign-in 3 succeeds (counter 4), then its exact flow + assertion are resubmitted
+               -> {"error":"unknown_flow"} (challenges are single-use); stored counter unchanged
 cloned:        credential re-added with signCount rewound -> authenticator reports 1
-               -> 403 {"error":"clone_detected","detail":"Response counter value 1 was lower than expected 3"}
-               stored counter unchanged (3)
-replay:        assertion for challenge A submitted against flow B -> refused (challenge mismatch)
+               -> 403 {"error":"clone_detected","detail":"sign_count 1 is not greater than stored 5"}
+               stored counter unchanged
 ```
 
-`npm test` (`test/webauthn.test.ts`) covers the library loading in workerd, option shape (`residentKey: "required"`, `userVerification: "preferred"`, ES256/RS256, no `allowCredentials` for passkey sign-in), garbage responses returned as typed errors, single-use challenges and unknown credentials.
+`npm test` (`test/webauthn.test.ts`) covers the library loading in workerd, option shape (`residentKey: "required"`, `userVerification: "preferred"`, ES256/RS256, no `allowCredentials` for passkey sign-in), garbage responses returned as typed errors, single-use challenges, unknown credentials, and the counter rule (`isCounterRegression`). The replay checks run before the clone step, so only the challenge and flow checks can refuse them.
 
 **Findings for M1:**
 
-- **Counter semantics:** the library throws when the new counter is **less than or equal to** the stored one, unless both are 0. Authenticators that always report 0 (most synced passkeys) pass; a counter that repeats a non-zero value is treated as a clone too, slightly stricter than "goes backwards" in Identity §4.4. It's an exception, not a result, so the service must catch it, map it to `clone_detected` (typed result) and send the `security_notice`.
+- **Counter semantics:** a sign-in fails when the new counter is **less than or equal to** the stored one, unless both are 0. Authenticators that always report 0 (most synced passkeys) pass; a counter that repeats a non-zero value counts as a clone too, slightly stricter than "goes backwards" in Identity §4.4.
+- **Compare counters ourselves.** The library throws a plain `Error` on a counter regression, and matching its message would be brittle. The spike passes `counter: 0` to the library, which then verifies only the signature, challenge, origin and RP ID, and compares counters itself afterwards (`isCounterRegression`), returning a typed `clone_detected`. Doing the comparison **after** signature verification means a forged response can't trigger a `security_notice`.
+- **Compare-and-set in M1.** Two concurrent sign-ins with the same passkey must not both pass against the same stored counter. Update with `UPDATE passkeys SET sign_count = ? WHERE id = ? AND sign_count = ?` and treat 0 changed rows as a conflict (re-read and re-check). The spike stores credentials in KV, which has no compare-and-set, so it just writes.
 - **`requireUserVerification` defaults to `true`.** Identity §4.4 says UV is "preferred", so pass `false` explicitly (as the spike does) and record `userVerified`.
 - **Challenge storage:** challenges must be single-use and short-lived (the spike deletes the flow on first read, with a 5-minute TTL). In M1 use a D1 row or a signed, `HttpOnly` cookie bound to the session attempt.
 - **RP ID and origin** come from configuration (`RP_ID`, `RP_ORIGIN`). That ties into the domain-change caveat in Identity §4.4.
@@ -139,7 +152,7 @@ replay:        assertion for challenge A submitted against flow B -> refused (ch
 
 **Production (needs production run):** whether limits really are per colo, how far over the limit a burst gets, and whether a per-call `period` is accepted. Probe checks: `ratelimit` (12 separate requests, 12 calls in one request, a 10-second window and its reset, period 30).
 
-**Proposed mechanism for each limit in platform §8.** The spec isn't edited here; the "Change?" column lists suggested follow-ups.
+**Proposed mechanism for each limit in platform §8.** None of the rows change mechanism; platform §8's description of the binding was corrected in this PR (below).
 
 | Action | Limit | Spec says | Proposed | Change? | Why |
 |---|---|---|---|---|---|
@@ -162,9 +175,9 @@ replay:        assertion for challenge A submitted against flow B -> refused (ch
 | ICS-in fetches | 1 / subscription / h; 50 per workspace | cron + D1 | **cron + D1** | – | Not a request-rate limit. |
 | General API requests | 300 / min per session | binding | **binding** (60 s) | – | Abuse throttle keyed by session ID (a stable identifier, as the docs recommend). |
 
-**Spec follow-ups:**
-- Platform §8 says the binding allows "windows of **60 seconds or less**". It's exactly **10 or 60 seconds**. Every binding row above uses 60 s, so nothing moves.
-- The M0 Rate Limiting wrapper should treat a binding result as advisory: return `rate_limited` with `retry-after = period`. Its tests must not assume production is as exact as Miniflare.
+**Spec changes made in this PR:**
+- Platform §8 said the binding allows "windows of **60 seconds or less**". It now says **exactly 10 or 60 seconds**, per location and approximate. Every binding row above uses 60 s, so nothing moves.
+- Platform §8 and TDD §8.1 now say the Rate Limiting wrapper treats a binding result as advisory: it returns `rate_limited` with `retry-after = period`, and its tests must not assume production is as exact as Miniflare.
 
 ## Q4 Queue delays
 
@@ -178,8 +191,8 @@ replay:        assertion for challenge A submitted against flow B -> refused (ch
 
 **Implications for platform §11 (offline email and DND holds):**
 
-- The specs (platform §11 and TDD §10) say Queues allow at most **12 hours**. **The current limit is 24 hours.** Every unread-email delay option and most DND/time-off holds fit in one delayed message.
-- `email_release` in ReminderScheduler is still needed for holds over 24 hours (multi-day time off). Its threshold can move from 12 h to 24 h. Keeping 12 h is also safe, and leaves margin if the limit ever drops back.
+- The specs (platform §11, notifications §6, TDD) said Queues allow at most **12 hours**. **The current limit is 24 hours**, and this PR updates them. Every unread-email delay option and most DND/time-off holds fit in one delayed message.
+- `email_release` in ReminderScheduler is still needed for holds over 24 hours (multi-day time off). **Decision:** its threshold moves from 12 h to 24 h.
 - Validate `delaySeconds` with Zod (integer, 0–86,400) before sending. Over the limit the runtime error is opaque, and it must become a typed result, not a thrown error.
 - Retries can also be delayed up to 24 h, and `max_retries` goes up to 100. The email consumer's "8 retries, backoff capped at 2 h" (TDD §7.6) fits.
 
@@ -205,12 +218,12 @@ replay:        assertion for challenge A submitted against flow B -> refused (ch
 **Recommendation:**
 - Keep TDD §8.3's `Content-Security-Policy: sandbox` on every file response, PDFs included.
 - Show PDF previews in an `<iframe>` **without** the `sandbox` attribute. The sandboxing comes from the response header, not the frame attribute.
-- TDD §8.3's "PDFs in a sandboxed frame" should be reworded to say exactly that (follow-up, not edited here).
+- TDD §8.3 now says exactly that. Firefox, Safari and branded Chrome checks are added to the Documents acceptance criteria for M6.
 - If Firefox or Safari fail in M6, the fallback is PDF.js (Apache-2.0) in an iframe from a separate path. It renders through canvas, needs no plugin, and works under any sandbox that allows scripts.
 
 ## Production probe
 
-Some answers need a real deployment (production PBKDF2 limit, Rate Limiting semantics, Queue validation). `probe/` is a small Worker (about 62 KiB, 22 KiB gzip) that runs those checks. Every route needs a random token, which `deploy.mjs` generates, so the public URL can't be used to burn CPU.
+Some answers need a real deployment (production PBKDF2 limit, Rate Limiting semantics, Queue validation). `probe/` is a small Worker (about 62 KiB, 22 KiB gzip) that runs those checks. Every route needs a random token, which `deploy.mjs` generates and stores with `wrangler secret put`; the Worker compares it in constant time. Every cost parameter is capped (iterations ≤ 1,000,000, Argon2 memory ≤ 64 MiB, scrypt N ≤ 2^18, rate-limit calls ≤ 50 per request), so the public URL can't be used to burn CPU.
 
 **On your machine, with a Cloudflare account on Workers Paid:**
 
@@ -218,9 +231,9 @@ Some answers need a real deployment (production PBKDF2 limit, Rate Limiting sema
 cd spikes/foundation
 npm install --legacy-peer-deps
 npx wrangler login                 # or export CLOUDFLARE_API_TOKEN=...
-npm run deploy:probe               # creates the queue, deploys officebox-foundation-probe, saves URL + token
+npm run deploy:probe               # creates the queue, deploys officebox-foundation-probe, sets the token secret
 npm run check:probe                # about 40 s; prints a Markdown report and writes probe/probe-report.json
-npm run destroy:probe              # delete the Worker afterwards (and: npx wrangler queues delete officebox-foundation-probe)
+npm run destroy:probe              # deletes the Worker, the queue (if the probe created it) and probe/.probe.json
 ```
 
 Paste the printed report into the PR. It covers:
@@ -229,13 +242,21 @@ Paste the printed report into the PR. It covers:
 - the rate limiter (separate requests, one request, the 10-second window and its reset, period 30) and the colo that served it
 - queue `delaySeconds` of 43,200 / 86,400 / 86,401 (send and sendBatch).
 
-The two 12-hour and 24-hour test messages are delivered later to the probe's consumer, which just acks them; check them with `npx wrangler tail officebox-foundation-probe` if you're curious. The token is a plain `--var`, visible in the dashboard. That's fine for a throwaway probe.
+**What it creates in your account, and nothing else:**
+- the Worker `officebox-foundation-probe` on workers.dev, with Workers Logs enabled. **Side effect:** if the account has never used workers.dev, the first deploy registers a `<name>.workers.dev` subdomain for the account, and that stays after the probe is deleted.
+- the queue `officebox-foundation-probe`. `deploy:probe` refuses if a queue with that name already exists, so it never attaches to or deletes something it didn't create (`-- --reuse-queue` overrides; `destroy:probe` then leaves the queue alone). Any queue-creation error other than "already exists" stops the deploy.
+- the `PROBE_TOKEN` secret on that Worker.
+- Rate Limiting namespaces `910001` and `910002`, which are only binding config, not separate resources. Namespace ids are per account; if they clash with another Worker's limiters, edit `probe/wrangler.jsonc`.
 
-**Self-tested locally:** with `npx wrangler dev --config probe/wrangler.jsonc --port 8788 --var PROBE_TOKEN:local-probe-token` running, `node probe/check.mjs --local` produced the local equivalent of every row: PBKDF2 600k ok, scrypt 2^18 refused, `WebAssembly.compile` refused, rate limit `YYYYYnnnnnnn`, 10-second window reset, period 30 rejected, 86,401 rejected. `wrangler deploy --dry-run --config probe/wrangler.jsonc` bundles cleanly. **Not deployed:** this environment has no Cloudflare credentials.
+No D1, KV, R2 or Durable Objects are created. The 12-hour and 24-hour test messages are dropped when `destroy:probe` deletes the queue.
+
+`deploy:probe` stops with a clear message if no workers.dev URL appears in Wrangler's output, and tells you to pass `--url=` to `check:probe`.
+
+**Self-tested locally:** with `npx wrangler dev --config probe/wrangler.jsonc --port 8788 --var PROBE_TOKEN:local-probe-token` running, `node probe/check.mjs --local` produced the local equivalent of every row (wrong token → 403; `iterations=999999999` clamped to 1,000,000): PBKDF2 600k ok, scrypt 2^18 refused, `WebAssembly.compile` refused, rate limit `YYYYYnnnnnnn`, 10-second window reset, period 30 rejected, 86,401 rejected. `wrangler deploy --dry-run --config probe/wrangler.jsonc` bundles cleanly. **Not deployed:** this environment has no Cloudflare credentials, so `deploy.mjs` and `destroy.mjs` (queue lookup, `secret put`, `delete --force`, `queues delete`) haven't been run against a real account.
 
 ## Dependencies
 
-All versions are pinned exactly. Versions released at least two weeks before the spike were chosen where a newer one existed (`@simplewebauthn/server` 14.1.0 and `hash-wasm` 4.13.0 were days old).
+All versions are pinned exactly. Where a newer release existed, the newest version published at least two weeks earlier was chosen: npm lists `@simplewebauthn/server` 14.1.0 as published on 6 November 2026 and `hash-wasm` 4.13.0 on 7 November 2026, about a week before the spike.
 
 | Package | Version | Licence | Role |
 |---|---|---|---|
@@ -258,11 +279,11 @@ All versions are pinned exactly. Versions released at least two weeks before the
 | `src/pbkdf2.ts` | PBKDF2 and the HMAC-pepper fallback (WebCrypto only) |
 | `src/hash.ts`, `src/argon2-shim.ts`, `src/wasm/` | Argon2id via `hash-wasm` with precompiled modules; scrypt |
 | `src/webauthn.ts` | SimpleWebAuthn registration and authentication, typed results, clone detection |
-| `test/*.test.ts` | Vitest in workerd (23 tests) |
+| `test/*.test.ts` | Vitest in workerd (28 tests) |
 | `scripts/webauthn-e2e.mjs` | wrangler dev + Chromium virtual authenticator |
 | `scripts/pdf-sandbox.mjs` | PDF viewer matrix; screenshots in `pdf-shots/` (git-ignored) |
 | `scripts/bundle-size.mjs`, `scripts/extract-wasm.mjs` | Bundle sizes; WASM extraction from `hash-wasm` |
-| `probe/` | Production probe Worker, deploy and check scripts |
+| `probe/` | Production probe Worker; `deploy.mjs`, `check.mjs`, `destroy.mjs`, shared `lib.mjs` |
 
 ## Tooling notes
 

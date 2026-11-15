@@ -1,7 +1,7 @@
 // Q1: PBKDF2 iteration limits and fallbacks, in the local Workers runtime (workerd via vitest-plugin).
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { argon2, argon2Check, OWASP_ARGON2ID, pbkdf2, pepperedPbkdf2, scrypt, verifyPeppered } from "../src/hash";
+import { argon2, argon2Check, dummyVerify, OWASP_ARGON2ID, pbkdf2, pepperedPbkdf2, scrypt, verifyPeppered } from "../src/hash";
 
 const PW = "correct horse battery staple";
 
@@ -44,6 +44,28 @@ describe("Fallback A: HMAC pepper + PBKDF2 100k", () => {
     expect(await verifyPeppered(r.hash, "wrong password", peppers)).toBe(false);
     expect(await verifyPeppered(r.hash, PW, { "1": peppers["2"] })).toBe(false); // wrong secret
     expect(await verifyPeppered(r.hash, PW, { "2": peppers["2"] })).toBe(false); // pepper id unknown
+  });
+
+  it("refuses stored iteration counts outside 100k..1M, so a tampered row can't burn CPU", async () => {
+    const peppers = { "1": env.PEPPER_1 as string };
+    const r = await pepperedPbkdf2(PW, peppers["1"], "1");
+    if (!r.ok) throw new Error(r.error);
+    for (const iter of ["999999999", "1000", "1e5x", "-1"]) {
+      expect(await verifyPeppered(r.hash.replace("$100000$", `$${iter}$`), PW, peppers)).toBe(false);
+    }
+  });
+
+  it("refuses a pepper shorter than 32 bytes", async () => {
+    const r = await pepperedPbkdf2(PW, "too-short", "1");
+    expect(r.ok).toBe(false);
+  });
+
+  it("the dummy path for unknown users does the same derivation work", async () => {
+    const t0 = performance.now();
+    expect(await dummyVerify(PW, env.PEPPER_1 as string)).toBe(false);
+    const dummyMs = performance.now() - t0;
+    console.log(`dummy verify ${dummyMs.toFixed(1)} ms`);
+    expect(dummyMs).toBeGreaterThan(3); // 100k iterations, not a fast return (real verify is ~12 ms here)
   });
 });
 

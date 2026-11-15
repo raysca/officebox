@@ -119,29 +119,49 @@ export async function verifyAuthentication(
   // The userHandle of a discoverable credential must match the credential's owner.
   const handle = response.response.userHandle;
   if (handle && new TextDecoder().decode(fromB64url(handle)) !== cred.userId) return { ok: false, error: "user_mismatch" };
+  let verified: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
   try {
-    const v = await verifyAuthenticationResponse({
+    verified = await verifyAuthenticationResponse({
       response,
       expectedChallenge: flow.challenge,
       expectedOrigin: env.RP_ORIGIN,
       expectedRPID: env.RP_ID,
-      credential: { id: cred.id, publicKey: fromB64(cred.publicKey), counter: cred.counter, transports: cred.transports },
+      // counter: 0 disables the library's own counter check, so the library only verifies the signature, challenge,
+      // origin and RP ID. We compare counters ourselves below, after the signature is known to be valid: clone
+      // detection then never depends on the library's error text, and forged responses can't trigger a
+      // clone_detected security notice.
+      credential: { id: cred.id, publicKey: fromB64(cred.publicKey), counter: 0, transports: cred.transports },
+      // Identity §4.4: user verification "preferred". The library's default is true, so pass false explicitly.
       requireUserVerification: false,
     });
-    if (!v.verified) return { ok: false, error: "not_verified" };
-    const oldCounter = cred.counter;
-    cred.counter = v.authenticationInfo.newCounter;
-    await env.WEBAUTHN_KV.put(`cred:${cred.id}`, JSON.stringify(cred));
-    return {
-      ok: true,
-      value: { userId: cred.userId, credentialId: cred.id, oldCounter, newCounter: cred.counter, userVerified: v.authenticationInfo.userVerified },
-    };
   } catch (e) {
-    const msg = (e as Error).message;
-    // The library throws when the counter didn't increase (both non-zero). Identity §4.4: reject + security_notice.
-    if (/counter value/i.test(msg)) return { ok: false, error: "clone_detected", detail: msg };
-    return { ok: false, error: "invalid_response", detail: msg };
+    return { ok: false, error: "invalid_response", detail: (e as Error).message };
   }
+  if (!verified.verified) return { ok: false, error: "not_verified" };
+  const oldCounter = cred.counter;
+  const newCounter = verified.authenticationInfo.newCounter;
+  if (isCounterRegression(newCounter, oldCounter)) {
+    // Identity §4.4: reject, and (in M1) send the member and admins a security_notice.
+    return { ok: false, error: "clone_detected", detail: `sign_count ${newCounter} is not greater than stored ${oldCounter}` };
+  }
+  // M1 must make this a compare-and-set in D1: UPDATE passkeys SET sign_count = ? WHERE id = ? AND sign_count = ?,
+  // treating 0 changed rows as a concurrent sign-in (retry or reject). KV has no compare-and-set, so the spike
+  // just writes.
+  cred.counter = newCounter;
+  await env.WEBAUTHN_KV.put(`cred:${cred.id}`, JSON.stringify(cred));
+  return {
+    ok: true,
+    value: { userId: cred.userId, credentialId: cred.id, oldCounter, newCounter, userVerified: verified.authenticationInfo.userVerified },
+  };
+}
+
+/**
+ * WebAuthn §6.1.1 signature-counter rule as SimpleWebAuthn applies it: when either value is non-zero, the new
+ * counter must be strictly greater than the stored one. Authenticators that always report 0 (most synced
+ * passkeys) never trip it.
+ */
+export function isCounterRegression(newCounter: number, storedCounter: number): boolean {
+  return (newCounter > 0 || storedCounter > 0) && newCounter <= storedCounter;
 }
 
 function fromB64url(s: string): Uint8Array<ArrayBuffer> {

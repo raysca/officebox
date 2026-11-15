@@ -85,9 +85,11 @@ export default {
       // ---- Q4: Queue delays ----
       case "POST /queue/send": {
         const delay = int(q.get("delay"), 0);
+        const batch = q.get("batch");
+        if (batch !== null && batch !== "1") return json({ ok: false, error: "batch must be 1 or absent" }, 400);
         const id = crypto.randomUUID();
         try {
-          if (q.get("batch")) await env.DELAYED.sendBatch([{ body: { id, sentAt: Date.now(), delay } }], { delaySeconds: delay });
+          if (batch === "1") await env.DELAYED.sendBatch([{ body: { id, sentAt: Date.now(), delay } }], { delaySeconds: delay });
           else await env.DELAYED.send({ id, sentAt: Date.now(), delay }, { delaySeconds: delay });
           return json({ ok: true, id, delay });
         } catch (e) {

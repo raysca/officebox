@@ -1,8 +1,10 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   // Production probe for the M0d foundation spike. Deploy with `npm run deploy:probe`, check with
-  // `npm run check:probe`, remove with `npm run destroy:probe`. Every route requires the PROBE_TOKEN var that
-  // probe/deploy.mjs generates, so the public URL can't be used to burn CPU.
+  // `npm run check:probe`, remove with `npm run destroy:probe`. Every route requires the PROBE_TOKEN secret that
+  // probe/deploy.mjs generates and stores with `wrangler secret put`, so the public URL can't be used to burn CPU.
+  // Account-level names used: Worker and queue "officebox-foundation-probe"; Rate Limiting namespace_ids 910001 and
+  // 910002 (namespace ids are per account; pick others if these clash with an existing Worker's limiters).
   "name": "officebox-foundation-probe",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",

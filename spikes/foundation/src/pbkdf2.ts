@@ -51,10 +51,17 @@ export function pbkdf2(password: string, iterations: number, salt = crypto.getRa
 // ---- Fallback A: HMAC pepper (Worker secret) + PBKDF2 100k ----
 //
 // Format: pbkdf2-sha256-hmac$<pepperId>$100000$<salt>$<hash>
-//   input to PBKDF2 = HMAC-SHA256(PEPPER[pepperId], password)
-// The pepper id allows rotation: keep the old secret until every hash has been re-derived at next sign-in.
+//   input to PBKDF2 = HMAC-SHA256(PEPPER_<pepperId>, password)
+// Each pepper is at least 32 random bytes (e.g. `openssl rand -base64 32`), held only in Worker secrets.
+// Rotation: add PEPPER_<n+1>, write new hashes with it, re-hash at next sign-in; after a deadline, accounts still
+// on a retired pepper must reset their password, and only then is the old secret deleted.
 // A stolen D1 dump without the Worker secret cannot be brute-forced offline at all; with the secret the cost is
 // the same as plain PBKDF2 100k.
+
+/** Stored iteration counts outside this range are refused, so a tampered row can't make verify burn CPU. */
+export const MIN_ITERATIONS = 100_000;
+export const MAX_ITERATIONS = 1_000_000;
+export const MIN_PEPPER_BYTES = 32;
 
 async function pepperInput(pepper: string, password: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey("raw", enc.encode(pepper), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -64,6 +71,7 @@ async function pepperInput(pepper: string, password: string): Promise<Uint8Array
 export function pepperedPbkdf2(password: string, pepper: string, pepperId = "1", iterations = 100_000) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   return timed(async () => {
+    if (enc.encode(pepper).length < MIN_PEPPER_BYTES) throw new Error(`pepper must be at least ${MIN_PEPPER_BYTES} bytes`);
     const out = await pbkdf2Raw(await pepperInput(pepper, password), salt, iterations);
     return `pbkdf2-sha256-hmac$${pepperId}$${iterations}$${b64(salt)}$${b64(out)}`;
   });
@@ -72,8 +80,19 @@ export function pepperedPbkdf2(password: string, pepper: string, pepperId = "1",
 export async function verifyPeppered(stored: string, password: string, peppers: Record<string, string>): Promise<boolean> {
   const [scheme, pepperId, iter, salt, hash] = stored.split("$");
   if (scheme !== "pbkdf2-sha256-hmac" || !pepperId || !iter || !salt || !hash) return false;
+  const iterations = Number(iter);
+  if (!Number.isInteger(iterations) || iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS) return false;
   const pepper = peppers[pepperId];
   if (!pepper) return false;
-  const out = await pbkdf2Raw(await pepperInput(pepper, password), fromB64(salt), Number(iter));
+  const out = await pbkdf2Raw(await pepperInput(pepper, password), fromB64(salt), iterations);
   return timingSafeEqual(out, fromB64(hash));
+}
+
+/**
+ * Sign-in for an email with no account (or a passkey-only account) must cost the same as a real check, or the
+ * response time reveals which emails exist. Run the same derivation against a fixed dummy salt and discard it.
+ */
+export async function dummyVerify(password: string, pepper: string): Promise<false> {
+  await pbkdf2Raw(await pepperInput(pepper, password), new Uint8Array(16), MIN_ITERATIONS);
+  return false;
 }

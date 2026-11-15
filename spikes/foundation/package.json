@@ -12,7 +12,7 @@
     "extract-wasm": "node scripts/extract-wasm.mjs",
     "deploy:probe": "node probe/deploy.mjs",
     "check:probe": "node probe/check.mjs",
-    "destroy:probe": "wrangler delete --config probe/wrangler.jsonc"
+    "destroy:probe": "node probe/destroy.mjs"
   },
   "dependencies": {
     "@simplewebauthn/server": "14.0.3",

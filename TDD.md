@@ -1149,7 +1149,7 @@ The repository includes a `wrangler.jsonc` with:
 - Build-time variable `OFFICEBOX_VERSION`.
 - **v1.4 additions:**
   - the **ReminderScheduler** Durable Object (§2.2)
-  - Queues: `link-preview-fetch` and `ics-fetch` (outbound fetching, §8.2), and `unread-email`, whose delayed messages (`delaySeconds`, at most 12 hours) implement the per-recipient offline-email timer, deduplicated by the D1 `pending_emails` table; longer holds use ReminderScheduler `email_release` triggers (Platform §11)
+  - Queues: `link-preview-fetch` and `ics-fetch` (outbound fetching, §8.2), and `unread-email`, whose delayed messages (`delaySeconds`, at most 24 hours) implement the per-recipient offline-email timer, deduplicated by the D1 `pending_emails` table; longer holds use ReminderScheduler `email_release` triggers (Platform §11)
   - the admin settings keys listed in Platform §7 (for example `external_invites`, `holiday_regions`, `offline_documents_enabled`, `welcome_post_enabled`, `default_channels`, `screen_share` and `link_previews_enabled`), stored in `installation.settings`.
 
 The Deploy to Cloudflare button copies the repository into the customer's GitHub account, provisions the supported resources and runs the deploy command:
@@ -1481,7 +1481,7 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
 | Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
 
 Timers that aren't cron jobs (Platform §11):
-- **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry) and `email_release` (email holds longer than 12 hours).
+- **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry) and `email_release` (email holds longer than 24 hours).
 - **Delayed `unread-email` queue messages**, deduplicated by `pending_emails`. When one fires during DND or time off the email is held; when that ends it's re-evaluated and, if still unread, sent after the remaining delay or immediately if the delay has passed.
 - **Channel DO** poll auto-close.
 - **UserHub:** ring timeout, and the DND-end "while you were away" summary.
@@ -1509,9 +1509,12 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 ### 8.1 Authentication and sessions
 
 - **Passwords:**
-  - Hashed with PBKDF2-HMAC-SHA256 via WebCrypto: 600,000 iterations and a 16-byte salt. Local workerd accepts 600,000 iterations, but production may cap PBKDF2 at 100,000; this is verified in the M0 foundation spike (§10). **Fallback:** 100,000 iterations plus a server-side pepper (HMAC with a Worker secret), or Argon2id in WASM if bundle size and CPU allow. The versioned format lets either be adopted without breaking stored hashes.
-  - Stored in a versioned format (`pbkdf2-sha256$600000$<salt>$<hash>`), so parameters can be raised and hashes upgraded at next sign-in.
-  - Chosen over Argon2id because native WebCrypto avoids WASM memory limits and CPU spikes in Workers.
+  - Hashed with PBKDF2-HMAC-SHA256 via WebCrypto at **100,000 iterations with a 16-byte salt, after an HMAC-SHA256 pepper**: the PBKDF2 input is `HMAC-SHA256(PEPPER_<id>, password)`, with the pepper held in Worker secrets (platform §16), at least 32 random bytes.
+  - **Why 100k plus a pepper:** the M0 foundation spike (§10) found that workerd's default limit enforcer caps PBKDF2 at 100,000; local `wrangler dev` lifts the cap, which is why 600,000 works locally. A D1 dump or export without the pepper can't be attacked offline. **Pending the production probe:** if deployed Workers accept 600,000, new hashes use `pbkdf2-sha256$600000$…` and existing ones upgrade at next sign-in.
+  - Stored in a versioned format (`pbkdf2-sha256-hmac$<pepperId>$100000$<salt>$<hash>`), so parameters and peppers can change and hashes upgrade at next sign-in. Verification refuses stored iteration counts outside 100,000–1,000,000.
+  - Pepper rotation, restore and the dummy derivation for unknown accounts (no timing enumeration) follow Identity §4.4.
+  - Chosen over Argon2id because native WebCrypto avoids WASM memory limits and CPU spikes in Workers. Argon2id via `hash-wasm` needs its WASM imported as precompiled modules, since Workers forbid runtime WASM compilation (spike finding).
+  - Sign-in needs Workers Paid: PBKDF2 at 100,000 iterations takes about 12 ms of CPU, above the Free plan's 10 ms limit.
   - Minimum length 10, checked against a bundled list of common passwords. No composition rules.
 - **Sessions:**
   - Cookies as in §3.1.
@@ -1519,8 +1522,9 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets.
   - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
 - **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
-- **Rate limiting** with the Workers Rate Limiting binding:
-  - Sign-in: 5 attempts per minute per IP and 10 per hour per account, with progressive delays. There is no hard lockout, which would let attackers lock users out.
+- **Rate limiting** (mechanisms per platform §8):
+  - The Workers Rate Limiting binding supports periods of exactly 10 or 60 seconds, counts per Cloudflare location, and is approximate. The wrapper treats it as advisory and returns `rate_limited` with retry-after equal to the period. Longer windows and exact quotas use D1 or Durable Object counters.
+  - Sign-in: 5 attempts per minute per IP (binding) and 10 per hour per account (D1 counter), with progressive delays. There is no hard lockout, which would let attackers lock users out.
   - Setup, recovery, invitation acceptance and password reset are limited the same way.
 - **Tokens:** invitation, reset and recovery tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days and resets after 1 hour.
 - **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: reset one owner's password and MFA. The action is audited, and a banner shows until the secret is deleted.
@@ -1572,7 +1576,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - Only allow-listed types are served inline: PNG, JPEG, GIF, WebP, PDF, MP4, WebM, MP3 and OGG.
   - Everything else, including HTML and SVG, is sent with `Content-Disposition: attachment`.
   - Every file response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
-- **Previews:** images and PDFs render in the browser, with PDFs in a sandboxed frame. Whether Chrome's built-in PDF viewer renders under `Content-Security-Policy: sandbox` must be verified in the M0 foundation spike; if not, PDFs are served with a narrower CSP or rendered with a JS viewer. Office documents are not converted server-side in the first release.
+- **Previews:** images and PDFs render in the browser. PDFs keep the `Content-Security-Policy: sandbox` response header and show in an `<iframe>` **without** the `sandbox` attribute: the M0 foundation spike found that Chromium's PDF viewer renders under the CSP header, directly and in an iframe, but an `<iframe sandbox>` attribute blocks it whatever tokens it allows. Firefox and Safari are untested and are checked in M6 (Documents acceptance criteria); a browser that can't render falls back to PDF.js in a sandboxed iframe on a separate path. Office documents are not converted server-side in the first release.
 - **Malware scanning** is out of scope (PRD §14), and the documentation says so.
 - **Avatars** accept PNG, JPEG or WebP only, and are cropped on the client (Identity §4.7).
 - **Three file kinds:** chat attachments belong to their message and are deleted with it; images and file cards pasted into a document belong to the document and are deleted with it; drive files live in folders and are versioned. "Save to folder" creates an independent drive file from a message-owned one (Documents §6).
@@ -1618,7 +1622,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Lifecycle matrix test (Platform §17): disable and delete for every feature, including closing call sockets and erasing personal data.
 - Durable registry test: after UserHub eviction, revoking a member still closes every open socket; the Worker-side fallback closes sockets missing from the registry.
 - Trigger delivery test: a crash between marking a trigger fired and sending its effect leads to exactly one effect after recovery (outbox, idempotent consumer).
-- `pending_emails` dedupe: repeated events in one conversation produce one email; holds longer than 12 hours are released by `email_release`.
+- `pending_emails` dedupe: repeated events in one conversation produce one email; holds longer than 24 hours are released by `email_release`.
 - Session tests: two tabs refreshing within 30 seconds both stay signed in; replaying a refresh token after the grace window revokes the session; a disabled member's REST calls fail within 60 seconds.
 - Cascade tests: channel, group, calendar, drive and event deletions follow Platform §4, including channel purge moving folder documents to their creators.
 - Export exclusions: no `auth_tokens`, passkeys, ICS tokens or URLs, or `poll_secret` in an export; anonymous votes appear only as voter keys.
@@ -1668,7 +1672,7 @@ Resolved in v1.1:
 Decided in v1.3 (from the review):
 - WebSocket auth: cookies plus `Origin` check; one-time tickets for clients without cookies (§3.1).
 - Whiteboard: Excalidraw (MIT) with an Officebox-maintained Yjs binding (§4.2).
-- Password hashing: PBKDF2-SHA256, 600,000 iterations, versioned format (§8.1).
+- Password hashing: PBKDF2-SHA256, versioned format (§8.1). Revised after the M0 foundation spike to 100,000 iterations plus an HMAC pepper, pending the production probe.
 - File handling: streamed through the binding; multipart above 50 MB; allow-listed inline types (§8.3).
 - Huddle signalling: HuddleRoom DO with Worker-mediated SFU calls and confined track subscriptions (§3.6).
 - Screen sharing: one presenter, simulcast, detail and motion modes (§3.6). Present mode via Yjs awareness (§4.5).
@@ -1676,12 +1680,12 @@ Decided in v1.3 (from the review):
 
 To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
 
-**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md):
-- **PBKDF2 production cap:** almost certainly 100,000. workerd's default limit enforcer caps it there; the standalone server used by `wrangler dev` removes the cap, which is why 600k works locally (74 ms vs 12 ms for 100k). workerd issue #1346 is still open. Recommendation: M1 uses the §8.1 fallback **PBKDF2 100k + HMAC pepper**; switch to 600k if the production probe accepts it. Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works only with precompiled modules (~45 ms, +25 KiB). *Needs production run.*
-- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, and `sign_count` clone detection. *Verified locally.*
-- **Rate Limiting binding:** periods are 10 or 60 s only; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. Binding only for abuse throttles (sign-in per IP, setup/recovery/invites, link previews, general API); the other platform §8 rows stay DO or D1. *Production semantics need a production run.*
-- **Queue `delaySeconds` maximum:** **24 hours** (86,400 s) for send, sendBatch and retries per current docs, not 12 hours; Miniflare rejects 86,401. `email_release` is still needed for holds over 24 h. *Documented, local verified.*
-- **PDF preview under `Content-Security-Policy: sandbox`:** Chromium's viewer renders it, directly and in an `<iframe>`. An `<iframe sandbox>` attribute blocks it, so previews use a plain iframe and rely on the response CSP (§8.3). The headless shell has no PDF viewer. *Verified locally (Chromium 153); Firefox and Safari untested.*
+**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md), and the decisions below are applied in §8.1, §8.3, Identity §4.4 and platform §8, §11 and §16:
+- **PBKDF2 production cap:** almost certainly 100,000. workerd's default limit enforcer caps it there; the standalone server used by `wrangler dev` removes the cap, which is why 600k works locally (74 ms vs 12 ms for 100k). workerd issue #1346 is still open. **Decision:** M1 uses **PBKDF2 100k + HMAC pepper** (`pbkdf2-sha256-hmac$<pepperId>$100000$salt$hash`, §8.1); switch to 600k and upgrade at sign-in if the production probe accepts it. Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works only with precompiled modules (~45 ms, +25 KiB). *Needs production run.*
+- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, replay refusal and `sign_count` clone detection. **Decision:** use it with `requireUserVerification: false`; compare counters ourselves after signature verification (≤ stored and not both 0 → `clone_detected`) and update with compare-and-set (`UPDATE … WHERE sign_count = ?`) (Identity §4.4). *Verified locally.*
+- **Rate Limiting binding:** periods are exactly 10 or 60 s; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. **Decision:** binding only for abuse throttles (sign-in per IP, setup/recovery/invites, link previews, general API); the wrapper treats results as advisory and returns `rate_limited` with retry-after equal to the period; the other platform §8 rows stay DO or D1. *Production semantics need a production run.*
+- **Queue `delaySeconds` maximum:** **24 hours** (86,400 s) for send, sendBatch and retries per current docs, not 12 hours; Miniflare rejects 86,401. **Decision:** the `email_release` threshold is 24 h; delays are Zod-validated (0–86,400) and out-of-range values are typed results (platform §11). *Documented, local verified.*
+- **PDF preview under `Content-Security-Policy: sandbox`:** Chromium's viewer renders it, directly and in an `<iframe>`. An `<iframe sandbox>` attribute blocks it. **Decision:** keep the CSP header and preview in an iframe without the `sandbox` attribute (§8.3); Firefox, Safari and branded Chrome are M6 acceptance checks, with PDF.js as the fallback. The headless shell has no PDF viewer. *Verified locally (Chromium 153).*
 
 **New in v1.4:**
 - **WebAuthn library spike before M1:** done. SimpleWebAuthn runs in Workers (see the M0 foundation spike above).
