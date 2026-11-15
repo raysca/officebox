@@ -65,7 +65,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
         {messages.skipToContent}
       </a>
 
-      <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b border-border bg-surface px-2 sm:px-4">
+      <header className="sticky top-0 z-20 flex h-header items-center gap-2 border-b border-border bg-surface px-2 sm:px-4">
         <IconButton
           label={messages.openMenu}
           icon={<MenuIcon />}
@@ -86,7 +86,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
       <div className="flex flex-1">
         <nav
           aria-label={messages.mainNavigation}
-          className="sticky top-14 hidden h-[calc(100dvh-3.5rem)] w-60 shrink-0 overflow-y-auto border-r border-border bg-surface md:block"
+          className="sticky top-header hidden h-[calc(100dvh-var(--spacing-header))] w-60 shrink-0 overflow-y-auto border-r border-border bg-surface md:block"
         >
           <NavList />
         </nav>
