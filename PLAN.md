@@ -407,6 +407,8 @@ Calendar is **new scope**. The PRD currently plans only an outbound ICS feed in 
 
 ### M7 — Operations
 
+**Spec:** [specs/admin.md](specs/admin.md) (Draft for review): the admin area, alerts, health, storage, usage, exports (workspace and per-member), restore, maintenance mode and updates.
+
 This grows in parallel with the features above. Items are pulled in when a feature needs them.
 
 - **Health:** the admin health page, the post-deploy checklist and the diagnostics bundle (TDD §6.1, §7.1–7.2).
