@@ -5,9 +5,16 @@ import { messages } from "../../app/messages";
 /**
  * Typed fetch wrapper for the Officebox API.
  *
- * - Same-origin cookies are always sent (`credentials: "same-origin"`); the session cookie arrives in M1.
+ * - Same-origin cookies are always sent (`credentials: "same-origin"`): better-auth's `HttpOnly`
+ *   session cookie (TDD §3.1), which this code never sees. There are no access or refresh tokens: the
+ *   session slides on its own (the server re-issues the cookie), so nothing here refreshes it.
  * - State-changing requests carry `X-Officebox-Request: 1`, which the Worker requires as part of its
- *   CSRF defence (TDD §8).
+ *   CSRF defence (TDD §8.2); the browser adds `Origin`. The two passkey options routes are GETs with
+ *   side effects and need it too (pass it in `headers`).
+ * - **Step-up:** when a request is refused with `reauth_required`, the client asks the registered
+ *   handler (the app's passkey prompt, `setReauthHandler`) to confirm with a passkey, once for every
+ *   request that failed at the same moment, and retries the request once if that worked. Otherwise the
+ *   original error is returned.
  * - Every outcome is a typed `Result`; nothing here throws for an expected failure (AGENTS §4.1).
  *   TanStack Query wants query functions that throw, so `unwrap` converts a failed result into an
  *   `ApiRequestError` at that boundary only.
@@ -43,13 +50,53 @@ export interface ApiRequestOptions<S extends z.ZodType> {
   headers?: Record<string, string>;
   /** Injected in tests; defaults to the global fetch. */
   fetch?: typeof fetch;
+  /** Ask for a passkey and retry once on `reauth_required` (default true). */
+  reauth?: boolean;
 }
 
 type Output<S> = S extends z.ZodType ? z.output<S> : undefined;
 
+/** Confirms it's the person with a passkey; resolves true when the session is fresh again. */
+export type ReauthHandler = () => Promise<boolean>;
+
+let reauthHandler: ReauthHandler | null = null;
+let reauthInFlight: Promise<boolean> | null = null;
+
+/** Registers the app's step-up prompt. Returns a function that unregisters it. */
+export function setReauthHandler(handler: ReauthHandler): () => void {
+  reauthHandler = handler;
+  return () => {
+    if (reauthHandler === handler) reauthHandler = null;
+  };
+}
+
+export function isReauthRequired(error: ApiClientError): boolean {
+  return error.kind === "api" && error.error.code === "reauth_required";
+}
+
+function confirmWithPasskey(handler: ReauthHandler): Promise<boolean> {
+  reauthInFlight ??= handler()
+    .catch(() => false)
+    .finally(() => {
+      reauthInFlight = null;
+    });
+  return reauthInFlight;
+}
+
 export async function apiRequest<S extends z.ZodType>(
   path: string,
   options: ApiRequestOptions<S> = {},
+): Promise<Result<Output<S>, ApiClientError>> {
+  const first = await send(path, options);
+  const handler = reauthHandler;
+  if (first.ok || options.reauth === false || !handler || !isReauthRequired(first.error)) return first;
+  if (!(await confirmWithPasskey(handler))) return first;
+  return send(path, options);
+}
+
+async function send<S extends z.ZodType>(
+  path: string,
+  options: ApiRequestOptions<S>,
 ): Promise<Result<Output<S>, ApiClientError>> {
   if (options.signal?.aborted) return err({ kind: "aborted" });
 
@@ -233,6 +280,18 @@ function developerSummary(detail: ApiClientError): string {
 export function isUnauthorized(error: ApiClientError): boolean {
   if (error.kind === "api" && error.error.code === "unauthenticated") return true;
   return "status" in error && error.status === 401;
+}
+
+/** The API error code of a failure, when the server sent one. */
+export function errorCodeOf(error: unknown): ApiError["code"] | undefined {
+  const detail = error instanceof ApiRequestError ? error.detail : null;
+  return detail?.kind === "api" ? detail.error.code : undefined;
+}
+
+/** The engine's or better-auth's `reason` on a failure, when the server sent one. */
+export function errorReasonOf(error: unknown): string | undefined {
+  const detail = error instanceof ApiRequestError ? error.detail : null;
+  return detail?.kind === "api" ? detail.error.reason : undefined;
 }
 
 /** Returns the value or throws an `ApiRequestError`. Use inside query and mutation functions only. */

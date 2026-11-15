@@ -1,20 +1,40 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
+import { signOut, useMe } from "../../lib/api/identity";
 import { IconButton } from "../../lib/ui/Button";
 import { UserIcon } from "../../lib/ui/icons";
 import { messages } from "../messages";
 
+const itemClass =
+  "flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-fg hover:bg-accent-subtle " +
+  "hover:text-accent-subtle-fg motion-safe:transition-colors disabled:cursor-not-allowed disabled:opacity-60";
+
 /**
- * Placeholder for the account menu (profile, preferences, sign out) that arrives with sign-in in M1.
- * A disclosure button with a popover panel: Esc or a click outside closes it.
+ * The account menu: who is signed in, links to Passkeys and My devices, and Sign out.
  *
- * TODO(M1): when it holds real actions, decide between this disclosure pattern and an ARIA menu
- * (role="menu" with arrow-key navigation), and test it with screen readers.
+ * A disclosure button with a panel of ordinary links and buttons (WAI-ARIA disclosure pattern), not
+ * an ARIA `menu`: the panel holds a short list of navigation and one action, which Tab reaches in
+ * order and screen readers announce as what they are, without menu-mode keyboard handling to learn.
+ * Esc, a click outside or tabbing away closes it.
  */
 export function UserMenu() {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const me = useMe().data;
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+
+  const signOutMutation = useMutation({
+    mutationFn: signOut,
+    onSuccess: async () => {
+      setOpen(false);
+      queryClient.clear();
+      await navigate({ to: "/sign-in", search: { reason: "signed-out" }, replace: true });
+    },
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -55,9 +75,37 @@ export function UserMenu() {
       <div
         id={panelId}
         hidden={!open}
-        className="absolute top-full right-0 z-30 mt-2 w-64 rounded-lg border border-border bg-raised p-4 text-sm shadow-lg"
+        className="absolute top-full right-0 z-30 mt-2 w-72 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-raised p-2 text-sm shadow-lg"
       >
-        <p>{messages.account.signedOut}</p>
+        {me ? (
+          <div className="border-b border-border px-3 pt-1 pb-3">
+            <p className="text-muted">{messages.account.signedInAs}</p>
+            <p className="truncate font-semibold">{me.user.displayName}</p>
+            <p className="truncate text-muted">{me.user.email}</p>
+          </div>
+        ) : null}
+        <ul className="flex flex-col gap-1 pt-2">
+          <li>
+            <Link to="/settings/passkeys" className={itemClass} onClick={() => setOpen(false)}>
+              {messages.account.passkeys}
+            </Link>
+          </li>
+          <li>
+            <Link to="/settings/devices" className={itemClass} onClick={() => setOpen(false)}>
+              {messages.account.devices}
+            </Link>
+          </li>
+          <li>
+            <button
+              type="button"
+              className={itemClass}
+              disabled={signOutMutation.isPending}
+              onClick={() => signOutMutation.mutate()}
+            >
+              {signOutMutation.isPending ? messages.account.signingOut : messages.account.signOut}
+            </button>
+          </li>
+        </ul>
       </div>
     </div>
   );
