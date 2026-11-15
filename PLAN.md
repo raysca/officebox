@@ -131,52 +131,59 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 **Goal:** a team can set up a workspace, invite people and sign in safely, **without passwords**. Every later permission check runs on this milestone's permission engine.
 
 **Must** (passwordless on better-auth, product-owner decisions of 15 Nov 2026; Identity §2, TDD §8.1):
-- **First-run setup** with the setup token, either the deploy secret or a generated token in the logs, and an atomic claim (TDD §6.8). The owner **registers a passkey during setup**; setup recommends a second one.
-- **better-auth foundation:** `better-auth` and `@better-auth/passkey` pinned to exact versions, on D1, with its tables mapped onto ours and checked-in `NNNN_identity_*` migrations generated with `npx auth generate`; one instance per request host (relying-party ID derived, never configured); the route allowlist; `databaseHooks.user.create.before` for invite-only sign-up; `cf-connecting-ip` for client IPs; the advisory policy (TDD §8.1).
+- **First-run setup** with the setup token, either the deploy secret or a generated token in the logs, and an atomic claim (TDD §6.8). A WebAuthn check runs before the claim; the claim records the **canonical origin**; the owner **registers a passkey during setup** (resumable on another device, expiring after 24 hours); setup recommends a second passkey.
+- **better-auth foundation:** `better-auth` and `@better-auth/passkey` pinned to exact versions, on D1, with its tables mapped onto ours and checked-in `NNNN_identity_*` migrations generated with `npx auth generate`; one instance per installation origin, with the relying-party ID, `trustedOrigins` and link origin taken from the canonical origin; the default-deny route allowlist; the token-stripping response filter; server-set markers for account creation; the advisory policy and CI gate (TDD §8.1).
 - **Sign-in:**
-  - **sign in with a passkey** (all accounts are passkey-only; owners asked for two passkeys), with our counter check (`clone_detected`)
-  - **magic links** by email through **our confirmation page** and a server-side better-auth verify (platform §10)
-  - better-auth database sessions: 30 days sliding, cookie cache off, no refresh tokens or `session_epoch`
-  - sign out, sign out everywhere, and "My devices"; every revocation closes live sockets
+  - **sign in with a passkey**, user verification required for everyone, with the counter rule (`clone_detected`)
+  - **magic links for members only**, through **our confirmation page** (token in the fragment) and a server-side better-auth verify, consumed by our compare-and-set (platform §10)
+  - `security_notice` on every passkey addition and on a magic-link sign-in from a new device
+  - better-auth database sessions: 30 days sliding, cookie cache off, no refresh tokens or `session_epoch`, no session token reachable by JavaScript
+  - sign out, sign out everywhere, and "My devices"; every revocation closes live sockets (from M2, when sockets exist)
 - **Invitations:**
   - single-use links that expire after 7 days, roles at invite time
   - **copy link** (no email needed) and **email**
-  - accept flow that creates the account and **registers a passkey**
+  - accept flow that creates the account and **registers a passkey**; reopening only while the account has no passkey and no session
+  - owners need a second passkey or `RECOVERY_TOKEN` before inviting
 - **Email:** the adapter interface, with the **Cloudflare Email Service** binding as the default driver, plus HTTP-API drivers (Resend, Postmark, SES) and SMTP over STARTTLS. Includes the queue, retries, DLQ and **Send test email** (TDD §7.6). Magic links need it.
-- **Recovery:** admin recovery links (copy link) for members, owners acting on admins and owners; magic links when email is configured; owner recovery through the `RECOVERY_TOKEN` secret. Each registers a new passkey.
+- **Recovery:** recovery links (copy link) for members by admins, and for admins and owners by owners; magic links for members when email is configured; owner recovery through the `RECOVERY_TOKEN` secret. Each registers a new passkey.
+- **Email change** with a confirmation link and the `security_notice` sign-in banner.
 - **Profiles:** display name, avatar (R2), **time zone**, **working hours** and **location/region** (the calendar needs all three), and status text with an emoji.
 - **Roles and groups:** owner, admin and member; admin-managed groups (PRD §10.1).
 - **Members administration:** list, invite, change role, disable, delete (anonymise). Content transfer for deleted members arrives with the features that own the content.
 - **Permission engine** in `packages/shared` plus Worker services, implementing [specs/permissions.md](specs/permissions.md). It uses the union rule across item, folders, drive and general access, and includes the admin-power limits. Its **matrix test grows per milestone**: M1 covers workspace roles, groups and profiles; channels, calls, calendars and documents are added by their milestones.
 - **Only identity objects are created in M1** (users, handles, groups, invitations, sessions, better-auth accounts and verifications, passkeys, settings). `#general` and default channels arrive in M3a, calendars in M5a, and drives and folders in M6a. Each of those milestones provisions its objects with an idempotent backfill for existing people and groups (platform §13).
 - **Security:**
-  - CSRF header and `Origin` checks (alongside better-auth's origin check), the CSP and security headers
-  - rate limits on magic-link requests (per email and per IP), passkey sign-in, setup, invitations and recovery
+  - CSRF header and `Origin` checks against the canonical origin (alongside better-auth's origin check), the CSP and security headers
+  - rate limits in our middleware, before better-auth, on magic-link requests (per normalised email and per IP, never extending a victim's window), passkey sign-in, setup, invitations and recovery
   - audit entries for every admin action
   - the deploy step that creates missing secrets (`BETTER_AUTH_SECRET`, `TOKEN_HASH_KEY`) and the `/not-configured` page.
 
 **Must (also):** the "My devices" session list. **Should:** the "allowed email domains" setting for invitations.
 
-**Slices** (product-owner decision, 15 Nov 2026; revised the same day for passwordless sign-in). Each is one branch and PR with its own independent review, built in this order:
-- **M1a — better-auth foundation, setup with a passkey, sessions and the permission engine core:**
-  - better-auth wired into Hono (`auth.handler`), pinned, configured per request host, with the route allowlist, mapped tables and generated migrations
-  - first-run setup with the setup token and an atomic claim, **registering the owner's passkey** (enrolment ticket, resumable until done)
-  - **passkey sign-in**, with our counter check
-  - better-auth sessions (30 days sliding, cookie cache off), sign out, sign out everywhere and "My devices", with socket revocation hooks
-  - CSRF header and `Origin` checks; rate limits on setup and passkey sign-in
-  - the permission engine in `packages/shared` with workspace roles, and the first matrix test
+**Slices** (product-owner decision, 15 Nov 2026; revised the same day for passwordless sign-in and after review). Each is one branch and PR with its own independent review, built in this order, except M1p, which can be built in parallel:
+- **M1a-0 — better-auth spike (time-boxed, throwaway, in `spikes/`):** answers the feasibility list in TDD §10 (v1.7): the D1 adapter with our names, epoch-ms dates and no transactions; in-process magic-link verify, `storeToken: "hashed"` and unknown emails under `disableSignUp`; passkey `requireSession: false` with `resolveUser`, required user verification, and how a hook reads the counter (settling our own clone check versus the library's); hook coverage for user creation, session creation and deletion; the `BETTER_AUTH_SECRETS` format; the `__Host-` cookie prefix; the origin check with our CSRF header and the token-stripping filter; the rate-limit storage interface; `trustedOrigins`, `baseURL` and `rpID` from the installation record; `nodejs_compat` and bundle size. Each answer is recorded in TDD §10, and any design change lands in the specs before M1a starts.
+- **M1a — better-auth foundation, setup with a passkey and sessions:**
+  - better-auth wired into Hono (`auth.handler`), pinned, configured from the canonical origin, with the default-deny allowlist, the token-stripping filter, mapped tables and generated migrations
+  - first-run setup with the setup token and an atomic claim: WebAuthn preflight, canonical origin, **the owner's passkey** (enrolment ticket bound to the challenge, consumed at verify), resume guard and 24-hour expiry
+  - **passkey sign-in** with user verification required and the counter rule chosen in M1a-0
+  - better-auth sessions (30 days sliding, cookie cache off, primary reads, `session.create.before` status check), sign out, sign out everywhere and "My devices", with socket-revocation hooks wired for M2
+  - CSRF header and canonical `Origin` checks; rate limits in our middleware on setup and passkey sign-in
   - the `/not-configured` page and the deploy step that creates `BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` if missing
   - the M1a branch's password sign-in, refresh rotation, `session_epoch`, sign-in throttle, slow mode and `PEPPER_1` / `SESSION_SIGNING_KEY` are replaced, not merged
+- **M1p — Permission engine core:** the permission engine in `packages/shared` with workspace roles, and the first matrix test. **Why separate:** it is pure shared-package logic with no dependency on better-auth, so taking it out keeps M1a reviewable in one sitting and lets it run in parallel after M0. It must land before M1b, whose invitation rules use it. (Lettered "p" so the other slice letters stay as approved.)
 - **M1b — Email, invitations and magic links:**
   - the email adapter (Cloudflare Email Service binding by default; Resend, Postmark, SES and SMTP over STARTTLS as alternatives), its queue, retries and dead-letter queue, and **Send test email**
-  - invitations: copy link and email, single-use, 7-day expiry, role at invite time
-  - the accept flow that creates the account (through better-auth, so `databaseHooks.user.create.before` runs) and **registers a passkey**
-  - **magic links** through our confirmation page and a server-side better-auth verify, limited per email and per IP
+  - invitations: copy link and email, single-use, 7-day expiry, role at invite time, links built from the canonical origin with the token in the fragment; the owners' second-passkey gate
+  - the accept flow: invitation consumed by compare-and-set, account created through better-auth with the accept marker, handle claimed, the repair job; the passkey registered; reopening guarded (410)
+  - **magic links for members only** through our confirmation page, consumed by our compare-and-set, limited per normalised email and per IP without extending a victim's window
+  - the **`security_notice` mechanism** (email and the sign-in banner, notifications §9 M1) for passkey additions and new-device magic-link sign-ins
   - the "allowed email domains" setting (Should)
-- **M1c — Recovery and passkey management:**
-  - admin recovery links (copy link), with the notices, owner flag and token revocation
-  - owner recovery with `RECOVERY_TOKEN`
-  - extra passkeys: add, rename, remove (last-method and owner rules), the owners' second-passkey reminder and the `*.workers.dev` warning
+- **M1c — Recovery, passkey management and email change:**
+  - recovery links (copy link), with the notices, owner flag, token revocation and invalidation of other enrolment tickets
+  - owner recovery with `RECOVERY_TOKEN` (consumed hash, constant-time compare, IP limit, notice to the other owners)
+  - extra passkeys: add, rename, remove (last-passkey rules), labels for how each was created, the owners' second-passkey reminder and the `*.workers.dev` warning
+  - the **email-change flow** (confirmation link, notice to the old address, magic links revoked by email)
+  - the owner's **domain move** (`POST /admin/domain`)
 - **M1d — Profiles and directory:**
   - display name, avatar (R2), time zone, working hours, location or region, status text with emoji
   - @handles
@@ -188,11 +195,15 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - audit coverage for every admin action
   - the full M1 permission matrix (workspace roles, groups, profiles)
 
-**Later:** TOTP MFA; Cloudflare Access SSO (PRD §6).
+**Later:** TOTP MFA; Cloudflare Access SSO (PRD §6); WebAuthn related-origin requests for domain moves.
 
 **Exit criteria:**
-- These end-to-end tests pass: setup with a token (registering a passkey), **sign in with a passkey**, invite by link with no email configured (accepting registers a passkey), invite by email, **magic link via the confirmation page**, recovery link, disable user, and an expired invitation being refused.
-- Every account-creation path without an invitation or setup claim is refused (Identity §9).
+- These end-to-end tests pass in Playwright, with passkeys on a **Chromium virtual authenticator** (user verification on) and email through a **test email sink**: setup with a token (registering a passkey), **sign in with a passkey**, invite by link with no email configured (accepting registers a passkey), invite by email, **magic link via the confirmation page**, recovery link, **owner recovery with `RECOVERY_TOKEN`**, email change, disable user, and an expired invitation being refused.
+- **Clone detection:** a counter regression is refused as `clone_detected` with no session left behind, and a race between two legitimate sign-ins raises no alert.
+- **Concurrent tokens:** two concurrent confirm POSTs with one magic-link token, two concurrent registration verifies with one enrolment ticket, and two concurrent accepts of one invitation each succeed at most once.
+- **Session expiry** (injected clock): a session unused for 30 days is rejected and one used on day 29 is extended; a revoked session fails on its next request.
+- No response body or log line contains a session token, and the route allowlist holds against path-normalisation tricks.
+- Every account-creation path without the setup or accept marker is refused (Identity §9).
 - The permission engine passes its M1 matrix test (workspace roles, groups, profiles).
 
 ### M2 — Realtime backbone
@@ -218,6 +229,7 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 **Exit criteria:**
 - Presence shows in the UI across two browsers.
 - Disabling a user closes their sockets within 5 seconds.
+- Revoking one session (My devices, sign out everywhere, an admin signing someone out) closes that session's sockets within 5 seconds, and a session that expires on its own loses its sockets at the next UserHub recheck (Identity §4.5, TDD §3.5).
 - The tab leader hands over correctly when the leading tab closes.
 
 ### M3 — Chat

@@ -3,7 +3,7 @@
 **Status:** Working baseline  
 **Version:** 1.7  
 **Date:** 15 November 2026  
-**Changes in 1.7:** sign-in is **passwordless**: passkeys and magic links only, with no passwords, password resets or password policy, built on the **better-auth** library (MIT). Owners are asked for two passkeys and keep the recovery secret as a fallback (product-owner decisions, 15 Nov 2026; §6, §7, §10.1, §10.2, §13, §15, §16, Appendix A; detail in [specs/identity.md](specs/identity.md)).
+**Changes in 1.7:** sign-in is **passwordless**: passkeys for everyone and magic links for members, with no passwords, password resets or password policy, built on the **better-auth** library (MIT). Owners are asked for two passkeys and keep the recovery secret as a fallback (product-owner decisions, 15 Nov 2026; §6, §7, §10.1, §10.2, §13, §15, §16, Appendix A; detail in [specs/identity.md](specs/identity.md)).
 **Changes in 1.6:** the [assistant spec](specs/assistant.md) is adopted. Personal memory moves from deferred into the first AI release. New or changed: the assistant's display name, audience-safe mentions, voice, call notes and captions, AI Gateway logging off, indexing only while the assistant is enabled, the privacy scope, personal reminders, and assistant retention and export rules. Tasks and issues stay with projects. Phase 3 maps to PLAN M9 (§2, §4, §5.3, §5.8, §5.9, §10.2, §11, §13, §14, §15, §18, Appendix A).  
 **Changes in 1.5:** second independent review decisions: admin self-access to groups and drives needs an owner; recovery links issued without email are flagged on the sign-in page and to every owner; first-release setup creates identity objects only, with other objects arriving with their milestones; editors moderate comments; viewers can start document calls; admins moderate private channels they belong to; orphaned private events can be removed by owners and admins; one Trash restore rule; calendar purge moves events to organisers; time off has no Trash (§5.3, §5.8, §6, §8, §10.1, §10.2, §18).  
 **Changes in 1.4:** Feature specs ([identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md)) and cross-cutting specs ([permissions](specs/permissions.md), [notifications](specs/notifications.md), [platform rules](specs/platform.md)) adopted. Calendar becomes a first-class feature (§5.10). Decisions from the spec interviews and the independent review are folded in: identity (§6), chat (§5.4), documents and files (§5.5, §5.7), calls (§5.8), notifications (§8), permissions (§10.1), retention (§10.2), export (§13), phases (§15) and limits (§18). **Where this PRD and a spec differ on feature detail, the spec wins.**  
@@ -444,11 +444,12 @@ Initial product direction:
 
 First-release sign-in and security (detail in [specs/identity.md](specs/identity.md)):
 
-- **Passwordless: passkeys and magic links by email only.** There are no passwords. Every account signs in with a passkey, or with a magic link when email is configured. Owners are asked to register **two passkeys** (for example a laptop and a phone). Passkeys are tied to the workspace's domain (§13).
+- **Passwordless: passkeys, plus magic links by email for members.** There are no passwords. Everyone signs in with a passkey, and passkeys always require the device's PIN or biometric (user verification). Members can also use a magic link when email is configured; **owners and admins use passkeys only**. Owners are reminded to keep **two passkeys** (for example a laptop and a phone) and can't invite anyone until they have a second passkey or the recovery secret is set. Passkeys are tied to the workspace's address, which is recorded at setup and changed only by an owner (§13).
+- People are told about every new passkey on their account and about a magic-link sign-in from a new device.
 - Built on **better-auth**, an MIT-licensed authentication library, pinned to exact versions and upgraded only after reviewing its security advisories.
 - Secure browser sessions: 30 days, sliding. Members can see their devices and sign them out ("My devices" doubles as login-activity visibility).
 - **Scanner-safe email links:** magic-link, reset, recovery, invitation and email-change links open a confirmation page, and only a deliberate click uses them. Mail scanners can't use them up.
-- A lost passkey is replaced by signing in with a magic link (when email is configured) or with an admin's recovery link. Email changes are confirmed through the new address.
+- A lost passkey is replaced by signing in with a magic link (members, when email is configured) or with a recovery link (from an admin for members, from an owner for admins and owners). Email changes are confirmed through the new address.
 - **Admin powers are limited:**
   - Admins can disable, delete, change the email of, or issue a **recovery link** to *members*.
   - Doing any of those to admins or owners needs an owner.
@@ -702,7 +703,7 @@ The primary deployment mechanism is the Deploy to Cloudflare button. It copies t
 
 During deployment the customer can set a setup token secret. If they skip it, the application generates a one-time token and writes it to the Worker's logs, which only the Cloudflare account can see. The first visit to the workspace asks for this token before the owner account can be created.
 
-**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later signs everyone out, push must be re-enabled, and passkeys stop working: everyone signs in again with a magic link (when email is configured) or an admin recovery link, and registers a new passkey. Officebox warns when a passkey is registered on a `workers.dev` address.
+**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later is an explicit owner action: it signs everyone out, push must be re-enabled, and passkeys stop working; members sign in again with a magic link (when email is configured) or a recovery link, admins and owners with a recovery link, and everyone registers a new passkey. Officebox warns when a passkey is registered on a `workers.dev` address.
 
 **Data location.** D1 keeps its primary copy in one location, chosen at deployment with a location hint. Durable Objects are created near their first user. Performance targets assume members are in the same broad region as the data; members elsewhere see higher latency. An **EU data-residency option** (Phase 2) keeps D1, R2 and Durable Objects in Cloudflare's EU jurisdiction wherever each service supports it.
 
@@ -825,7 +826,7 @@ Delivered in the milestones in [PLAN.md](PLAN.md): foundation → identity → r
 - Trash, purge and the retention rules in §10.2.
 - Member invitations and basic administration.
 - React application shell and responsive experience.
-- Passwordless sign-in with passkeys and magic links; profiles, @handles, groups and group managers (§6).
+- Passwordless sign-in with passkeys (and magic links for members); profiles, @handles, groups and group managers (§6).
 - Notifications, levels, do-not-disturb and offline email (§8).
 - Chat: channels, announcement channels, DMs and group DMs, threads, pins, saved items, polls and link previews (§5.4).
 - Durable message history in channel Durable Objects, with a D1 copy for search.
@@ -997,7 +998,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Media | Cloudflare Realtime SFU (SFU + TURN) | Agreed |
 | File storage | R2 | Agreed |
 | AI | Workers AI by default; BYOK via AI Gateway optional, per model role | Agreed ([assistant](specs/assistant.md)) |
-| Authentication | Built-in local accounts, **passwordless**: passkeys and magic links only, no passwords; owners asked for two passkeys, with the recovery secret as fallback; TOTP after launch | Agreed (revised 15 Nov 2026) |
+| Authentication | Built-in local accounts, **passwordless**: passkeys for everyone (user verification required), magic links for members only, no passwords; owners need a second passkey or the recovery secret before inviting; exports include passkey public keys; TOTP after launch | Agreed (revised 15 Nov 2026) |
 | Authentication library | **better-auth** (MIT) for sessions, magic links and passkeys; exact version pins and an advisory review on every upgrade | Agreed (15 Nov 2026) |
 | First-run setup | Protected by a one-time setup token; disabled after use | Agreed |
 | Role model | Owner/admin/member workspace roles; channel, drive and calendar roles; union inheritance; admins cannot read or join private content; only owners act on admins and owners | Agreed ([permissions](specs/permissions.md)) |

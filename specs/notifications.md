@@ -1,7 +1,7 @@
 # Spec: Notifications & Attention
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
+**Revision:** Created after independent review (14 Nov 2026); revised after the second review (inbox records, availability model, slices); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; `security_notice` kinds added for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2: passkey added, magic-link sign-in from a new device, owner recovery used)
 **Feature name:** Notifications (marketing name to be decided later)
 **Milestone:** M2 core ([PLAN](../PLAN.md)), extended by each feature milestone (§9) · **Related:** PRD §8; TDD §3.5; [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Identity & Access](identity.md), [Assistant](assistant.md), [Platform](platform.md)
 
@@ -68,7 +68,7 @@ Every notification is an `inbox_items` record (§3.1, §7) with an `event_type`.
 | `assistant_nudge` | Commitment nudge after the member's own message ("Want a reminder…?", Assistant §8) | The author, if opted in and with assistant access | As `assistant_brief` | `assistant_nudge:<messageId>` | The member opens the assistant DM |
 | `assistant_reply` | A long assistant task finished (for example an audio file is ready, Assistant §9) | The member who asked | As `assistant_brief` | `assistant_reply:<turnId>` | The member opens the assistant DM |
 | `personal_reminder` | A personal reminder is due (ReminderScheduler `personal_reminder`, Assistant §7.1) | The member who owns it | In-app; email after the delay | `personal_reminder:<reminderId>` | The member marks it done or dismisses it |
-| `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected** (Identity §4.4, §4.6, §4.11) | The affected member (and, for passkey clone detection, owners) | In-app **and email (always; to the old address for an email change)**, not affected by levels or DND | `security_notice:<kind>:<id>` | Dismissed |
+| `security_notice` | **Recovery link issued, email changed, role changed, passkey clone detected, passkey added, magic-link sign-in from a new device, owner recovery used** (Identity §4.4, §4.6, §4.11) | The affected member (and, for passkey clone detection, owners; for owner recovery used, the **other** owners) | In-app **and email (always; to the old address for an email change)**, not affected by levels or DND | `security_notice:<kind>:<id>` | Dismissed |
 
 **Reserved for Phase 2** (projects and issues, PRD §5.6): `assignment`, `review_request`. They're not raised in the first release.
 

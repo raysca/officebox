@@ -1,7 +1,7 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; token wording updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; token wording, the owners' invite gate and "no impersonation" updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
 **Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Platform](platform.md)
 
@@ -27,7 +27,7 @@ It replaces TDD §2.1's "stop at first match" resolution with a **union** rule.
 | Channel made private | **Keep explicit wider shares, but warn.** The conversion dialog lists those items so the channel admin can restrict them first. |
 | Group principals | Valid on **documents, whiteboards, folders, files, drives and calendars**. **Not on channels**: "invite this group" adds the current members individually. |
 | Private channel membership | **Any member can add people; channel admins remove them.** This corrects PRD §10.1. |
-| Admin powers over people | Admins act on **members only**. Recovery, email change, disable and delete on **admins or owners need an owner**. **Only owners invite or promote admins.** |
+| Admin powers over people | Admins act on **members only**. Recovery, email change, disable and delete on **admins or owners need an owner**. **Only owners invite or promote admins.** Nobody can **impersonate** another member: better-auth's admin plugin isn't used (Identity §2). |
 | Notice of admin actions | Every recovery link or email change **notifies the person** (email to the old address and an in-app banner) and **revokes their pending magic links and recovery tokens**. |
 | Admins and private content | Admins see that private objects **exist** but can't read them. They **can't add themselves to private channels**; they can archive, delete and remove members. In private channels they **are** members of (added by a member), admins can delete messages. |
 | Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** a role on a group drive or folder, **needs an owner**. Audited. |
@@ -199,8 +199,8 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Edit own profile, status, handle, sign-in methods, devices | ✓ | — | — | — | — |
 | Change someone's email · issue a recovery link · disable · delete · sign out all sessions | — | — | — | **Members only** | Anyone |
 | Change role to member or admin | — | — | — | — (admins can't promote) | ✓ |
-| Invite with role member | — | — | — | ✓ | ✓ |
-| Invite with role admin | — | — | — | — | ✓ |
+| Invite with role member | — | — | — | ✓ | ✓ (once the owner has a second passkey or `RECOVERY_TOKEN` is set) |
+| Invite with role admin | — | — | — | — | ✓ (same condition) |
 | Create, rename or delete groups; appoint managers | — | — | — | ✓ | ✓ |
 | Add or remove group members | — | — | Own group | ✓ (adding **themselves** needs an owner) | ✓ |
 | View the audit log | — | — | — | ✓ | ✓ |
