@@ -1473,7 +1473,7 @@ Email sits behind an adapter interface with three kinds of driver (product-owner
 2. **HTTP API providers:** Resend, Postmark, Amazon SES, Mailgun or SendGrid, called with `fetch`. The API key is a Worker secret. Use this for a workspace whose domain isn't on Cloudflare DNS, or as a fallback while Cloudflare's service is in beta.
 3. **Generic SMTP:** a TCP socket via `connect()`, using STARTTLS on port 587 (`secureTransport: "starttls"`, then `startTls()`) or implicit TLS on port 465, with AUTH PLAIN or LOGIN, through a maintained Workers-compatible SMTP library. Cloudflare blocks outbound port 25, so direct delivery to recipient mail servers isn't possible.
 
-The admin picks the driver in settings. **Send test email** checks the configuration. A workspace on `*.workers.dev` with no custom domain can't use the Cloudflare driver, so it uses an HTTP provider or SMTP, or no email at all, since copy-link invites always work.
+The admin picks the driver and enters the **sender address** (for example `no-reply@<your-domain>`) in settings. Nothing defaults to a particular domain (AGENTS §4.1). **Send test email** checks the configuration. A workspace on `*.workers.dev` with no custom domain can't use the Cloudflare driver, so it uses an HTTP provider or SMTP, or no email at all, since copy-link invites always work.
 
 **Receiving email** (Email Routing to a Worker `email()` handler) is not used at launch. Reply-by-email and email-to-channel are listed under Later in the notifications and chat specs.
 
