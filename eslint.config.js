@@ -47,6 +47,41 @@ export default defineConfig(
   },
 
   {
+    // logUnredacted bypasses log redaction. Only the first-run setup token may use it (TDD §6.8); M1
+    // adds that module to `ignores` here. Any other importer needs review. Imports are restricted
+    // rather than calls, so aliasing or destructuring can't get around it.
+    // Tests are covered too; only the test of logUnredacted itself may import it.
+    files: ["apps/worker/src/**/*.ts", "apps/worker/test/**/*.ts"],
+    ignores: ["apps/worker/test/redact-log.test.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/log-unredacted", "**/log-unredacted.*", "**/log-unredacted.js", "**/log-unredacted.ts"],
+              message: "logUnredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
+            },
+          ],
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "ImportExpression[source.value=/log-unredacted/]",
+          message: "logUnredacted is reserved for the setup token (TDD §6.8). See eslint.config.js.",
+        },
+        {
+          // A computed specifier could name any module, including log-unredacted. The Worker has no
+          // need for dynamic imports of computed paths.
+          selector: "ImportExpression[source.type!='Literal']",
+          message: "Dynamic import() needs a literal specifier in the Worker (see eslint.config.js).",
+        },
+      ],
+    },
+  },
+
+  {
     // Classic scripts the web app serves as-is (public/theme-init.js runs in the browser).
     files: ["apps/web/public/**/*.js"],
     languageOptions: { globals: globals.browser, sourceType: "script" },

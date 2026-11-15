@@ -1,14 +1,16 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+import { APP_CONTENT_SECURITY_POLICY } from "@officebox/shared";
 
 /** WCAG 2.0, 2.1 and 2.2 at levels A and AA (PRD §18). */
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa"];
 const ROUTES = ["/", "/chat", "/calendar", "/documents", "/admin", "/no/such/page"];
 
-/** TDD §8.2. The Worker sets security headers from M0b; until then the tests add the header. */
-const CSP =
-  "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; " +
-  "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'";
+/**
+ * TDD §8.2, from the shared constants the Worker and `_headers` use. The Worker now sets this header
+ * itself; the CSP tests still apply it explicitly so they keep checking the policy, not just its source.
+ */
+const CSP = APP_CONTENT_SECURITY_POLICY;
 
 async function expectNoAxeViolations(page: Page) {
   const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();

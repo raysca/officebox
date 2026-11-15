@@ -1,0 +1,32 @@
+{
+  "name": "officebox-foundation-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "test:webauthn": "node scripts/webauthn-e2e.mjs",
+    "test:pdf": "node scripts/pdf-sandbox.mjs",
+    "bundle-size": "node scripts/bundle-size.mjs",
+    "extract-wasm": "node scripts/extract-wasm.mjs",
+    "deploy:probe": "node probe/deploy.mjs",
+    "check:probe": "node probe/check.mjs",
+    "destroy:probe": "node probe/destroy.mjs"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "14.0.3",
+    "hash-wasm": "4.12.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.8.2",
+    "@cloudflare/workers-types": "5.20261114.1",
+    "@simplewebauthn/browser": "14.0.0",
+    "@vitest/runner": "4.1.12",
+    "@vitest/snapshot": "4.1.12",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vitest": "4.1.12",
+    "wrangler": "4.162.0"
+  }
+}

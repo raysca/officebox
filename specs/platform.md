@@ -1,7 +1,7 @@
 # Spec: Platform Rules
 
-**Status:** Draft for review
-**Revision:** Revised after second independent review (14 Nov 2026)
+**Status:** Approved (product owner, 15 Nov 2026)
+**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
 **Feature name:** Platform Rules (cross-cutting; not a user-facing feature)
 **Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md)
 
@@ -204,7 +204,7 @@ This extends TDD §7.5.
 | `file_derived_text`, assistant vectors | Rebuilt by back-fill, like `search_index` ([Assistant](assistant.md) §9) |
 | Assistant conversations and memory (Assistant DO) | Admins can't read them (Assistant §11). Members use the personal export ("Download my assistant data") **(default)**. Not part of a workspace restore. |
 | `personal_reminders` | Often come from private conversations. Personal export only **(default)** (Assistant §7.1). |
-| Setup, recovery and Worker secrets | Never exported |
+| Setup, recovery and Worker secrets | Never exported. Password hashes are exported but are only usable with the same `PEPPER_*` secrets (§16), which the restore guide tells owners to carry over. |
 
 ## 7. Admin settings
 
@@ -261,7 +261,7 @@ Every change writes the audit event with old and new values (values that are per
 ## 8. Rate limits and quotas
 
 Every limit names its **mechanism**:
-- **binding:** the Workers Rate Limiting binding. Windows of **60 seconds or less** only; counted per Cloudflare location and approximate. Good for abuse protection, not exact quotas.
+- **binding:** the Workers Rate Limiting binding. Windows of **exactly 10 or 60 seconds** (no other period is supported); counted **per Cloudflare location**, **approximate and eventually consistent** (bursts can exceed the limit before counts converge). Good for abuse protection, not exact quotas. The wrapper treats a binding result as **advisory**: a refusal returns `rate_limited` with retry-after equal to the period. Local Miniflare is exact, so tests must not rely on production being exact (M0 foundation spike).
 - **DO:** a counter inside the Durable Object that already owns the action (exact, per object). For example, per-conversation sends are counted in that channel's ChatChannel DO, and rings in the caller's UserHub.
 - **D1 counter:** rows in a `rate_counters` table keyed `(scope, key, window_start)` for windows **longer than 60 seconds** and daily quotas. Daily windows use the member's time zone.
 
@@ -374,7 +374,7 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 | Personal reminders | ReminderScheduler | Kind `personal_reminder`; raises the `personal_reminder` inbox item (Assistant §7.1) |
 | DND schedule (weekly quiet hours) | ReminderScheduler | Kinds `dnd_start` / `dnd_end`, expanded from the member's schedule, refilled hourly; each calls UserHub `refreshAvailability()` |
 | Manual DND expiry | ReminderScheduler | Kind **`dnd_until_end`**, created when a member sets DND "for 1 hour", "until tomorrow" and so on; calls UserHub `refreshAvailability()` |
-| Holds longer than 12 hours (e.g. an email held for a long time off) | ReminderScheduler | Kind `email_release`, instead of a queue delay |
+| Holds longer than 24 hours (e.g. an email held for a long time off) | ReminderScheduler | Kind `email_release`, instead of a queue delay |
 | **Offline unread email** | **Queues, delayed message** + D1 `pending_emails` | Below |
 | Hourly and daily email digests | Hourly cron | For members whose email delay is "hourly" or "daily": send one digest of still-unread items; daily digests go at the start of the member's working hours ([Notifications](notifications.md) §6) |
 | DND-end held-notification summary | UserHub DO | When DND, focus or time off ends, the hub delivers "While you were away…" ([Notifications](notifications.md) §5.1) |
@@ -394,10 +394,10 @@ Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_
 
 **Offline unread email:**
 1. When a qualifying notification (mention, DM, thread reply, …) is created for an offline or inactive member, the consumer inserts a row into **`pending_emails`** with a uniqueness key `(user_id, conversation_id, window)`. `window` is the time bucket of the member's delay, so repeated events in one conversation share one row. Queues don't deduplicate, so this table does.
-2. If the row is new, a queue message is sent with `delaySeconds` = the member's delay (Queues allow at most **12 hours**).
+2. If the row is new, a queue message is sent with `delaySeconds` = the member's delay. Queues allow at most **24 hours (86,400 s)** for `send`, `sendBatch` and retries (M0 foundation spike). Every delay is validated with Zod as an integer from 0 to 86,400 before sending; a value out of range becomes a typed result, never a thrown error.
 3. When it fires, the consumer re-checks the member's **inbox records** for that conversation (Notifications §3.1: still unread, not retracted by message deletion), plus activity, DND and time off.
    - Read, or every message deleted: the row is deleted and nothing is sent.
-   - **In DND or on time off:** the email is held. When DND or time off ends it's **re-evaluated: if still unread it's sent after the remaining delay, or immediately if the delay has passed** ([Notifications](notifications.md) §6). The release is a queue message if the remaining hold is 12 hours or less, otherwise an `email_release` trigger.
+   - **In DND or on time off:** the email is held. When DND or time off ends it's **re-evaluated: if still unread it's sent after the remaining delay, or immediately if the delay has passed** ([Notifications](notifications.md) §6). The release is a queue message if the remaining hold is 24 hours or less, otherwise an `email_release` trigger.
    - Otherwise it's sent, and the row is deleted.
 4. Delivery is at-least-once, so the consumer is idempotent on the `pending_emails` row.
 
@@ -551,6 +551,7 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `scheduled_triggers`, `trigger_outbox` | New tables (ReminderScheduler DO SQLite) | §11.1 | §11 |
 | `scheduled_triggers.kind` | Add values | `assistant_brief`, `assistant_prep`, `personal_reminder` | §11.1, Assistant §14.2 |
 | `pending_emails`, `rate_counters`, `ics_opt_outs` | New D1 tables | §11, §8, §15 | here |
+| `cron_leases` | New D1 table (M0b) | One lease per cron schedule `(schedule, holder, expires_at)`; overlap guard for the dispatcher. `schedule` is Zod-validated (no `CHECK`). Excluded from export as a job table. | TDD §2.1, §7.8 |
 | `rate_counters.scope` | Add values | `assistant_requests`, `assistant_voice`, `assistant_media`, `assistant_call_notes` | §8, Assistant §14.2 |
 | `assistant_interactions`, `assistant_source_refs`, `assistant_optins`, `personal_reminders`, `file_derived_text`, `call_notes`, `call_transcript_segments` | New D1 tables | As Assistant §14.2. `call_notes` is keyed to the context and **must not cascade** from `huddles` (§5). | Assistant §14.2 |
 | Assistant DO | New DO schema | Versioned with lazy migration through the core DO base class (Assistant §14.1) | Assistant §14.1 |
@@ -598,10 +599,11 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 | `POLL_SECRET_KEY` | Derives per-poll secrets for anonymous voter keys (alternatively, per-poll secrets are generated and stored in the channel DO) **(default: derive)** | Yes (from M3b) | Never rotated for existing polls; rotating changes keys only for new polls |
 | `SETUP_TOKEN` | First-run setup | Optional (generated if absent) | Ignored after setup; delete it |
 | `RECOVERY_TOKEN` | Owner recovery | Optional | Set only during recovery, then delete |
-| Email provider key(s), SMTP credentials | Outgoing email | Optional | Rotate at the provider |
+| Email provider key(s), SMTP credentials | Outgoing email when not using the default Cloudflare Email Service binding, which needs no secret | Optional | Rotate at the provider |
 | `REALTIME_APP_ID`, `REALTIME_APP_SECRET` | Realtime SFU for calls | Optional (calls) | Rotate in the Cloudflare dashboard |
 | `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | TURN credentials | Optional | Rotate in the dashboard |
 | `ANALYTICS_API_TOKEN` | Read-only usage panel | Optional | Rotate in the dashboard |
+| `PEPPER_1`, `PEPPER_2`, … | HMAC pepper applied to passwords before PBKDF2; the number is the `pepperId` in `pbkdf2-sha256-hmac$<pepperId>$…` (Identity §4.4). Each at least **32 random bytes**. | Yes (from M1); at least one | Add `PEPPER_<n+1>` and hash new passwords with it; re-hash at next sign-in; after a published deadline, accounts still on a retired pepper must reset; delete the old secret only after that deadline. **Restoring an export to another installation needs the same `PEPPER_*` secrets**, or every password must be reset. |
 | AI Gateway authentication token | Sent as `cf-aig-authorization` when the configured AI Gateway requires authentication (TDD §5.1) | Optional (assistant, authenticated gateway only) **(default)** | Rotate in the dashboard |
 
 **The assistant adds no other secrets** ([Assistant](assistant.md) §10.1, §11). Workers AI and Vectorize are bindings. BYOK provider keys live only in AI Gateway's Secrets Store (TDD §5.1), never in Worker secrets, D1, logs or client code. `assistant_gateway_id` is a setting (§7), not a secret.
@@ -637,7 +639,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 
 ## 18. Later
 
-Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF preview under `Content-Security-Policy: sandbox` (verify in the **M0 foundation spike** whether the browser's PDF viewer renders under the sandbox; otherwise use PDF.js in a sandboxed frame) · server-side image resizing for previews · legal hold · per-member data export (self-service).
+Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF.js fallback for PDF preview, only if a browser fails the M6 check (the **M0 foundation spike** answered the sandbox question: Chromium's viewer renders under `Content-Security-Policy: sandbox` in an iframe without the `sandbox` attribute; TDD §8.3) · server-side image resizing for previews · legal hold · per-member data export (self-service).
 
 ## 19. Open questions
 

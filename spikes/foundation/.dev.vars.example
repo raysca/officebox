@@ -1,0 +1,3 @@
+# Only needed for GET /bench/pepper under `npm run dev`.
+# A pepper must be at least 32 random bytes, for example the output of: openssl rand -base64 32
+PEPPER_1=replace-with-output-of-openssl-rand-base64-32

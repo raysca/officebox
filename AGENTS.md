@@ -107,6 +107,10 @@ The structure is set out in `PLAN.md` §2: `apps/worker`, `apps/web`, `packages/
 ### 4.1 General
 
 - **TypeScript strict** everywhere. No `any` without a comment explaining why.
+- **Nothing deployment-specific in the repository.** Anyone can deploy Officebox to their own Cloudflare account, so code, `wrangler.jsonc`, migrations, tests and defaults never contain a real domain, hostname, email address, account ID or zone.
+  - **Derive** what you can from the request: origin, host, WebAuthn relying-party ID.
+  - Take everything else from **admin settings, Worker secrets or environment variables** set per deployment, such as the email sender address.
+  - Docs and tests use placeholders like `example.com` or `<your-domain>`.
 - **Validation:** every API body and every WebSocket message is validated with a **Zod schema from `packages/shared`**. Clients and the Worker share the same types.
 - **IDs** are ULIDs. **Timestamps** are UTC epoch milliseconds. **Calendar dates** are ISO `YYYY-MM-DD` together with an IANA time zone.
 - **Errors:** expected outcomes (not found, forbidden, conflict, validation) are **typed results** (`Result<T, E>`), not exceptions. Only real failures throw. **Never throw expected denials across Durable Object RPC**: the runtime logs them as uncaught exceptions (spike finding).

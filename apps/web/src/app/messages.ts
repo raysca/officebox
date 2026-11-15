@@ -12,6 +12,7 @@ const errorByCode: Record<ErrorCode, string> = {
   unauthenticated: "Your session has ended. Sign in again to continue.",
   forbidden: "You don't have permission to do that.",
   not_found: "We couldn't find that. It may have been moved or deleted.",
+  method_not_allowed: "That action isn't supported here.",
   conflict: "Someone else changed this at the same time. Refresh and try again.",
   gone: "That's no longer available.",
   payload_too_large: "That's too large to upload or save.",

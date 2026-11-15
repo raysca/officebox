@@ -1,50 +1,33 @@
-import { apiError, type ApiErrorBody, type HealthResponse } from "@officebox/shared";
-import { Hono } from "hono";
+import { createApp } from "./core/app";
+import { createCronDispatcher, type CronJob } from "./core/cron";
+import { CORE_JOBS } from "./core/jobs";
+import { createQueueConsumer, type QueueRegistry } from "./core/queue";
 import type { Env } from "./env";
+import { features } from "./features";
 
 export { SystemObject } from "./system-object";
 
+/** Cron jobs by schedule (TDD §7.8). Features append theirs. */
+const JOBS: readonly CronJob[] = [...CORE_JOBS];
+
 /**
- * Worker entry. M0a serves only `/health`; everything else that isn't an API path falls through to
- * the web app in Workers Assets. M0b replaces this with the core router (request context, logging,
- * Result-to-HTTP mapping) and feature routes under `src/features/`.
+ * Queues and their typed handlers. The email queue has no handlers until M1, so anything that arrives
+ * on it goes to its dead-letter queue.
  */
-const app = new Hono<{ Bindings: Env }>();
+const QUEUES: QueueRegistry = {
+  queues: [{ queue: "officebox-email", deadLetter: (env) => env.EMAIL_DLQ, handlers: [] }],
+};
 
-app.get("/health", (c) => {
-  const body: HealthResponse = { status: "ok", version: c.env.OFFICEBOX_VERSION };
-  return c.json(body, 200, { "Cache-Control": "no-store" });
-});
-
-app.all("/api/*", (c) => {
-  const body: ApiErrorBody = { error: apiError("not_found", "No such endpoint.") };
-  return c.json(body, 404);
-});
-
-// Static files and SPA navigations are served by Workers Assets before the Worker runs. Requests that
-// reach the Worker anyway (for example a non-navigation request for a missing file) go back to Assets,
-// which applies the SPA fallback.
-app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
-
-app.onError((error, c) => {
-  console.error(JSON.stringify({ level: "error", message: "unhandled error", error: String(error) }));
-  const body: ApiErrorBody = { error: apiError("internal", "Something went wrong.") };
-  return c.json(body, 500);
-});
+const app = createApp({ features });
+const dispatchCron = createCronDispatcher(JOBS);
+const consumeQueue = createQueueConsumer(QUEUES);
 
 export default {
   fetch: app.fetch,
-
-  // Cron Triggers (every 5 minutes, hourly, daily). M0b adds the dispatcher that runs named jobs
-  // (TDD §7.8). Until then, a trigger is acknowledged and does nothing.
-  scheduled(controller) {
-    console.log(JSON.stringify({ level: "info", message: "cron trigger", cron: controller.cron }));
+  async scheduled(controller, env) {
+    await dispatchCron(controller, env);
   },
-
-  // Queue consumer. M0b adds the consumer framework. Until then, nothing produces messages; any that
-  // arrive are retried so that they end in the dead-letter queue instead of being lost.
-  queue(batch) {
-    console.warn(JSON.stringify({ level: "warn", message: "no queue consumer yet", queue: batch.queue }));
-    batch.retryAll();
+  async queue(batch, env, ctx) {
+    await consumeQueue(batch, env, ctx);
   },
 } satisfies ExportedHandler<Env>;

@@ -13,7 +13,7 @@ export function jsonResponse(body: unknown, status = 200): Response {
 export function healthyFetch() {
   return vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (url.endsWith("/health")) return Promise.resolve(jsonResponse({ status: "ok", version: "0.1.0" }));
+    if (url.endsWith("/health")) return Promise.resolve(jsonResponse({ status: "ok", version: "0.1.0", checks: {} }));
     return Promise.resolve(jsonResponse({ error: { code: "not_found", message: "No such endpoint." } }, 404));
   });
 }

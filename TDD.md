@@ -521,6 +521,13 @@ CREATE TABLE purge_jobs (
   UNIQUE (object_type, object_id)
 );
 
+-- Cron overlap guard (§7.8): one lease per schedule. Excluded from export (job table).
+CREATE TABLE cron_leases (
+  schedule TEXT PRIMARY KEY,         -- five_minutes | hourly | daily (Zod-validated, no CHECK)
+  holder TEXT NOT NULL,              -- ULID of the run holding the lease
+  expires_at INTEGER NOT NULL        -- an expired lease can be taken over
+);
+
 CREATE TABLE embedding_jobs (        -- Phase 3 (M9); upserts only while assistant_enabled (§5.2)
   id TEXT PRIMARY KEY,
   source_type TEXT NOT NULL,
@@ -578,6 +585,44 @@ This replaces v1.3's "stop at the first match".
 
 ### 2.2 Durable Object SQLite schemas
 
+**Core tables in every DO** (`apps/worker/src/core/do/base.ts`, M0b). Every Durable Object extends the core base class, which owns four tables, versioned separately from the feature schema (`meta.core_schema_version`):
+
+```sql
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);   -- schema_version, core_schema_version, feature keys
+CREATE TABLE core_timers (                                -- alarm multiplexer: the alarm is set to MIN(due_at)
+  name TEXT PRIMARY KEY,                                  -- '<kind>' or '<kind>:<id>', e.g. 'poll:01J…'
+  due_at INTEGER NOT NULL,
+  payload TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,                    -- failed runs; retried with backoff
+  generation INTEGER NOT NULL DEFAULT 0                   -- bumped on reschedule, so a rescheduled timer is kept
+);
+CREATE TABLE core_outbox (                                -- generic transactional outbox, one stream per queue
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream TEXT NOT NULL,
+  body TEXT NOT NULL,                                     -- JSON message, at most 128 KB
+  bytes INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,                    -- failures when sent alone
+  next_attempt_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  strikes INTEGER NOT NULL DEFAULT 0,                     -- core migration 3: failures separated by a success
+  last_strike_at INTEGER                                  -- core migration 3: when the row last gained a strike
+);
+CREATE TABLE core_outbox_dead (                           -- rows given up on (core migration 2); same columns
+  id INTEGER PRIMARY KEY, stream TEXT NOT NULL, body TEXT NOT NULL, bytes INTEGER NOT NULL,
+  attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, dead_at INTEGER NOT NULL
+);
+```
+
+Timers are rows in `core_timers` rather than a JSON value in `meta`, so the earliest is an indexed lookup and each timer is updated on its own. The per-feature `outbox` tables below show the shape each feature needs; a feature may use `core_outbox` (message stored at write time) or keep its own table when it must build the message at drain time, as ChatChannel does with full message state (reconciled in M3). The spike kept its timers in `meta.timers`; M3 moves ChatChannel onto `core_timers` when it promotes the spike code. **Outbox failure handling** (`apps/worker/src/core/do/outbox.ts`; `strikes` and `last_strike_at` are added by core migration 3, expand only):
+- *Per-row failures.* Every row that was in a failed send during a drain, and wasn't sent later in it, counts an attempt and backs off on its own: `next_attempt_at = MAX(existing, now + backoff)`, 2 s doubling to 5 minutes, with up to 20 % jitter. Failing chunks are bisected down to single rows. Drains take due rows by `attempts, id`, so rows that never failed go first; failed rows move behind them, so good rows always make progress whatever bad rows are in front of them. `attempts` drives backoff and ordering only.
+- *Order and ride-along.* Due rows are selected by `attempts, id` (at most 500). A drain sends in two phases: first rows that failed before, then fresh rows (attempts 0); the first phase gets at most half the 32-send budget when fresh rows are waiting, so fresh rows are never starved. When fresh rows are present and the stream is healthy (the previous drain delivered something; `outbox_failed_drains:<stream>` absent), up to 4 rows that failed before (most strikes, then most attempts) ride along in the first phase even if they aren't due yet (never during an outage, so backoff holds), so a lone bad row is tested whenever real traffic flows. Failing chunks are bisected right half first. Under a sustained backlog of more than 500 fresh rows per drain, rows that failed before (beyond the ride-along) wait until it clears.
+- *Dead-letter rule: a strike needs proof of health after the failure, in the same drain* **(default)**. The stream keeps a success sequence, `outbox_success_seq:<stream>`, incremented the moment each successful send resolves. When a row fails **on its own** (after bisection) the sequence is noted; at the end of the drain it gains a strike only if a later send in that drain succeeded (end sequence > the noted one) and its previous strike, if any, was at least 10 minutes ago (`minStrikeGapMs`, **(default)**). At 10 strikes **(default)** it moves to `core_outbox_dead`. So an outage adds no strikes, nor does a queue that goes down after a success; a queue alternating between success and failure on every send **can still dead-letter a good row** after 10 strikes, which takes at least 90 minutes of it (accepted, **(default)**); a lone bad row is dead-lettered after ten drains, at least 10 minutes apart, in which fresh rows were sent after it (with no other traffic it is never dead-lettered and keeps retrying); rows written before migration 3 start at 0 strikes. Failures inside multi-row batches never add strikes.
+- *Budget.* A drain makes at most 32 sends and runs at most 4 minutes (both configurable), under the 5-minute outbox timer timeout. If a drain sends nothing, the due rows it didn't reach are pushed back by a stream backoff without attempts, so a down queue isn't re-drained in a tight loop; from 10 such drains in a row it logs at error level.
+- *Guarantees.* At least once. Rows that never failed go out in row-ID order; after failures, newer rows overtake older ones being retried, so consumers must be idempotent and order-tolerant.
+- *`meta` keys used by the outbox:* `outbox_success_seq:<stream>` (successful sends so far; the strike sequence), `outbox_last_success_at:<stream>` (epoch ms of the last one, reported by `stats()` only) and `outbox_failed_drains:<stream>` (consecutive drains that sent nothing; the stream backoff exponent, removed on success; from 10 it logs "no send succeeded in N drains: queue outage or all rows failing"). `Outbox.stats()` reports pending, dead, oldest pending age, max attempts and strikes, success sequence, last success and stream backoff.
+
+**Nothing reads or re-drives `core_outbox_dead` until M7**, which adds it to admin health with a re-drive action; until then dead rows are visible only in the error log and `Outbox.stats()` (admin note).
+
 **ChatChannel DO** — one per channel. This is the source of truth for the channel's messages.
 
 ```sql
@@ -620,7 +665,7 @@ CREATE TABLE outbox (
 );
 
 CREATE TABLE meta (
-  key TEXT PRIMARY KEY,    -- schema_version, channel_id, log_horizon_seq, timers
+  key TEXT PRIMARY KEY,    -- schema_version, channel_id, log_horizon_seq (timers: core_timers above)
   value TEXT
 );
 ```
@@ -887,8 +932,8 @@ Limits: body up to 40 KB, which stays far below the 8 MB DO row limit; up to 20 
 3. After the commit, the DO sends `{type: "ack", clientId, seq, id}` to the sender and `{type: "event", seq, ...}` to every connected socket. DO output gating means no acknowledgement leaves the object before its write is durable.
 4. The **alarm handler** drains the `outbox` in `seq` order, in batches of up to 100. For each event it sends the **current full state** of the affected message (from `messages`, not the event delta) to the `message-projection` Queue with `sendBatch`.
    - Rows are deleted only after the send succeeds.
-   - On failure the DO increments `attempts` and reschedules with exponential backoff, capped at 5 minutes.
-   - DOs have one alarm each. Other timers (typing expiry, log trimming) are kept in `meta.timers`, and the alarm is always set to the earliest due timer.
+   - On failure the DO increments `attempts` and reschedules with exponential backoff, capped at 5 minutes. M0b's generic outbox (§2.2) adds bisection of failing chunks, a per-drain send budget, the ride-along and the strike rule for dead-lettering; a queue alternating on every send can still dead-letter a good row after 10 strikes, at least 90 minutes **(default)**.
+   - DOs have one alarm each. Other timers (typing expiry, log trimming) are named timers in `core_timers` (§2.2), and the alarm is always set to the earliest due timer.
 5. The **queue consumer** upserts into D1 `messages`:
    ```sql
    ... ON CONFLICT (channel_id, seq) DO UPDATE SET ...
@@ -1284,7 +1329,7 @@ The repository's `wrangler.jsonc` grows to include the bindings below. It is add
 - Build-time variable `OFFICEBOX_VERSION`.
 - **v1.4 additions:**
   - the **ReminderScheduler** Durable Object (§2.2)
-  - Queues: `link-preview-fetch` and `ics-fetch` (outbound fetching, §8.2), and `unread-email`, whose delayed messages (`delaySeconds`, at most 12 hours) implement the per-recipient offline-email timer, deduplicated by the D1 `pending_emails` table; longer holds use ReminderScheduler `email_release` triggers (Platform §11)
+  - Queues: `link-preview-fetch` and `ics-fetch` (outbound fetching, §8.2), and `unread-email`, whose delayed messages (`delaySeconds`, at most 24 hours) implement the per-recipient offline-email timer, deduplicated by the D1 `pending_emails` table; longer holds use ReminderScheduler `email_release` triggers (Platform §11)
   - the admin settings keys listed in Platform §7 (for example `external_invites`, `holiday_regions`, `offline_documents_enabled`, `welcome_post_enabled`, `default_channels`, `screen_share` and `link_previews_enabled`), stored in `installation.settings`.
 - **v1.6 additions** (M9, Assistant §14.3):
   - the **`Assistant`** Durable Object class (SQLite-backed, new migration tag)
@@ -1309,7 +1354,7 @@ node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangl
 | Allow GitHub Actions to create pull requests | Manual repository setting | Upgrades |
 | Make the repository private | Recommended | Keeps scheduled release-sync running |
 | Custom domain | Manual; recommended before inviting the team | Stable sign-in, PWA and push |
-| Email provider API key or SMTP credentials | Manual (Worker secrets) | Email invitations, resets and notifications |
+| Email: Cloudflare Email Service sender domain (default), or an email provider API key or SMTP credentials | Manual: onboard the domain in the dashboard, or add the Worker secrets | Email invitations, resets and notifications |
 | Realtime SFU app and TURN key | Manual (Worker secrets) | Calls and screen sharing (M4) |
 | AI Gateway | Manual; **recommended** for assistant logging control: set `assistant_gateway_id` so every assistant call runs with logging and caching off (§5.10). The checklist tells owners that logging stays off for assistant traffic. | Assistant (M9a); Workers AI works without it |
 | BYOK provider keys | Optional (AI Gateway Provider Keys); switching a role needs the owner to acknowledge that content goes to that provider | Assistant roles on another provider |
@@ -1559,12 +1604,21 @@ CREATE TABLE exports (
 
 ### 7.6 Email delivery
 
-Email sits behind an adapter interface with two kinds of driver:
+Email sits behind an adapter interface with three kinds of driver (product-owner decision, 15 Nov 2026):
 
-1. **HTTP API providers** (recommended): Resend, Postmark, Amazon SES, Mailgun or SendGrid, called with `fetch`. The API key is a Worker secret. This is the simplest and most reliable option from Workers.
-2. **Generic SMTP:** a TCP socket via `connect()`, using STARTTLS on port 587 (`secureTransport: "starttls"`, then `startTls()`) or implicit TLS on port 465, with AUTH PLAIN or LOGIN, through a maintained Workers-compatible SMTP library. Cloudflare blocks outbound port 25, so direct delivery to recipient mail servers isn't possible.
+1. **Cloudflare Email Service (default):** the `send_email` Worker binding (`"send_email": [{ "name": "EMAIL" }]`, then `env.EMAIL.send({ from, to, subject, html, text, headers, attachments })`, returning `{ messageId }`).
+   - There are no API keys to manage. Onboarding the sender domain adds SPF, DKIM, DMARC and bounce records automatically.
+   - **Requirements:** the workspace's sending domain must use **Cloudflare DNS** and be onboarded in Email Service, and the account must be on **Workers Paid** (3,000 emails a month included, then $0.35 per 1,000).
+   - **Limits:** 50 recipients per message, 25 MiB per message, and a daily quota that starts low and grows. Officebox sends one recipient per message.
+   - Errors are thrown with a `code`, which the driver maps to typed results. `E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`, `E_DELIVERY_FAILED` and `E_INTERNAL_SERVER_ERROR` are transient. `E_SENDER_NOT_VERIFIED`, `E_SENDER_DOMAIN_NOT_AVAILABLE`, `E_RECIPIENT_SUPPRESSED`, `E_VALIDATION_ERROR` and the other validation codes are permanent.
+   - **Still in public beta** (launched April 2026). This is why the other drivers stay.
+   - `wrangler dev` sends real mail through remote bindings, so tests use a fake driver.
+2. **HTTP API providers:** Resend, Postmark, Amazon SES, Mailgun or SendGrid, called with `fetch`. The API key is a Worker secret. Use this for a workspace whose domain isn't on Cloudflare DNS, or as a fallback while Cloudflare's service is in beta.
+3. **Generic SMTP:** a TCP socket via `connect()`, using STARTTLS on port 587 (`secureTransport: "starttls"`, then `startTls()`) or implicit TLS on port 465, with AUTH PLAIN or LOGIN, through a maintained Workers-compatible SMTP library. Cloudflare blocks outbound port 25, so direct delivery to recipient mail servers isn't possible.
 
-Cloudflare Email Workers are not used for invitations. Their sending binding is aimed at verified destination addresses rather than arbitrary recipients *(verify against current Cloudflare email offerings before ruling out)*.
+The admin picks the driver and enters the **sender address** (for example `no-reply@<your-domain>`) in settings. Nothing defaults to a particular domain (AGENTS §4.1). **Send test email** checks the configuration. A workspace on `*.workers.dev` with no custom domain can't use the Cloudflare driver, so it uses an HTTP provider or SMTP, or no email at all, since copy-link invites always work.
+
+**Receiving email** (Email Routing to a Worker `email()` handler) is not used at launch. Reply-by-email and email-to-channel are listed under Later in the notifications and chat specs.
 
 **Delivery:**
 
@@ -1608,7 +1662,7 @@ CREATE TABLE object_sizes (          -- reported by DOs after compaction or dail
 
 ### 7.8 Scheduled jobs
 
-Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
+Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The dispatcher (`apps/worker/src/core/cron.ts`) runs each schedule's jobs one after another, each with its own timeout (60 s by default) and error isolation. A run takes the schedule's lease in `cron_leases` (§2.1), so a trigger that fires while the previous run of the same schedule is still going skips; leases expire after 15 minutes, and a schedule's job timeouts must add up to less than that. If the lease can't be checked (D1 unavailable), the jobs run unguarded and the error is logged **(default)**: jobs are idempotent, and skipping would stall purges.
 
 | Job | Schedule | Section |
 |---|---|---|
@@ -1627,7 +1681,7 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below.
 | Scheduled export (if enabled) | Weekly (from the daily trigger) | §7.5 |
 
 Timers that aren't cron jobs (Platform §11):
-- **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry), `email_release` (email holds longer than 12 hours), and from M9 `assistant_brief`, `assistant_prep` and `personal_reminder`.
+- **ReminderScheduler triggers:** reminders, event start, focus time, time off, status expiry, DND schedule, `dnd_until_end` (manual DND expiry), `email_release` (email holds longer than 24 hours), and from M9 `assistant_brief`, `assistant_prep` and `personal_reminder`.
 - **Delayed `unread-email` queue messages**, deduplicated by `pending_emails`. When one fires during DND or time off the email is held; when that ends it's re-evaluated and, if still unread, sent after the remaining delay or immediately if the delay has passed.
 - **Channel DO** poll auto-close.
 - **UserHub:** ring timeout, and the DND-end "while you were away" summary.
@@ -1657,9 +1711,12 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 ### 8.1 Authentication and sessions
 
 - **Passwords:**
-  - Hashed with PBKDF2-HMAC-SHA256 via WebCrypto: 600,000 iterations and a 16-byte salt. Local workerd accepts 600,000 iterations, but production may cap PBKDF2 at 100,000; this is verified in the M0 foundation spike (§10). **Fallback:** 100,000 iterations plus a server-side pepper (HMAC with a Worker secret), or Argon2id in WASM if bundle size and CPU allow. The versioned format lets either be adopted without breaking stored hashes.
-  - Stored in a versioned format (`pbkdf2-sha256$600000$<salt>$<hash>`), so parameters can be raised and hashes upgraded at next sign-in.
-  - Chosen over Argon2id because native WebCrypto avoids WASM memory limits and CPU spikes in Workers.
+  - Hashed with PBKDF2-HMAC-SHA256 via WebCrypto at **100,000 iterations with a 16-byte salt, after an HMAC-SHA256 pepper**: the PBKDF2 input is `HMAC-SHA256(PEPPER_<id>, password)`, with the pepper held in Worker secrets (platform §16), at least 32 random bytes.
+  - **Why 100k plus a pepper:** the M0 foundation spike (§10) found that workerd's default limit enforcer caps PBKDF2 at 100,000; local `wrangler dev` lifts the cap, which is why 600,000 works locally. A D1 dump or export without the pepper can't be attacked offline. The production probe **confirmed** the 100,000 cap (§10), so there is no 600,000 variant.
+  - Stored in a versioned format (`pbkdf2-sha256-hmac$<pepperId>$100000$<salt>$<hash>`), so parameters and peppers can change and hashes upgrade at next sign-in. Verification refuses stored iteration counts outside 100,000–1,000,000.
+  - Pepper rotation, restore and the dummy derivation for unknown accounts (no timing enumeration) follow Identity §4.4.
+  - Chosen over Argon2id because native WebCrypto avoids WASM memory limits and CPU spikes in Workers. Argon2id via `hash-wasm` needs its WASM imported as precompiled modules, since Workers forbid runtime WASM compilation (spike finding).
+  - Sign-in needs Workers Paid: PBKDF2 at 100,000 iterations takes about 12 ms of CPU, above the Free plan's 10 ms limit.
   - Minimum length 10, checked against a bundled list of common passwords. No composition rules.
 - **Sessions:**
   - Cookies as in §3.1.
@@ -1667,8 +1724,9 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets.
   - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
 - **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
-- **Rate limiting** with the Workers Rate Limiting binding:
-  - Sign-in: 5 attempts per minute per IP and 10 per hour per account, with progressive delays. There is no hard lockout, which would let attackers lock users out.
+- **Rate limiting** (mechanisms per platform §8):
+  - The Workers Rate Limiting binding supports periods of exactly 10 or 60 seconds, counts per Cloudflare location, and is approximate. The wrapper treats it as advisory and returns `rate_limited` with retry-after equal to the period. Longer windows and exact quotas use D1 or Durable Object counters.
+  - Sign-in: 5 attempts per minute per IP (binding) and 10 per hour per account (D1 counter), with progressive delays. There is no hard lockout, which would let attackers lock users out.
   - Setup, recovery, invitation acceptance and password reset are limited the same way.
 - **Tokens:** invitation, reset and recovery tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days and resets after 1 hour.
 - **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: reset one owner's password and MFA. The action is audited, and a banner shows until the secret is deleted.
@@ -1684,6 +1742,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - **Headers:**
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'` plus the Realtime SFU endpoints.
   - HSTS, `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`.
+  - API responses (`/api/*`, `/health`) are `Cache-Control: no-store`. A route's own `Cache-Control` is parsed into directive names (split on commas, trimmed, the name before any `=`, lower-cased) and kept only if it has a bare `private` (no `=` qualifier) or `no-store`, and no `public` or `s-maxage` (for example `private, max-age=60`). Everything else, including no header and `no-cache` alone (which still lets shared caches store the response), is replaced with `no-store`, so API data is never stored by shared caches.
 - **Rendering user content:**
   - The server never renders user HTML.
   - Rich text is ProseMirror JSON constrained by the Tiptap schema.
@@ -1720,7 +1779,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
   - Only allow-listed types are served inline: PNG, JPEG, GIF, WebP, PDF, MP4, WebM, MP3 and OGG.
   - Everything else, including HTML and SVG, is sent with `Content-Disposition: attachment`.
   - Every file response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
-- **Previews:** images and PDFs render in the browser, with PDFs in a sandboxed frame. Whether Chrome's built-in PDF viewer renders under `Content-Security-Policy: sandbox` must be verified in the M0 foundation spike; if not, PDFs are served with a narrower CSP or rendered with a JS viewer. Office documents are not converted server-side for preview. From M9a their text is extracted with Workers AI `toMarkdown` for search and the assistant only, while the assistant is enabled (§5.2).
+- **Previews:** images and PDFs render in the browser. PDFs keep the `Content-Security-Policy: sandbox` response header and show in an `<iframe>` **without** the `sandbox` attribute: the M0 foundation spike found that Chromium's PDF viewer renders under the CSP header, directly and in an iframe, but an `<iframe sandbox>` attribute blocks it whatever tokens it allows. Firefox and Safari are untested and are checked in M6 (Documents acceptance criteria); a browser that can't render falls back to PDF.js in a sandboxed iframe on a separate path. Office documents are not converted server-side for preview. From M9a their text is extracted with Workers AI `toMarkdown` for search and the assistant only, while the assistant is enabled (§5.2).
 - **Malware scanning** is out of scope (PRD §14), and the documentation says so.
 - **Avatars** accept PNG, JPEG or WebP only, and are cropped on the client (Identity §4.7).
 - **Three file kinds:** chat attachments belong to their message and are deleted with it; images and file cards pasted into a document belong to the document and are deleted with it; drive files live in folders and are versioned. "Save to folder" creates an independent drive file from a message-owned one (Documents §6).
@@ -1768,7 +1827,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Lifecycle matrix test (Platform §17): disable and delete for every feature, including closing call sockets and erasing personal data.
 - Durable registry test: after UserHub eviction, revoking a member still closes every open socket; the Worker-side fallback closes sockets missing from the registry.
 - Trigger delivery test: a crash between marking a trigger fired and sending its effect leads to exactly one effect after recovery (outbox, idempotent consumer).
-- `pending_emails` dedupe: repeated events in one conversation produce one email; holds longer than 12 hours are released by `email_release`.
+- `pending_emails` dedupe: repeated events in one conversation produce one email; holds longer than 24 hours are released by `email_release`.
 - Session tests: two tabs refreshing within 30 seconds both stay signed in; replaying a refresh token after the grace window revokes the session; a disabled member's REST calls fail within 60 seconds.
 - Cascade tests: channel, group, calendar, drive and event deletions follow Platform §4, including channel purge moving folder documents to their creators.
 - Export exclusions: no `auth_tokens`, passkeys, ICS tokens or URLs, or `poll_secret` in an export; anonymous votes appear only as voter keys.
@@ -1805,7 +1864,7 @@ Every question open at v1.1 now has a decision:
 | InboxFanout DO vs. D1 polling | Neither: a per-user **UserHub** DO with a single hub socket, plus a single **WorkspacePresence** DO; batched fan-out to online users only | §2.2, §3.5 |
 | Snapshot compaction tuning | Compact at 500 updates, 1 MB or last disconnect; 4 MB chunks; hourly and daily versions in R2 | §4.3 |
 | Export format and restore tooling | Export format v1 (JSON Lines + Yjs + files) produced by Workflows; Restore from export in first-run setup; CLI for large archives | §7.5 |
-| SMTP provider matrix and retry policy | HTTP API providers preferred; STARTTLS SMTP on port 587 or 465; 8 retries with exponential backoff capped at 2 h; DLQ | §7.6 |
+| Email driver matrix and retry policy | Cloudflare Email Service binding by default (beta; needs Cloudflare DNS and Workers Paid); HTTP API providers and STARTTLS SMTP on port 587 or 465 as alternatives; 8 retries with exponential backoff capped at 2 h; DLQ | §7.6 |
 | Deploy to Cloudflare behaviour | Checked: secrets come from `.dev.vars.example`; resource IDs are written back into `wrangler.jsonc`; git history not documented, so the design doesn't depend on it | §6.1, §6.4 |
 | D1 migration transactions | Not documented, so migrations are treated as possibly partly applied: one change per file, safe to re-run, expand/contract | §6.5 |
 | Event log horizon and outbox batching | Defaults: 30-day horizon, 250 ms batching delay, 100 events per batch | §2.2, §3.3 |
@@ -1818,7 +1877,7 @@ Resolved in v1.1:
 Decided in v1.3 (from the review):
 - WebSocket auth: cookies plus `Origin` check; one-time tickets for clients without cookies (§3.1).
 - Whiteboard: Excalidraw (MIT) with an Officebox-maintained Yjs binding (§4.2).
-- Password hashing: PBKDF2-SHA256, 600,000 iterations, versioned format (§8.1).
+- Password hashing: PBKDF2-SHA256, versioned format (§8.1). Revised after the M0 foundation spike to 100,000 iterations plus an HMAC pepper; the production probe confirmed the cap.
 - File handling: streamed through the binding; multipart above 50 MB; allow-listed inline types (§8.3).
 - Huddle signalling: HuddleRoom DO with Worker-mediated SFU calls and confined track subscriptions (§3.6).
 - Screen sharing: one presenter, simulcast, detail and motion modes (§3.6). Present mode via Yjs awareness (§4.5).
@@ -1826,15 +1885,15 @@ Decided in v1.3 (from the review):
 
 To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
 
-**M0 foundation spike** (before M1):
-- **PBKDF2 production cap:** confirm whether deployed Workers allow 600,000 PBKDF2 iterations (local workerd does); otherwise use the §8.1 fallback.
-- **WebAuthn library:** confirm a maintained library runs in Workers, or implement verification with WebCrypto.
-- **Rate Limiting binding:** confirm the supported periods (10 and 60 seconds) and per-location behaviour; longer windows use D1 counters (Platform §8).
-- **Queue `delaySeconds` maximum** (12 hours): confirm, and test the `email_release` path for longer holds.
-- **PDF preview under `Content-Security-Policy: sandbox`** in Chrome's built-in viewer (§8.3).
+**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md), and the decisions below are applied in §8.1, §8.3, Identity §4.4 and platform §8, §11 and §16:
+- **PBKDF2 production cap:** **100,000, confirmed in production** (the probe's 100,001 and 600,000 calls fail with "iteration counts above 100000 are not supported"). The standalone server used by `wrangler dev` removes the cap, which is why 600k works locally. **Decision (final):** M1 uses **PBKDF2 100k + HMAC pepper** (`pbkdf2-sha256-hmac$<pepperId>$100000$salt$hash`, §8.1). Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works with precompiled modules, also in production (19 MiB/t=2 in ~85 ms round trip); scrypt N=2^17 also runs. Both remain later upgrade options. *Confirmed in production.*
+- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, replay refusal and `sign_count` clone detection. **Decision:** use it with `requireUserVerification: false`; compare counters ourselves after signature verification (≤ stored and not both 0 → `clone_detected`) and update with compare-and-set (`UPDATE … WHERE sign_count = ?`) (Identity §4.4). *Verified locally.*
+- **Rate Limiting binding:** periods are exactly 10 or 60 s; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. **Decision:** binding only for abuse throttles (sign-in per IP, setup/recovery/invites, link previews, general API); the wrapper treats results as advisory and returns `rate_limited` with retry-after equal to the period; the other platform §8 rows stay DO or D1. Production let **one call over** the limit (6 of 12 at limit 5) and accepted an unvalidated per-call `period`, so the wrapper never passes one. *Confirmed in production (one colo).*
+- **Queue `delaySeconds` maximum:** **24 hours** (86,400 s) for send, sendBatch and retries per current docs, not 12 hours; Miniflare rejects 86,401. **Decision:** the `email_release` threshold is 24 h; delays are Zod-validated (0–86,400) and out-of-range values are typed results (platform §11). Production rejects 86,401 on `send` (10210) and `sendBatch` (10202). *Confirmed in production.*
+- **PDF preview under `Content-Security-Policy: sandbox`:** Chromium's viewer renders it, directly and in an `<iframe>`. An `<iframe sandbox>` attribute blocks it. **Decision:** keep the CSP header and preview in an iframe without the `sandbox` attribute (§8.3); Firefox, Safari and branded Chrome are M6 acceptance checks, with PDF.js as the fallback. The headless shell has no PDF viewer. *Verified locally (Chromium 153).*
 
 **New in v1.4:**
-- **WebAuthn library spike before M1:** confirm a maintained library (for example SimpleWebAuthn) runs in Workers, or implement verification with WebCrypto.
+- **WebAuthn library spike before M1:** done. SimpleWebAuthn runs in Workers (see the M0 foundation spike above).
 - **Holiday dataset before M5:** licence compatible with AGPL, plus the bundle size against the Worker limit.
 - **Size version compare before M6b:** a custom diff of two document states (§4.3); it may move to Later.
 - **ReminderScheduler load:** confirm a single instance handles a 100-member workspace's 48-hour trigger window, or shard it.

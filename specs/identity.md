@@ -1,6 +1,6 @@
 # Spec: Identity & Access
 
-**Status:** Draft for review
+**Status:** Approved (product owner, 15 Nov 2026)
 **Revision:** Revised after independent review (14 Nov 2026); updated for the [Assistant](assistant.md) spec (15 Nov 2026: reserved `assistant` handles, reserved non-user senders)
 **Feature name:** Identity & Access (marketing name to be decided later)
 **Milestone:** M1 ([PLAN](../PLAN.md)) · **Related:** PRD §6, §10.1; TDD §3.1, §6.8, §8.1; [Permissions](permissions.md), [Platform](platform.md), [Notifications](notifications.md)
@@ -30,6 +30,7 @@ The permission engine that every feature relies on is specified in [Permissions]
 | Two-factor (TOTP) | **After launch** (Phase 2) |
 | Passkey-only accounts | **Allowed for members.** **Owners must keep a password** as well as any passkeys. |
 | Passkeys and domains | Passkeys are bound to the workspace's domain (WebAuthn relying-party ID). A domain change or restore elsewhere leaves them unusable; §4.4 covers the warning and recovery. |
+| Password hashing | **PBKDF2-SHA256, 100k iterations, plus an HMAC pepper** from Worker secrets (`pbkdf2-sha256-hmac$…`), because production Workers cap PBKDF2 at 100k (confirmed by the M0 foundation spike's production probe). Changed from "600k" after the spike (§4.4). |
 | Who can invite | **Admins invite members. Only owners invite or promote admins.** |
 | Admin actions on people | Admins act on **members only**. Recovery links, email changes, disable and delete on **admins or owners need an owner**. Every recovery link or email change **notifies the person** and **revokes their pending sign-in, reset and recovery tokens** (permissions §6 Admin powers). |
 | Magic link and email-link consumption | Links open a **confirmation page**; the token is used only by a POST from that page, so mail scanners can't use it up (platform §10 Email links) |
@@ -111,8 +112,12 @@ An invite opened by someone already signed in as another member shows "You're si
   - **Use a passkey.** Uses WebAuthn with discoverable credentials, so a passkey can sign in without typing an email.
 - **Passwords:**
   - at least 10 characters, checked against a bundled common-password list, no composition rules **(default)**
-  - PBKDF2-SHA256 at 600k iterations in a versioned format (TDD §8.1).
-  - **To verify in the M0 foundation spike:** local workerd accepts 600k iterations (checked), but production Workers may cap PBKDF2 at 100k. If the cap holds, the fallback is **100k iterations plus a server-side pepper** (an HMAC with a Worker secret applied before PBKDF2), or **Argon2id in WASM** if bundle size and CPU time allow. The versioned hash format lets either be adopted, and hashes are upgraded at next sign-in.
+  - **PBKDF2-SHA256 at 100k iterations plus an HMAC pepper** held in Worker secrets (TDD §8.1), stored as `pbkdf2-sha256-hmac$<pepperId>$100000$<salt>$<hash>`, where the PBKDF2 input is `HMAC-SHA256(PEPPER_<pepperId>, password)`.
+  - **Why not 600k:** production Workers cap PBKDF2 at 100k. The M0 foundation spike's production probe confirmed it: 100,001 and 600,000 are refused ([foundation spike](../spikes/foundation/README.md#production-results)). Argon2id in WASM (precompiled) also runs in production and remains a possible later upgrade.
+  - **Pepper:** each `PEPPER_<n>` is at least **32 random bytes**, never stored in D1, exported or logged (platform §16).
+  - **Pepper rotation:** add the new secret and write new hashes with it; re-hash each account at its next successful sign-in; after a published deadline, accounts still on a retired pepper must reset their password (or use a magic link or passkey). Old pepper secrets are kept until that deadline, then deleted.
+  - **Restore:** restoring an export to another installation needs the same `PEPPER_*` secrets, otherwise every password must be reset (platform §6, §16).
+  - **No account enumeration by timing:** sign-in for an unknown email or a passkey-only account runs the same derivation against a dummy salt. Stored iteration counts outside 100k–1M are refused before deriving.
 - **Magic links:**
   - single-use, valid for **15 minutes**, open on **any device**
   - sent only to active members with an email
@@ -122,8 +127,9 @@ An invite opened by someone already signed in as another member shows "You're si
   - members can register several, each with a name and a "last used" time; they can rename and remove them
   - removing the last sign-in method is blocked: a member always keeps a password or at least one passkey
   - **owners must keep a password**: an owner can't remove their password, and promoting a passkey-only member to owner requires them to set one first
-  - user verification is **"preferred"** **(default)**
-  - **clone detection:** a `sign_count` that goes backwards rejects the sign-in. The member and admins get a `security_notice` (notifications §3 Notification events).
+  - user verification is **"preferred"** **(default)**. Verified with `@simplewebauthn/server` in the M0 foundation spike; it must be called with `requireUserVerification: false`, because its default is `true`.
+  - **clone detection:** after the signature is verified, a `sign_count` that is **less than or equal to** the stored value (unless both are 0, as with most synced passkeys) rejects the sign-in as `clone_detected`. The service compares counters itself rather than relying on the library's error. The member and admins get a `security_notice` (notifications §3 Notification events).
+  - the stored counter is updated with a **compare-and-set** (`UPDATE … SET sign_count = ? WHERE id = ? AND sign_count = ?`), so two concurrent sign-ins with one passkey can't both pass against the same value.
 - **Passkeys and the domain (relying-party ID):**
   - Passkeys are bound to the domain the workspace uses when they're registered.
   - **Changing the workspace's domain** (for example from `*.workers.dev` to a custom domain, PRD §13) or **restoring to another installation** leaves existing passkeys unusable.
@@ -385,7 +391,7 @@ Settings keys (defined in platform §7 Admin settings): `default_channels`, `wel
   - the magic-link request response is identical for existing and non-existing emails
   - passkey-only members can sign in and can recover through an admin recovery link
   - registering a passkey on a `*.workers.dev` host shows the domain warning
-  - a passkey assertion with a lower `sign_count` than stored is rejected.
+  - a passkey assertion whose `sign_count` is lower than, or equal to, a non-zero stored value is rejected as `clone_detected`; an authenticator that always reports 0 still signs in.
 - **Passkeys:**
   - a member can add, rename and remove passkeys
   - removing the last sign-in method is refused
@@ -428,6 +434,6 @@ TOTP two-factor · Google/Microsoft or SSO sign-in · guests · member self-serv
 1. **Team field.** Free text, or chosen from the member's groups (a "primary group")? The second keeps the directory consistent.
 2. **Allowed invite domains.** Off by default, or on and set to the owner's domain at setup?
 3. **Welcome post wording and channel.** Always `#general`, or configurable?
-4. **WebAuthn library and PBKDF2 limit.** Both are checked in the **M0 foundation spike** (PLAN M0): whether a maintained library (for example SimpleWebAuthn) runs in Workers, otherwise verification is implemented directly with WebCrypto; and whether production caps PBKDF2 iterations (§4.4 fallback).
+4. ~~**WebAuthn library and PBKDF2 limit.**~~ Answered by the M0 foundation spike ([foundation spike](../spikes/foundation/README.md)): `@simplewebauthn/server` runs in Workers; PBKDF2 uses 100k plus an HMAC pepper (§4.4); the production probe confirmed the 100k cap.
 
-**Still pending in other documents:** TDD §3.1 and §8.1 should add the refresh grace window, the per-request `session_epoch` check, the `email_change` token kind and the PBKDF2 fallback.
+**Still pending in other documents:** TDD §3.1 and §8.1 should add the refresh grace window, the per-request `session_epoch` check and the `email_change` token kind. (The PBKDF2 decision is now in TDD §8.1.)
