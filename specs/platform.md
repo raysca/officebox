@@ -1,6 +1,6 @@
 # Spec: Platform Rules
 
-**Status:** Draft for review
+**Status:** Approved (product owner, 15 Nov 2026)
 **Revision:** Revised after second independent review (14 Nov 2026)
 **Feature name:** Platform Rules (cross-cutting; not a user-facing feature)
 **Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md)

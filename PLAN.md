@@ -155,6 +155,35 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 
 **Must (also):** the "My devices" session list. **Should:** the "allowed email domains" setting for invitations.
 
+**Slices** (product-owner decision, 15 Nov 2026). Each is one branch and PR with its own independent review, built in this order:
+- **M1a — Setup, sessions and the permission engine core:**
+  - first-run setup with the setup token and an atomic claim
+  - email and password sign-in (PBKDF2 100k + HMAC pepper)
+  - session and rotating refresh cookies, reuse detection, `session_epoch`
+  - sign out, sign out everywhere, and "My devices"
+  - CSRF header and `Origin` checks; rate limits on setup and sign-in
+  - the permission engine in `packages/shared` with workspace roles, and the first matrix test
+- **M1b — Email and invitations:**
+  - the email adapter (Resend, Postmark, SES, SMTP over STARTTLS), its queue, retries and dead-letter queue, and **Send test email**
+  - invitations: copy link and email, single-use, 7-day expiry, role at invite time
+  - the accept flow that creates the account
+  - the "allowed email domains" setting (Should)
+- **M1c — Passwordless and recovery:**
+  - magic links
+  - passkeys, including passkey-only members (owners keep a password)
+  - password reset
+  - owner recovery with `RECOVERY_TOKEN`
+- **M1d — Profiles and directory:**
+  - display name, avatar (R2), time zone, working hours, location or region, status text with emoji
+  - @handles
+  - the member directory
+- **M1e — Groups and administration:**
+  - admin-managed groups
+  - members administration: list, change role, disable, delete (anonymise)
+  - admin-power limits
+  - audit coverage for every admin action
+  - the full M1 permission matrix (workspace roles, groups, profiles)
+
 **Later:** TOTP MFA; Cloudflare Access SSO (PRD §6).
 
 **Exit criteria:**
