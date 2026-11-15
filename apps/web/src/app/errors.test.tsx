@@ -38,7 +38,16 @@ describe("error pages", () => {
 });
 
 describe("toasts", () => {
-  it("announces errors as alerts, de-duplicates them and dismisses on request", async () => {
+  it("has two always-present live regions that don't nest", () => {
+    render(<Toaster />);
+    const alert = screen.getByRole("alert");
+    const status = screen.getByRole("status");
+    expect(alert.parentElement?.closest("[role], [aria-live]")).toBeNull();
+    expect(status.parentElement?.closest("[role], [aria-live]")).toBeNull();
+    expect(alert.querySelector("[role], [aria-live]")).toBeNull();
+  });
+
+  it("puts errors in the alert region, de-duplicates them and dismisses on request", async () => {
     const user = userEvent.setup();
     render(<Toaster />);
     act(() => {
@@ -46,11 +55,13 @@ describe("toasts", () => {
       toastStore.show("Can't reach the server.", "error");
       toastStore.show("Saved.", "info");
     });
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    const alert = screen.getByRole("alert");
+    expect(alert.querySelectorAll("[data-toast]")).toHaveLength(1);
+    expect(alert.textContent).toContain("Can't reach the server.");
     expect(screen.getByRole("status").textContent).toContain("Saved.");
 
-    await user.click(within(screen.getByRole("alert")).getByRole("button", { name: "Dismiss notification" }));
-    expect(screen.queryByRole("alert")).toBeNull();
+    await user.click(within(alert).getByRole("button", { name: "Dismiss notification" }));
+    expect(alert.querySelectorAll("[data-toast]")).toHaveLength(0);
   });
 
   it("keeps at most three", () => {
@@ -58,10 +69,7 @@ describe("toasts", () => {
     act(() => {
       for (const n of [1, 2, 3, 4]) toastStore.show(`Message ${n}`);
     });
-    expect(screen.getAllByRole("status").map((el) => el.querySelector("p")?.textContent)).toEqual([
-      "Message 2",
-      "Message 3",
-      "Message 4",
-    ]);
+    const texts = Array.from(screen.getByRole("status").querySelectorAll("[data-toast] p")).map((p) => p.textContent);
+    expect(texts).toEqual(["Message 2", "Message 3", "Message 4"]);
   });
 });

@@ -5,6 +5,19 @@ import { getTabbable } from "./focus";
 import { IconButton } from "./Button";
 import { CloseIcon } from "./icons";
 
+/**
+ * Elements directly under <body> with this attribute stay interactive while a dialog is open (the
+ * Toaster, so a toast raised behind a dialog can still be read and dismissed).
+ */
+export const DIALOG_EXEMPT_ATTRIBUTE = "data-dialog-exempt";
+
+/**
+ * Open dialogs, innermost last. Only the top dialog handles Esc and keeps focus inside itself, so one
+ * Esc closes one dialog when they're nested.
+ */
+const dialogStack: symbol[] = [];
+const isTop = (token: symbol) => dialogStack[dialogStack.length - 1] === token;
+
 export interface DialogProps {
   open: boolean;
   onClose: () => void;
@@ -26,7 +39,7 @@ export interface DialogProps {
  *   focused or read by a screen reader while the dialog is open.
  * - Focus moves inside on open, Tab and Shift+Tab wrap within the dialog, and focus returns to the
  *   element that opened it on close.
- * - Esc and a click on the backdrop close it.
+ * - Esc and a click on the backdrop close it. Nested dialogs close one at a time, innermost first.
  *
  * Built by hand rather than on <dialog>.showModal(): the native element doesn't keep Tab inside the
  * dialog (focus can leave for the browser chrome and come back to the page), and jsdom can't test it.
@@ -58,10 +71,13 @@ export function Dialog({
     if (!overlay || !panel) return;
 
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const token = Symbol("dialog");
+    dialogStack.push(token);
 
     // Make the rest of the page inert, remembering what was already inert.
     const siblings = Array.from(document.body.children).filter(
-      (el): el is HTMLElement => el instanceof HTMLElement && el !== overlay,
+      (el): el is HTMLElement =>
+        el instanceof HTMLElement && el !== overlay && !el.hasAttribute(DIALOG_EXEMPT_ATTRIBUTE),
     );
     const wasInert = siblings.map((el) => el.hasAttribute("inert"));
     for (const el of siblings) el.setAttribute("inert", "");
@@ -72,6 +88,7 @@ export function Dialog({
     (initialFocusRef?.current ?? getTabbable(panel)[0] ?? panel).focus();
 
     function onKeyDown(event: KeyboardEvent) {
+      if (!isTop(token)) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -99,7 +116,9 @@ export function Dialog({
 
     // A safety net: if focus lands outside anyway (a script, a browser quirk), bring it back.
     function onFocusIn(event: FocusEvent) {
-      if (panel && event.target instanceof Node && !panel.contains(event.target)) {
+      if (!isTop(token) || !panel || !(event.target instanceof Element)) return;
+      if (event.target.closest(`[${DIALOG_EXEMPT_ATTRIBUTE}]`)) return;
+      if (!panel.contains(event.target)) {
         (getTabbable(panel)[0] ?? panel).focus();
       }
     }
@@ -110,11 +129,14 @@ export function Dialog({
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("focusin", onFocusIn);
+      dialogStack.splice(dialogStack.indexOf(token), 1);
       siblings.forEach((el, i) => {
         if (!wasInert[i]) el.removeAttribute("inert");
       });
       document.body.style.overflow = previousOverflow;
+      // Back to the opener; if it has gone (removed while the dialog was open), to the main content.
       if (opener?.isConnected) opener.focus();
+      else document.querySelector<HTMLElement>("main")?.focus();
     };
   }, [open, initialFocusRef]);
 

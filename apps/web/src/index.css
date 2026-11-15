@@ -134,6 +134,12 @@
     color: var(--ob-fg);
     font-family: var(--font-sans);
     -webkit-text-size-adjust: 100%;
+    /*
+     * Keep focused and scrolled-to elements clear of the sticky header (h-14, 3.5rem) and the toast
+     * area at the bottom (WCAG 2.4.11 Focus Not Obscured).
+     */
+    scroll-padding-top: 4.5rem;
+    scroll-padding-bottom: 6rem;
   }
 
   /* A visible focus ring on every focusable element, keyboard focus only (WCAG 2.4.7, 2.4.11). */

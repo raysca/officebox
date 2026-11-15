@@ -1,7 +1,10 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
+import { act } from "@testing-library/react";
+import { setMediaQuery } from "../test/media";
 import { renderApp } from "../test/render-app";
+import { DESKTOP_QUERY } from "./layout/AppShell";
 
 async function openMenu() {
   const user = userEvent.setup();
@@ -67,5 +70,22 @@ describe("mobile menu", () => {
     expect(router.state.location.pathname).toBe("/documents");
     expect(screen.queryByRole("dialog")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(heading));
+  });
+
+  it("closes by itself when the window grows to the desktop layout", async () => {
+    const { trigger } = await openMenu();
+    act(() => setMediaQuery(DESKTOP_QUERY, true));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("points aria-controls at the menu only while it exists", async () => {
+    const user = userEvent.setup();
+    await renderApp("/");
+    const trigger = screen.getByRole("button", { name: "Open menu" });
+    expect(trigger.hasAttribute("aria-controls")).toBe(false);
+    await user.click(trigger);
+    const id = trigger.getAttribute("aria-controls");
+    expect(id && document.getElementById(id)).toBe(screen.getByRole("dialog", { name: "Menu" }));
   });
 });

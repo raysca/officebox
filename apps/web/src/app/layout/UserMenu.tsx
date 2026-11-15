@@ -6,6 +6,9 @@ import { messages } from "../messages";
 /**
  * Placeholder for the account menu (profile, preferences, sign out) that arrives with sign-in in M1.
  * A disclosure button with a popover panel: Esc or a click outside closes it.
+ *
+ * TODO(M1): when it holds real actions, decide between this disclosure pattern and an ARIA menu
+ * (role="menu" with arrow-key navigation), and test it with screen readers.
  */
 export function UserMenu() {
   const [open, setOpen] = useState(false);

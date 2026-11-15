@@ -13,7 +13,7 @@ import { UserMenu } from "./UserMenu";
 const MAIN_ID = "main-content";
 const MOBILE_MENU_ID = "mobile-menu";
 /** Tailwind's `md` breakpoint: the sidebar is always shown at this width and up. */
-const DESKTOP_QUERY = "(min-width: 48rem)";
+export const DESKTOP_QUERY = "(min-width: 48rem)";
 
 /**
  * The application shell: skip link, header, sidebar navigation, main content and footer.
@@ -72,7 +72,8 @@ export function AppShell({ children }: { children?: ReactNode }) {
           className="md:hidden"
           aria-haspopup="dialog"
           aria-expanded={menuOpen}
-          aria-controls={MOBILE_MENU_ID}
+          // Only while the menu exists in the page: aria-controls must point at a real element.
+          aria-controls={menuOpen ? MOBILE_MENU_ID : undefined}
           onClick={() => setMenuOpen(true)}
         />
         <p className="truncate text-base font-semibold">{messages.workspaceName}</p>
