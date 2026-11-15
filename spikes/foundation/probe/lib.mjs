@@ -1,5 +1,6 @@
-// Shared helpers for probe/deploy.mjs and probe/destroy.mjs.
+// Shared helpers for probe/deploy.mjs, probe/destroy.mjs and probe/check.mjs.
 import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +9,11 @@ export const root = join(here, "..");
 export const STATE_FILE = join(here, ".probe.json");
 export const WORKER = "officebox-foundation-probe";
 export const QUEUE = "officebox-foundation-probe";
+
+export function fail(message) {
+  console.error(`\n${message}`);
+  process.exit(1);
+}
 
 /** Runs `npx wrangler <args>` from the spike root. Returns { status, out }; prints output unless quiet. */
 export function wrangler(args, { input, quiet = false } = {}) {
@@ -21,14 +27,28 @@ export function wrangler(args, { input, quiet = false } = {}) {
 export function queueExists(name) {
   for (let page = 1; page <= 20; page++) {
     const { status, out } = wrangler(["queues", "list", "--page", String(page)], { quiet: true });
-    if (status !== 0) throw new Error(`wrangler queues list failed:\n${out}`);
+    if (status !== 0) fail(`Listing queues failed, so the probe can't check for an existing "${name}" queue:\n${out.slice(-2000)}`);
     if (new RegExp(`(^|[\\s│|])${name}([\\s│|]|$)`, "m").test(out)) return true;
     if (!/[0-9a-f]{32}/.test(out)) return false; // no queue ids on this page: past the end
   }
   return false;
 }
 
-export function fail(message) {
-  console.error(`\n${message}`);
-  process.exit(1);
+/** True if a Worker with this name exists in the account. Unknown errors stop the script rather than guess. */
+export function workerExists(name) {
+  const { status, out } = wrangler(["deployments", "list", "--name", name, "--json"], { quiet: true });
+  if (status === 0) return true;
+  if (/10007|does not exist|not found|could not be found/i.test(out)) return false;
+  fail(`Checking for an existing Worker "${name}" failed:\n${out.slice(-2000)}`);
+}
+
+export function readState() {
+  if (!existsSync(STATE_FILE)) return null;
+  return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+}
+
+/** State holds the probe token, so it is written owner-read/write only. */
+export function writeState(state) {
+  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+  chmodSync(STATE_FILE, 0o600); // writeFileSync's mode only applies when the file is created
 }

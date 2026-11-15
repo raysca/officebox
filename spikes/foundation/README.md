@@ -23,7 +23,7 @@ Each answer is labelled with its evidence level:
 ```sh
 cd spikes/foundation
 npm install --legacy-peer-deps
-npm test                 # 28 Vitest tests in workerd: hashing, WebAuthn routes and counter rule, rate limits, queue delays
+npm test                 # 30 Vitest tests in workerd: hashing, WebAuthn routes and counter rule, rate limits, queue delays
 npm run typecheck
 npm run test:webauthn    # wrangler dev + Playwright Chromium virtual authenticator
 npm run test:pdf         # PDF viewer under CSP sandbox; re-runs itself under xvfb-run for headed mode
@@ -82,10 +82,10 @@ hash  = PBKDF2-SHA256(input, salt, 100000, 32 bytes)
   3. After a published deadline, accounts still on a retired pepper must reset their password (or use a magic link or passkey).
   4. Only then is the old secret deleted. Until the deadline, every listed pepper secret is kept.
 - **Export and restore:** an export restored to another installation needs the same `PEPPER_*` secrets, or every password falls back to reset/magic link. The secrets inventory (platform §16) and the restore guide must say so.
-- **No timing enumeration:** an email with no account (or a passkey-only account) must run the same derivation. `dummyVerify()` does 100k iterations against a fixed salt and returns `false`.
-- **Bounded verify:** `verifyPeppered` refuses stored iteration counts outside 100,000–1,000,000, so a tampered row can't make verification burn CPU.
+- **No timing enumeration:** an email with no account (or a passkey-only account) must run the same derivation. `dummyVerify()` runs the full HMAC + PBKDF2 derivation at the current policy's iteration count (`POLICY.iterations`) and returns `false`. `verifyPeppered`'s own refusal paths (malformed row, out-of-range iterations, unknown, retired or too-short pepper) call it too, instead of returning early.
+- **Robust verify:** `verifyPeppered` never throws. It refuses stored iteration counts outside 100,000–1,000,000 (so a tampered row can't make verification burn CPU), malformed base64, wrong salt or hash lengths, and pepper ids that aren't own string properties of at least 32 bytes (`__proto__`, `constructor` and the like never resolve).
 - **Cost:** 0.5 KiB, no dependency, about 13 ms CPU.
-- Tested: hash and verify, wrong password, wrong secret, unknown pepper id, out-of-range iteration counts, short pepper, dummy path cost.
+- Tested: hash and verify, wrong password, wrong secret, unknown pepper id, out-of-range iteration counts, short pepper (hash and verify), malformed rows and base64, inherited-key pepper ids, and **timing parity**: each refusal path and the unknown-user path must take 0.5–2× the median of a real verify. Locally all were 12–13 ms. The ratio is loose because workerd's clock has 1 ms resolution, but it still catches an early return or a different iteration count.
 
 ### Fallback B: Argon2id in WASM (`src/hash.ts`, `src/argon2-shim.ts`)
 
@@ -225,18 +225,26 @@ cloned:        credential re-added with signCount rewound -> authenticator repor
 
 Some answers need a real deployment (production PBKDF2 limit, Rate Limiting semantics, Queue validation). `probe/` is a small Worker (about 62 KiB, 22 KiB gzip) that runs those checks. Every route needs a random token, which `deploy.mjs` generates and stores with `wrangler secret put`; the Worker compares it in constant time. Every cost parameter is capped (iterations ≤ 1,000,000, Argon2 memory ≤ 64 MiB, scrypt N ≤ 2^18, rate-limit calls ≤ 50 per request), so the public URL can't be used to burn CPU.
 
-**On your machine, with a Cloudflare account on Workers Paid:**
+**Prerequisites:**
+- **Node.js 22.12 or later** (Wrangler 4.162's minimum).
+- A Cloudflare account on **Workers Paid** with **Queues** available.
+- The account has a **workers.dev subdomain**. If it has never had one, register it first (dashboard → Workers & Pages → your subdomain). Otherwise the deploy may stop to ask, and the scripts can't answer prompts.
+- Authentication, either way:
+  - `npx wrangler login`. If the login can see **more than one account**, also `export CLOUDFLARE_ACCOUNT_ID=<id>`: the scripts run Wrangler with piped stdin, so it can't ask which account to use.
+  - `export CLOUDFLARE_API_TOKEN=…` plus `CLOUDFLARE_ACCOUNT_ID`, with a token that has **Account › Workers Scripts: Edit**, **Account › Queues: Edit** and **Account › Account Settings: Read**.
+
+**On your machine:**
 
 ```sh
 cd spikes/foundation
 npm install --legacy-peer-deps
-npx wrangler login                 # or export CLOUDFLARE_API_TOKEN=...
-npm run deploy:probe               # creates the queue, deploys officebox-foundation-probe, sets the token secret
+npx wrangler login                 # or CLOUDFLARE_API_TOKEN (+ CLOUDFLARE_ACCOUNT_ID), see prerequisites
+npm run deploy:probe               # refuses if the Worker or queue already exists; creates them, sets the token secret
 npm run check:probe                # about 40 s; prints a Markdown report and writes probe/probe-report.json
-npm run destroy:probe              # deletes the Worker, the queue (if the probe created it) and probe/.probe.json
+npm run destroy:probe              # run it promptly: deletes only what the probe created, then probe/.probe.json
 ```
 
-Paste the printed report into the PR. It covers:
+Paste the printed report into the PR. The account's workers.dev subdomain is redacted (`officebox-foundation-probe.<redacted>.workers.dev`), so it's safe for a public PR. The **Expected** column marks rows that are meant to fail: `WebAssembly.compile` is forbidden, scrypt N=2^18 hits the cost cap, and scrypt N=2^17 needs 128 MiB in a 128 MB isolate, so a memory-exceeded error or a non-JSON error page is a valid answer there. The report covers:
 
 - PBKDF2 at 100,000 / 100,001 / 600,000, the pepper, Argon2id (shimmed), scrypt, and runtime `WebAssembly.compile`, with round-trip times
 - the rate limiter (separate requests, one request, the 10-second window and its reset, period 30) and the colo that served it
@@ -244,11 +252,15 @@ Paste the printed report into the PR. It covers:
 
 **What it creates in your account, and nothing else:**
 - the Worker `officebox-foundation-probe` on workers.dev, with Workers Logs enabled. **Side effect:** if the account has never used workers.dev, the first deploy registers a `<name>.workers.dev` subdomain for the account, and that stays after the probe is deleted.
-- the queue `officebox-foundation-probe`. `deploy:probe` refuses if a queue with that name already exists, so it never attaches to or deletes something it didn't create (`-- --reuse-queue` overrides; `destroy:probe` then leaves the queue alone). Any queue-creation error other than "already exists" stops the deploy.
-- the `PROBE_TOKEN` secret on that Worker.
+- the queue `officebox-foundation-probe`. `deploy:probe` refuses if a queue with that name already exists (and likewise refuses an existing Worker of the probe's name), so it never attaches to or deletes something it didn't create (`-- --reuse-queue` overrides; `destroy:probe` then leaves the queue alone). Any queue-creation error other than "already exists" stops the deploy.
+- the `PROBE_TOKEN` secret on that Worker. The token is also kept in `probe/.probe.json` (mode 0600, git-ignored). `check:probe` reads it from there, or from the `PROBE_TOKEN` environment variable, never from a command-line argument, because arguments show in the process list.
 - Rate Limiting namespaces `910001` and `910002`, which are only binding config, not separate resources. Namespace ids are per account; if they clash with another Worker's limiters, edit `probe/wrangler.jsonc`.
 
-No D1, KV, R2 or Durable Objects are created. The 12-hour and 24-hour test messages are dropped when `destroy:probe` deletes the queue.
+No D1, KV, R2 or Durable Objects are created.
+
+**Run `destroy:probe` promptly.** Until the queue is deleted, the 12-hour and 24-hour test messages stay pending and will wake the probe's consumer when they come due. `destroy:probe` deletes them along with the queue.
+
+**What `destroy:probe` deletes:** `deploy:probe` writes `probe/.probe.json` **before** deploying, recording `workerCreatedByProbe` and `queueCreatedByProbe`. `destroy:probe` deletes only what that file says the probe created. With no state file (for example, the deploy was refused, or you're in another clone) it deletes nothing and prints the manual commands. A queue reused with `--reuse-queue` is never deleted.
 
 `deploy:probe` stops with a clear message if no workers.dev URL appears in Wrangler's output, and tells you to pass `--url=` to `check:probe`.
 
@@ -279,7 +291,7 @@ All versions are pinned exactly. Where a newer release existed, the newest versi
 | `src/pbkdf2.ts` | PBKDF2 and the HMAC-pepper fallback (WebCrypto only) |
 | `src/hash.ts`, `src/argon2-shim.ts`, `src/wasm/` | Argon2id via `hash-wasm` with precompiled modules; scrypt |
 | `src/webauthn.ts` | SimpleWebAuthn registration and authentication, typed results, clone detection |
-| `test/*.test.ts` | Vitest in workerd (28 tests) |
+| `test/*.test.ts` | Vitest in workerd (30 tests) |
 | `scripts/webauthn-e2e.mjs` | wrangler dev + Chromium virtual authenticator |
 | `scripts/pdf-sandbox.mjs` | PDF viewer matrix; screenshots in `pdf-shots/` (git-ignored) |
 | `scripts/bundle-size.mjs`, `scripts/extract-wasm.mjs` | Bundle sizes; WASM extraction from `hash-wasm` |

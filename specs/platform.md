@@ -564,7 +564,7 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 
 ## 18. Later
 
-Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF preview under `Content-Security-Policy: sandbox` (verify in the **M0 foundation spike** whether the browser's PDF viewer renders under the sandbox; otherwise use PDF.js in a sandboxed frame) · server-side image resizing for previews · legal hold · per-member data export (self-service).
+Retention policies (Phase 2, PRD §10.2) · sharding the ReminderScheduler · PDF.js fallback for PDF preview, only if a browser fails the M6 check (the **M0 foundation spike** answered the sandbox question: Chromium's viewer renders under `Content-Security-Policy: sandbox` in an iframe without the `sandbox` attribute; TDD §8.3) · server-side image resizing for previews · legal hold · per-member data export (self-service).
 
 ## 19. Open questions
 

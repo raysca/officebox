@@ -1,18 +1,23 @@
 // Deploys the production probe to your Cloudflare account. Usage: npm run deploy:probe [-- --reuse-queue]
 //
-// Needs `npx wrangler login` (or CLOUDFLARE_API_TOKEN) first. Steps:
-//   1. refuses if a queue named officebox-foundation-probe already exists (unless --reuse-queue), so the probe
-//      never attaches to, or later deletes, something it didn't create
+// Needs `npx wrangler login` (or CLOUDFLARE_API_TOKEN, plus CLOUDFLARE_ACCOUNT_ID if the login has several
+// accounts) first. Steps:
+//   1. refuses if a Worker named officebox-foundation-probe already exists, or a queue of that name exists
+//      (unless --reuse-queue), so the probe never overwrites, attaches to, or later deletes something it didn't
+//      create
 //   2. creates the queue; any error other than "already exists" stops the deploy
-//   3. deploys the Worker (workers.dev; first use of workers.dev on an account registers a subdomain)
-//   4. stores a random PROBE_TOKEN with `wrangler secret put` (encrypted, not a plain var)
-//   5. saves { url, token, queueCreatedByProbe } to probe/.probe.json (git-ignored) for check.mjs and destroy.mjs
+//   3. writes probe/.probe.json (mode 0600) recording what the probe created, BEFORE deploying, so destroy.mjs
+//      knows what it may delete even if a later step fails
+//   4. deploys the Worker to workers.dev, then stores a random PROBE_TOKEN with `wrangler secret put`
 import { randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
-import { fail, queueExists, QUEUE, STATE_FILE, WORKER, wrangler } from "./lib.mjs";
+import { fail, queueExists, QUEUE, readState, WORKER, workerExists, wrangler, writeState } from "./lib.mjs";
 
 const reuse = process.argv.includes("--reuse-queue");
 
+if (readState()) fail("probe/.probe.json already exists: a probe may still be deployed. Run `npm run destroy:probe` first.");
+if (workerExists(WORKER)) {
+  fail(`A Worker named "${WORKER}" already exists in this account. The probe won't overwrite a Worker it didn't create.`);
+}
 if (queueExists(QUEUE)) {
   if (!reuse) {
     fail(
@@ -22,25 +27,30 @@ if (queueExists(QUEUE)) {
   }
   console.log(`Reusing existing queue "${QUEUE}" (--reuse-queue); destroy:probe will leave it in place.`);
 }
-let queueCreatedByProbe = false;
+
+const token = randomBytes(24).toString("base64url");
+const state = { url: null, token, queueCreatedByProbe: false, workerCreatedByProbe: false };
 if (!reuse) {
   const { status, out } = wrangler(["queues", "create", QUEUE]);
   if (status !== 0 && !/already exists/i.test(out)) fail(`Creating queue "${QUEUE}" failed (see above). Nothing was deployed.`);
-  queueCreatedByProbe = status === 0;
+  state.queueCreatedByProbe = status === 0;
 }
+// Recorded before the deploy: we checked the Worker didn't exist, so whatever exists under that name after this
+// point (even after a failed or partial deploy) was created by the probe.
+state.workerCreatedByProbe = true;
+writeState(state);
 
 const deploy = wrangler(["deploy", "--config", "probe/wrangler.jsonc"]);
-if (deploy.status !== 0) fail("wrangler deploy failed (see above). Run `npm run destroy:probe` to remove the queue.");
-const url = deploy.out.match(new RegExp(`https://${WORKER}\\.[\\w.-]+\\.workers\\.dev`))?.[0];
+if (deploy.status !== 0) fail("wrangler deploy failed (see above). Run `npm run destroy:probe` to remove what the probe created.");
+state.url = deploy.out.match(new RegExp(`https://${WORKER}\\.[\\w.-]+\\.workers\\.dev`))?.[0] ?? null;
+writeState(state);
 
-const token = randomBytes(24).toString("base64url");
 const secret = wrangler(["secret", "put", "PROBE_TOKEN", "--config", "probe/wrangler.jsonc"], { input: `${token}\n` });
-writeFileSync(STATE_FILE, JSON.stringify({ url: url ?? null, token, queueCreatedByProbe }, null, 2));
 if (secret.status !== 0) fail("Setting the PROBE_TOKEN secret failed (see above). Every probe route returns 403 until it is set.");
-if (!url) {
+if (!state.url) {
   fail(
-    "Deployed, but no workers.dev URL was found in wrangler's output (is workers.dev disabled for this account?).\n" +
+    "Deployed, but no workers.dev URL was found in wrangler's output (is workers.dev enabled for this account?).\n" +
       "Find the URL in the dashboard and run: npm run check:probe -- --url=https://<the probe URL>",
   );
 }
-console.log(`\nProbe deployed at ${url}. Now run: npm run check:probe`);
+console.log(`\nProbe deployed. Now run: npm run check:probe   (then npm run destroy:probe promptly)`);

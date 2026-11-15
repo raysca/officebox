@@ -55,17 +55,67 @@ describe("Fallback A: HMAC pepper + PBKDF2 100k", () => {
     }
   });
 
-  it("refuses a pepper shorter than 32 bytes", async () => {
-    const r = await pepperedPbkdf2(PW, "too-short", "1");
-    expect(r.ok).toBe(false);
+  it("refuses a pepper shorter than 32 bytes, when hashing and when verifying", async () => {
+    expect((await pepperedPbkdf2(PW, "too-short", "1")).ok).toBe(false);
+    const r = await pepperedPbkdf2(PW, env.PEPPER_1 as string, "1");
+    if (!r.ok) throw new Error(r.error);
+    // Same id, but the configured secret is too short: refused rather than used.
+    expect(await verifyPeppered(r.hash, PW, { "1": "too-short" })).toBe(false);
   });
 
-  it("the dummy path for unknown users does the same derivation work", async () => {
-    const t0 = performance.now();
-    expect(await dummyVerify(PW, env.PEPPER_1 as string)).toBe(false);
-    const dummyMs = performance.now() - t0;
-    console.log(`dummy verify ${dummyMs.toFixed(1)} ms`);
-    expect(dummyMs).toBeGreaterThan(3); // 100k iterations, not a fast return (real verify is ~12 ms here)
+  it("returns false (never throws) on malformed base64 or a malformed row", async () => {
+    const peppers = { "1": env.PEPPER_1 as string };
+    const r = await pepperedPbkdf2(PW, peppers["1"], "1");
+    if (!r.ok) throw new Error(r.error);
+    const [scheme, id, iter, salt, hash] = r.hash.split("$");
+    const bad = [
+      `${scheme}$${id}$${iter}$!!!not-base64!!!$${hash}`,
+      `${scheme}$${id}$${iter}$${salt}$%%%`,
+      `${scheme}$${id}$${iter}$${salt}`,
+      `${scheme}$${id}$${iter}$${salt}$${hash}$extra`,
+      "",
+      "garbage",
+    ];
+    for (const row of bad) await expect(verifyPeppered(row, PW, peppers)).resolves.toBe(false);
+  });
+
+  it("never resolves inherited keys such as __proto__ or constructor as a pepper id", async () => {
+    const peppers = { "1": env.PEPPER_1 as string };
+    const r = await pepperedPbkdf2(PW, peppers["1"], "1");
+    if (!r.ok) throw new Error(r.error);
+    for (const id of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      await expect(verifyPeppered(r.hash.replace("$1$", `$${id}$`), PW, peppers)).resolves.toBe(false);
+    }
+  });
+
+  it("refusal paths and the unknown-user path cost about as much as a real verify", async () => {
+    // Timing parity check. workerd's clock has 1 ms resolution and a real verify takes ~12 ms here, so the bound is
+    // a generous ratio (0.5x..2x of the real verify's median) rather than an exact match. It still fails if a path
+    // returns early (~0 ms) or derives at a different iteration count (600k would be ~6x).
+    const peppers = { "1": env.PEPPER_1 as string };
+    const r = await pepperedPbkdf2(PW, peppers["1"], "1");
+    if (!r.ok) throw new Error(r.error);
+    const time = async (fn: () => Promise<boolean>) => {
+      const ms: number[] = [];
+      for (let i = 0; i < 5; i++) {
+        const t0 = performance.now();
+        await fn();
+        ms.push(performance.now() - t0);
+      }
+      return ms.sort((a, b) => a - b)[2]!;
+    };
+    const real = await time(() => verifyPeppered(r.hash, "wrong password", peppers));
+    const paths = {
+      unknownUser: await time(() => dummyVerify(PW)),
+      retiredPepper: await time(() => verifyPeppered(r.hash.replace("$1$", "$9$"), PW, peppers)),
+      tamperedIterations: await time(() => verifyPeppered(r.hash.replace("$100000$", "$999999999$"), PW, peppers)),
+      malformed: await time(() => verifyPeppered("garbage", PW, peppers)),
+    };
+    console.log(`real verify ${real} ms; refusal paths ${JSON.stringify(paths)}`);
+    for (const [name, ms] of Object.entries(paths)) {
+      expect(ms, name).toBeGreaterThanOrEqual(real * 0.5);
+      expect(ms, name).toBeLessThanOrEqual(real * 2);
+    }
   });
 });
 
