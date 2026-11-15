@@ -32,7 +32,7 @@ for (const colorScheme of ["light", "dark"] as const) {
     test("with the account menu open", async ({ page }) => {
       await page.goto("/");
       await page.getByRole("button", { name: "Account" }).click();
-      await expect(page.getByText("Signing in arrives in a later release.")).toBeVisible();
+      await expect(page.getByText("Signed in as")).toBeVisible();
       await expectNoAxeViolations(page);
     });
 
@@ -119,7 +119,7 @@ test.describe("reflow at 320 CSS px (WCAG 1.4.10)", () => {
     await page.getByRole("combobox", { name: "Theme" }).selectOption("dark");
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await page.getByRole("button", { name: "Account" }).click();
-    await expect(page.getByText("Signing in arrives in a later release.")).toBeInViewport();
+    await expect(page.getByText("Signed in as")).toBeInViewport();
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Open menu" }).click();
     await expect(page.getByRole("dialog", { name: "Menu" })).toBeVisible();
