@@ -41,12 +41,14 @@ export interface ItemRow {
 export class TestObject extends CoreDurableObject {
   readonly outbox: Outbox;
   private batches = 0;
+  private gateOpen = false;
+  private gateWaiting = 0;
   /** Calls to the fake sender, successful or not. */
   private sendCalls = 0;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
-    this.outbox = this.createOutbox({ stream: "test", send: (bodies) => this.fakeSend(bodies) });
+    this.outbox = this.createOutbox({ stream: "test", send: (bodies) => this.fakeSend(bodies), sendTimeoutMs: 100 });
     this.onTimer("record", (timer) => this.record(timer));
     this.onTimer("flaky", (timer) => {
       if (this.getMeta("flaky_fail") === "1") throw new Error("flaky handler failed");
@@ -59,11 +61,18 @@ export class TestObject extends CoreDurableObject {
         this.setTimer(timer.name, Date.now() + 60_000);
       }
     });
-    // Waits `meta.slow_ms` (real time), so a test can act while the handler is mid-I/O.
-    this.onTimer("slow", async (timer) => {
-      await new Promise((resolve) => setTimeout(resolve, Number(this.getMeta("slow_ms") ?? "50")));
-      this.record(timer);
-    });
+    // Waits, polling with real timers (I/O, like a production handler), until the test opens the
+    // gate, so a test can act at a known point while the handler is mid-I/O. (Awaiting a bare promise
+    // resolved by another request instead holds up that request's storage writes.)
+    this.onTimer(
+      "gated",
+      async (timer) => {
+        this.gateWaiting += 1;
+        while (!this.gateOpen) await new Promise((resolve) => setTimeout(resolve, 5));
+        this.record(timer);
+      },
+      { timeoutMs: 10_000 },
+    );
     this.onTimer("hang", () => new Promise<void>(() => {}), { timeoutMs: 50 });
     this.retireTimerKind("old");
   }
@@ -82,7 +91,10 @@ export class TestObject extends CoreDurableObject {
    */
   private fakeSend(bodies: unknown[]): Promise<void> {
     this.sendCalls += 1;
+    if (this.getMeta("outbox_hang") === "1") return new Promise<void>(() => {});
     if (this.getMeta("outbox_fail") === "1") return Promise.reject(new Error("queue unavailable"));
+    const failAfter = Number(this.getMeta("outbox_fail_after") ?? "-1");
+    if (failAfter >= 0 && this.sendCalls > failAfter) return Promise.reject(new Error("queue went down"));
     if (bodies.some((b) => (b as { poison?: boolean }).poison === true)) {
       return Promise.reject(new Error("message rejected"));
     }
@@ -108,6 +120,17 @@ export class TestObject extends CoreDurableObject {
         this.outbox.enqueue({ type: "test.item", id, name, pad: "x".repeat(payloadBytes), poison });
       });
       return ok({ id });
+    });
+  }
+
+  /** Adds `count` items in one transaction (one call, so no drain runs in between). */
+  addItems(prefix: string, count: number): void {
+    this.ctx.storage.transactionSync(() => {
+      for (let i = 0; i < count; i++) {
+        const id = `${prefix}${String(i).padStart(4, "0")}`;
+        this.sql.exec("INSERT INTO items (id, name) VALUES (?, ?)", id, prefix);
+        this.outbox.enqueue({ type: "test.item", id });
+      }
     });
   }
 
@@ -144,6 +167,21 @@ export class TestObject extends CoreDurableObject {
         "SELECT name, due_at, payload, attempts, generation FROM core_timers ORDER BY name",
       )
       .toArray();
+  }
+
+  /** How many `gated` handler runs have reached the gate. */
+  gateReached(): number {
+    return this.gateWaiting;
+  }
+
+  /** Lets every waiting (and future) `gated` handler run continue. */
+  openGate(): void {
+    this.gateOpen = true;
+  }
+
+  /** Runs a drain directly (as the timer would). */
+  drainNow(): Promise<number | null> {
+    return this.outbox.drain(this.log);
   }
 
   outboxStats(): { pending: number; dead: number; maxAttempts: number; sendCalls: number } {

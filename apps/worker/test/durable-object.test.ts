@@ -237,53 +237,50 @@ describe("alarm multiplexer", () => {
     expect((await s.timerRows())[0]).toMatchObject({ due_at: t - 5000, payload: "third" });
   });
 
-  it("keeps a timer rescheduled while its handler is mid-I/O, and runs it again", async () => {
+  // These run on the runtime's own alarm (due in 50 ms) rather than runDurableObjectAlarm, which
+  // holds back other requests to the object while it runs. Each step waits for a known state.
+  const until = async (check: () => Promise<boolean>) => {
+    for (let i = 0; i < 400 && !(await check()); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(await check()).toBe(true);
+  };
+  const startGated = async (s: Stub, name: string) => {
+    await s.timer(name, Date.now() + 50);
+    await until(async () => (await s.gateReached()) === 1);
+  };
+
+  it("keeps a timer rescheduled while its handler is mid-I/O", async () => {
     const s = stub();
-    await s.meta("slow_ms", "100");
-    await s.timer("slow:1", Date.now() + HOUR);
-    await s.rewind(HOUR);
+    await startGated(s, "gated:1");
     const later = Date.now() + 3 * HOUR;
-    await Promise.all([
-      runDurableObjectAlarm(s),
-      (async () => {
-        await new Promise((r) => setTimeout(r, 30));
-        await s.timer("slow:1", later);
-      })(),
-    ]);
-    expect(await s.timerLog()).toEqual(["slow:1"]);
-    expect((await s.timerRows()).map((r) => [r.name, r.due_at])).toEqual([["slow:1", later]]);
+    await s.timer("gated:1", later);
+    await s.openGate();
+    await until(async () => (await s.timerLog()).length === 1);
+    expect(await s.timerLog()).toEqual(["gated:1"]);
+    await until(async () => (await s.timerRows())[0]?.due_at === later);
+    expect((await s.timerRows()).map((r) => [r.name, r.due_at])).toEqual([["gated:1", later]]);
   });
 
-  it("an ifEarlier request while the timer runs makes it run again", async () => {
+  it("an ifEarlier request while the timer runs keeps it due, and it runs again", async () => {
     const s = stub();
-    await s.meta("slow_ms", "100");
-    await s.timer("slow:2", Date.now() + HOUR);
-    await s.rewind(HOUR);
-    await Promise.all([
-      runDurableObjectAlarm(s),
-      (async () => {
-        await new Promise((r) => setTimeout(r, 30));
-        await s.timer("slow:2", Date.now() + HOUR, null, true);
-      })(),
-    ]);
-    // Kept (still due), so the next alarm runs it again.
-    expect((await s.timerRows()).map((r) => r.name)).toEqual(["slow:2"]);
+    await startGated(s, "gated:2");
+    await s.timer("gated:2", Date.now() + HOUR, null, true);
+    const [row] = await s.timerRows();
+    expect(row?.due_at).toBeLessThanOrEqual(Date.now()); // the earlier (running) due time was kept
+    await s.openGate();
+    // Kept as changed, so the alarm runs it a second time, then it's gone.
+    await until(async () => (await s.timerLog()).length === 2);
+    await until(async () => (await s.timerRows()).length === 0);
+    expect(await s.timerLog()).toEqual(["gated:2", "gated:2"]);
   });
 
   it("cancelling a timer while its handler runs leaves no timer behind", async () => {
     const s = stub();
-    await s.meta("slow_ms", "100");
-    await s.timer("slow:3", Date.now() + HOUR);
-    await s.rewind(HOUR);
-    await Promise.all([
-      runDurableObjectAlarm(s),
-      (async () => {
-        await new Promise((r) => setTimeout(r, 30));
-        await s.cancel("slow:3");
-      })(),
-    ]);
-    expect(await s.timerLog()).toEqual(["slow:3"]);
+    await startGated(s, "gated:3");
+    await s.cancel("gated:3");
+    await s.openGate();
+    await until(async () => (await s.timerLog()).length === 1);
     expect(await s.timerRows()).toEqual([]);
+    expect(await s.timerLog()).toEqual(["gated:3"]);
   });
 
   it("runs more than 100 due timers over successive alarms, each once", async () => {

@@ -172,6 +172,52 @@ describe("outbox failures", () => {
     await drain(s);
     expect((await s.sentBodies()).map((r) => r.id)).toEqual(["x1", "x2", "x3", "x4"]);
   });
+
+  it("stops early when the queue goes down part-way through a drain", async () => {
+    const s = stub();
+    await s.addItems("m", 300);
+    const before = (await s.outboxStats()).sendCalls;
+    await s.meta("outbox_fail_after", String(before + 1)); // the first chunk goes through, then the queue fails
+    await drain(s);
+    const stats = await s.outboxStats();
+    expect(stats.pending).toBe(200);
+    expect(stats.dead).toBe(0);
+    expect(stats.sendCalls - before).toBeLessThanOrEqual(12); // not ~400 single-row sends
+    const rows = await pending(s);
+    expect(rows.filter((r) => r.attempts > 0).length).toBeLessThanOrEqual(2);
+    expect(rows.every((r) => r.next_attempt_at > Date.now())).toBe(true);
+  });
+
+  it("doesn't pull the drain earlier for new messages during an outage", async () => {
+    const s = stub();
+    await s.meta("outbox_fail", "1");
+    await s.addItem("p1", "p");
+    await s.addItem("p2", "p");
+    await drain(s);
+    const retryAt = Math.min(...(await pending(s)).map((r) => r.next_attempt_at));
+    expect(retryAt).toBeGreaterThan(Date.now());
+    await s.addItem("p3", "p");
+    const alarm = await runInDurableObject(s, (_i: TestObject, state) => state.storage.getAlarm());
+    expect(alarm).toBeGreaterThanOrEqual(retryAt);
+    const newest = (await pending(s)).at(-1);
+    expect(newest?.next_attempt_at).toBeGreaterThanOrEqual(retryAt);
+  });
+
+  it("runs one drain at a time and times out a send that hangs", async () => {
+    const s = stub();
+    await s.meta("outbox_hang", "1");
+    await s.addItem("h1", "h");
+    await s.rewind(10 * 60_000);
+    const first = s.drainNow();
+    // Wait until the first drain is inside its (hanging) send.
+    for (let i = 0; i < 50 && (await s.outboxStats()).sendCalls === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    const second = await s.drainNow();
+    expect(second).toBeGreaterThan(Date.now()); // asked to be retried; did nothing
+    await first;
+    const stats = await s.outboxStats();
+    expect(stats.sendCalls).toBe(1);
+    expect((await pending(s)).map((r) => r.attempts)).toEqual([1]); // the timeout counted as a failure
+  });
 });
 
 describe("chunkRows", () => {

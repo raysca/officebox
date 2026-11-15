@@ -196,6 +196,8 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
   /** Alarm time as last read from or written to storage; `undefined` until first read. */
   private alarmAt: number | null | undefined = undefined;
   private alarmFlushQueued = false;
+  /** True while `alarm()` runs; it re-derives the alarm itself when it finishes. */
+  private alarmRunning = false;
 
   constructor(ctx: DurableObjectState, env: E) {
     super(ctx, env);
@@ -411,12 +413,20 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
   /** Points the alarm at the earliest timer, or clears it. Writes only when it changes. */
   private flushAlarm(): void {
     this.alarmFlushQueued = false;
+    // While alarm() runs, it re-derives the alarm once when it finishes, so timer changes made in
+    // the meantime (by handlers or concurrent requests) don't each write an alarm that is about to
+    // be replaced.
+    if (this.alarmRunning) return;
     const row = this.sql.exec<{ due: number | null }>("SELECT MIN(due_at) AS due FROM core_timers").toArray()[0];
     const due = row?.due ?? null;
     if (due === this.alarmAt) return;
     this.alarmAt = due;
-    if (due === null) void this.ctx.storage.deleteAlarm();
-    else void this.ctx.storage.setAlarm(due);
+    const write = due === null ? this.ctx.storage.deleteAlarm() : this.ctx.storage.setAlarm(due);
+    write.catch((error: unknown) => {
+      // Forget what we believe the alarm is, so the next flush writes it again.
+      this.alarmAt = undefined;
+      this.log.error("could not update the alarm", { error });
+    });
   }
 
   /** Runs due timers. Subclasses register handlers with `onTimer` instead of overriding this. */
@@ -432,8 +442,13 @@ export abstract class CoreDurableObject<E extends Env = Env> extends DurableObje
       )
       .toArray();
 
-    for (const row of due) await this.runTimer(row);
-    this.flushAlarm();
+    this.alarmRunning = true;
+    try {
+      for (const row of due) await this.runTimer(row);
+    } finally {
+      this.alarmRunning = false;
+      this.flushAlarm();
+    }
   }
 
   private async runTimer(row: TimerRow): Promise<void> {
