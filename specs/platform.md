@@ -1,7 +1,7 @@
 # Spec: Platform Rules
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
+**Revision:** Revised after second independent review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for passwordless sign-in on better-auth (15 Nov 2026, [Identity](identity.md) §2): §2, §3, §5–§8, §10, §14, §16 and §17
 **Feature name:** Platform Rules (cross-cutting; not a user-facing feature)
 **Milestone:** Applies from M0 onward ([PLAN](../PLAN.md)). Each rule ships with the milestone of the first feature that needs it. · **Related:** PRD §10.2, §13, §18; TDD §2.1, §2.3, §3.5, §6.5, §7.5, §7.8, §8; [Permissions](permissions.md), [Notifications & Attention](notifications.md), [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md)
 
@@ -34,7 +34,7 @@ The rules every feature follows, so features behave consistently and no data is 
 | Anonymous poll votes | **Hashed voter key per poll.** No member ID is stored, so voters can't be recovered from exports or logs. |
 | External event invitations | **On by default**, capped at **50 external recipients per member per day**. Admins can turn them off. |
 | ICS-in subscriptions | **Personal only.** URLs encrypted and masked. |
-| Owners' sign-in | **Owners must keep a password** in addition to any passkeys |
+| Owners' sign-in | **Passwordless, like everyone** (passkeys, plus magic links when email is configured). Owners are asked for **two passkeys**; the `RECOVERY_TOKEN` secret is the fallback ([Identity](identity.md) §2, §4.6). Changed 15 Nov 2026 from "owners must keep a password". |
 | Admin self-access | Admins need an **owner** to add themselves to a group or grant themselves drive or folder access; audited ([Permissions](permissions.md) §6) |
 | Recovery links without email | Allowed for members, but **loudly flagged**: a notice on the member's sign-in page and a flag on the owners' member list |
 | Group or channel calendar purged | Each event **moves to its organiser's personal calendar**, so attendees keep it. Events whose organiser is deleted are deleted, and attendees get `event_cancel`. |
@@ -48,7 +48,7 @@ The rules every feature follows, so features behave consistently and no data is 
 
 | Feature | Disabled | Deleted |
 |---|---|---|
-| **Identity** | Sign-in refused. `session_epoch` bumped. All sockets closed with `4401`, including chat, documents, hub **and calls** (room registry kind `huddle`, so the member drops out of calls immediately: the HuddleRoom socket closes and their SFU tracks are closed). Anyone who **loses access to a call's context** (removed from the channel, document or event) is removed the same way, but with close code **`4403`**. Revocation uses the durable room registry plus the Worker-side fallback (§12). Shown under **Deactivated** in the directory. Handle kept. | Everything for *disabled*, then the [erase list](#31-personal-data-erase-list) runs. Handle released (held 30 days). Shown as "Former member". |
+| **Identity** | Sign-in refused. All their sessions revoked (better-auth session rows deleted). All sockets closed with `4401`, including chat, documents, hub **and calls** (room registry kind `huddle`, so the member drops out of calls immediately: the HuddleRoom socket closes and their SFU tracks are closed). Anyone who **loses access to a call's context** (removed from the channel, document or event) is removed the same way, but with close code **`4403`**. Revocation uses the durable room registry plus the Worker-side fallback (§12). Shown under **Deactivated** in the directory. Handle kept. | Everything for *disabled*, then the [erase list](#31-personal-data-erase-list) runs. Handle released (held 30 days). Shown as "Former member". |
 | **Chat** | DMs and group DMs are kept and marked **"deactivated"**. Sending to them is disabled **(default)**. Excluded from mention autocomplete and from `@here`. `@channel` and `@group` no longer notify them. Offline emails stop. If they were the **last channel admin**, the longest-standing remaining member is promoted (audited). | Messages stay, attributed to "Former member". Their `thread_follows`, `saved_items` and `sidebar_prefs` are erased. `@handle` text in plain-text copies and the search index is re-rendered as **"Former member"** **(default)**. |
 | **Calls** | Removed from any active call (above). Rings to them are **refused** ("*Name* is deactivated"). They can't host. Moderation of a call they hosted passes as set out in [Calls](calls.md) §6.7 (a present moderator; otherwise any participant in DM calls; otherwise the earliest remaining participant). | As disabled. Huddle participant rows, `call_notes.started_by` and transcript speakers (`call_transcript_segments.speaker_id`) show "Former member", like messages. Call notes and mention replies they triggered stay. |
 | **Calendar** | They **stay organiser** of their events **(default)**. An owner or admin can delete a **private** event they organised without seeing its details. Their reminders and emails stop. Invitations to them are refused. Hidden from find-a-time. **ICS-out feed tokens are revoked.** ICS-in refreshes pause. | **Events on their personal calendar:** an event with other attendees moves to the **first remaining attendee's** personal calendar (earliest to accept, otherwise earliest invited), and that attendee becomes organiser **(default)**. An event with no other attendees is deleted. **Events they organised on shared calendars:** the organiser becomes the first remaining editor of that calendar, or the calendar owner **(default)**. Private events among these can also be deleted by an owner or admin without seeing details. Standalone calendars they owned are **transferred to an admin**. ICS-in subscriptions and ICS-out feeds are **revoked**. `time_off` is **erased** (it holds sensitive types). `event_notes` and `event_reminders` are deleted. Attendee rows show "Former member". |
@@ -64,11 +64,11 @@ Deletion erases these in one idempotent purge job (TDD §2.3), audited:
 
 | Store | What is erased |
 |---|---|
-| `users` | email, password_hash, **handle** (cleared), avatar_key, phone, pronouns, job_title, team, location, status_emoji, status_text, status_expires_at, timezone (reset to `UTC`), working_hours, region, **`pending_security_notice`**. `display_name` becomes "Former member". `status` becomes `deleted`. |
+| `users` | email, email_verified, **handle** (cleared), avatar_key, phone, pronouns, job_title, team, location, status_emoji, status_text, status_expires_at, timezone (reset to `UTC`), working_hours, region, **`pending_security_notice`**. `display_name` becomes "Former member". `status` becomes `deleted`. |
 | R2 | Avatar object |
-| Auth | `passkeys`, `auth_tokens`, `sessions`, `ws_tickets`, `mfa_factors` |
+| Auth | `passkeys`, `auth_tokens`, `sessions`, `auth_accounts`, `auth_verifications` (pending magic links for their email), `ws_tickets`, `mfa_factors` |
 | Identity | `handles` row released (held 30 days). **`invitations.email`** on invitations sent to that person is redacted (replaced by a hash). |
-| Audit | **`audit_log.metadata`**: personal values (emails, names, handles) are replaced with the user ID and "Former member". Audit entries never store raw passwords or tokens in the first place. |
+| Audit | **`audit_log.metadata`**: personal values (emails, names, handles) are replaced with the user ID and "Former member". Audit entries never store raw tokens or secrets in the first place. |
 | Preferences | `user_preferences`, `notification_preferences`, `sidebar_prefs` |
 | Chat | `thread_follows`, `saved_items`; `@handle` text re-rendered as "Former member" in the D1 message copy, `search_index`, **and the ChatChannel DO's plain-text body** (a DO-side erase task run per channel the member posted in) |
 | Calendar | `time_off`, `event_notes`, `event_reminders`, `ics_feeds`, `ics_subscriptions` (and their cached events) |
@@ -153,6 +153,7 @@ This extends the PRD §10.2 table. Anything not listed follows the PRD.
 | Access requests | Decided requests 90 days after decision; pending ones expire after 30 days **(default)** | No | — |
 | `ws_tickets` | Deleted daily after expiry | No | — |
 | `auth_tokens` | Deleted 7 days after use or expiry | No | — |
+| `auth_verifications` (better-auth: magic-link tokens, WebAuthn challenges) | Deleted on use; expired rows deleted daily | No | — |
 | `pending_emails` | Deleted when sent or cancelled | No | — |
 | **Assistant conversations and memory** (Assistant DO) | `assistant_memory_retention_days` (365 **(default)**), or shorter if the member chose; applied by the DO's daily `retention_sweep`, which keeps running while the assistant is off. **Incognito** conversations: deleted at End or 24 hours after last activity **(default)**. Content whose source the member lost access to: deleted after 7 days hidden **(default)**. Undecided pending items: 30 days **(default)**. Finished, cancelled and expired pending actions: 24 hours ([Assistant](assistant.md) §4, §5.1, §13). | No | — |
 | `assistant_interactions` (metadata) | `assistant_interaction_retention_days` (30, PRD §10.2) | No | — |
@@ -193,10 +194,10 @@ This extends TDD §7.5.
 
 | Excluded | Reason |
 |---|---|
-| `sessions`, `auth_tokens`, `ws_tickets` | Credentials |
+| `sessions`, `auth_tokens`, `auth_accounts`, `auth_verifications`, `ws_tickets` | Credentials (better-auth's session tokens, magic-link tokens and challenges, and our own tokens) |
 | `pending_emails`, `notify_anyway_log`, `scheduled_triggers` | Transient operational state, rebuilt after restore |
 | `assistant_optins`, `assistant_source_refs` | Assistant operational state: opt-ins are re-chosen after a restore, and the source mirror is rebuilt from the members' Assistant DOs, which aren't restored either ([Assistant](assistant.md) §13) **(default)** |
-| `passkeys` | Bound to the domain (WebAuthn relying-party ID). Members **re-register** after restoring to a new domain. Owners can sign in with their required password (§2). |
+| `passkeys` | Bound to the domain (WebAuthn relying-party ID). After a restore everyone **registers a new passkey**: the restoring owner during the restore's setup step, members through a magic link (email configured) or an admin recovery link. The restore flow lists who needs a link. Whether to export public keys for same-domain restores is open ([Identity](identity.md) §11). |
 | `mfa_factors` | Encrypted with an installation key |
 | `ics_feeds` tokens | Credentials. Members create new feed URLs after a restore. |
 | ICS-in URLs | Secrets. Subscriptions are exported **without URLs** and need re-entry after a restore **(default)**. |
@@ -204,7 +205,7 @@ This extends TDD §7.5.
 | `file_derived_text`, assistant vectors | Rebuilt by back-fill, like `search_index` ([Assistant](assistant.md) §9) |
 | Assistant conversations and memory (Assistant DO) | Admins can't read them (Assistant §11). Members use the personal export ("Download my assistant data") **(default)**. Not part of a workspace restore. |
 | `personal_reminders` | Often come from private conversations. Personal export only **(default)** (Assistant §7.1). |
-| Setup, recovery and Worker secrets | Never exported. Password hashes are exported but are only usable with the same `PEPPER_*` secrets (§16), which the restore guide tells owners to carry over. |
+| Setup, recovery and Worker secrets | Never exported, including `BETTER_AUTH_SECRET` (§16). There are no password hashes to export (changed 15 Nov 2026), so a restore needs no secret carried over; it sets up new secrets and all sessions are invalid. |
 
 ## 7. Admin settings
 
@@ -214,7 +215,6 @@ The single list of workspace settings. Feature specs reference this table instea
 |---|---|---|---|---|
 | `allowed_invite_domains` | off (any domain) | Admin | `settings.invite_domains` | Identity §4.2 |
 | `magic_link_enabled` | on when email is configured | Admin | `settings.magic_link` | Identity §4.11 |
-| `min_password_length` | 10 (raise only) | Owner | `settings.password_policy` | Identity §4.11 |
 | `default_channels` | `#general` (**public channels only**) | Admin | `settings.default_channels` | Identity §4.3 |
 | `welcome_post_enabled` | on | Admin | `settings.welcome_post` | Identity §4.3 |
 | `general_read_only` | off | **Owner** | `settings.general_read_only` | Chat §3.1 |
@@ -267,11 +267,16 @@ Every limit names its **mechanism**:
 
 Exceeding a limit returns a typed `rate_limited` result with a retry-after value, never a thrown error (AGENTS §4.1).
 
+**Client IP:** every per-IP limit uses `cf-connecting-ip`, with IPv6 addresses grouped by /64. better-auth must be configured the same way (`advanced.ipAddress.ipAddressHeaders: ["cf-connecting-ip"]` plus `ipv6Subnet`), because its default IP detection was the subject of an advisory (TDD §8.1). better-auth's limiter keeps its counts in our storage (`rate_counters` or the binding) through custom storage with an atomic consume, never in memory.
+
+**Removed 15 Nov 2026:** the password sign-in limits (5 attempts per minute per IP, 10 per hour per account with progressive delays) and the M1a draft's slow mode, with its `sign_in_throttle`, `sign_in_failure_buckets` and `sign_in_slots` tables. There are no passwords to guess ([Identity](identity.md) §2).
+
 | Action | Limit | Mechanism | Source |
 |---|---|---|---|
-| Sign-in attempts, per IP | 5 per minute | binding | TDD §8.1 |
-| Sign-in attempts, per account | 10 per hour; attempts 1–5 immediate, then a progressive delay of 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s; no lockout | D1 counter | TDD §8.1, Identity §4.4 |
-| Magic-link and password-reset requests | 3 per 15 minutes per account; 20 per hour per IP **(default)** | D1 counter | Identity §4.4 |
+| Magic-link requests, per email | 3 per 15 minutes per email address, counted the same for unknown emails (keyed by an HMAC of the address) **(default)** | D1 counter, as better-auth limiter custom storage | Identity §4.4, TDD §8.1 |
+| Magic-link requests, per IP | 20 per hour per IP **(default)** | D1 counter, as better-auth limiter custom storage | Identity §4.4 |
+| Magic-link confirmation POSTs, per IP | 10 per minute **(default)** | binding | Identity §4.4 |
+| Passkey sign-in (options and verification), per IP | 20 per minute **(default)** | binding, checked in our middleware before better-auth | Identity §4.4 |
 | Setup, recovery, invitation acceptance | 5 per minute per IP | binding | TDD §8.1 |
 | Message sends | 10 per 10 seconds per user per conversation **(default)** | DO (ChatChannel) | Chat §20 |
 | `@channel` / `@here` | 1 per 5 minutes per user per channel **(default)** | DO (ChatChannel) | Chat §20 |
@@ -342,17 +347,18 @@ Workers can't reach private networks directly, so these checks are **defence in 
 
 **Rule:** every link that changes state opens a **confirmation page**, and the state changes only on a **POST** from that page. Mail scanners and link prefetchers (for example Outlook Safe Links) issue GETs, so they can't use up a token or answer an RSVP.
 
+**Magic links and better-auth** (15 Nov 2026). better-auth's magic-link plugin verifies with a GET (`/magic-link/verify`) and doesn't handle scanner prefetch, so its link is never emailed. The `sendMagicLink` callback emails a link to **our confirmation page** instead; the page's POST calls better-auth's verification on the server (`auth.api`), which signs in. better-auth's GET verify route isn't reachable from outside ([Identity](identity.md) §4.4, TDD §8.1).
+
 | Link | Token type | Valid for | Confirmation page |
 |---|---|---|---|
-| Magic link | Single-use | 15 minutes | "Sign in to *Workspace* as *email*" → Continue |
-| Password reset | Single-use | 1 hour | Set new password |
-| Recovery link (admin-issued) | Single-use | 24 hours | Set password or register passkey |
+| Magic link | Single-use (better-auth verification) | 15 minutes (`expiresIn: 900`, not better-auth's 300 s default) | "Sign in to *Workspace* as *email*" → Continue; the POST runs better-auth's verification on the server |
+| Recovery link (admin-issued) | Single-use | 24 hours | Register a new passkey |
 | Invitation | Single-use | 7 days | Accept form |
 | Email change confirmation | Single-use | 24 hours | Confirm |
 | **External RSVP** | **Per-attendee, reusable** | Until the event (or series) ends | Event summary with **Accept / Maybe / Decline** buttons. Response can be changed until the token expires. |
 | External opt-out | Per-recipient, reusable | Indefinite | "Stop invitations from *Workspace*" → Confirm **(default)** |
 
-Tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_token_hash`). Using a single-use token marks it used atomically.
+Our tokens are 32 random bytes, stored hashed (`auth_tokens`, `event_attendees.rsvp_token_hash`). Using a single-use token marks it used atomically. Magic-link tokens are generated and stored by better-auth in `auth_verifications` and deleted when used; whether the pinned version can store them hashed is checked in M1a ([Identity](identity.md) §11). Password-reset links are removed (15 Nov 2026).
 
 **External invitation email template** (fixed; no free-form HTML):
 - **From display name:** "*Name* via Officebox (*Workspace*)". The envelope sender is the workspace's configured email address.
@@ -509,14 +515,20 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | Table | Change | Final value | Source |
 |---|---|---|---|
 | `users.role` | Add value | `owner`, `admin`, `member`, `guest` (guest reserved; Phase 2) | Identity §2, PRD §10.1 |
-| `users` | Add columns | handle (denormalised copy of `handles`), avatar_key, timezone, working_hours, region, job_title, team, pronouns, phone, location, status_*, onboarded_at, tour_dismissed_at, `pending_security_notice` | Identity §5 |
-| `handles`, `passkeys`, `auth_tokens` | New tables | As Identity §5 (`handles` is authoritative) | Identity §5 |
+| `users` | Add columns | handle (denormalised copy of `handles`), avatar_key, timezone, working_hours, region, job_title, team, pronouns, phone, location, status_*, onboarded_at, tour_dismissed_at, `pending_security_notice`, **`email_verified`** (better-auth) | Identity §5 |
+| `users` | Remove (baseline, never created) | **`password_hash`** and **`session_epoch`** (15 Nov 2026: passwordless; revocation deletes sessions and closes sockets by session ID, TDD §3.5) | Identity §2, §4.5 |
+| `users`, `sessions` | better-auth mapping | better-auth's `user` and `session` models map onto these core tables with `modelName` and `fields` (`name` → `display_name`, `emailVerified` → `email_verified`, `image` → `avatar_key`, `userId` → `user_id`, …). `role`, `status`, `handle` and the profile columns are `additionalFields` with `input: false`. IDs are ULIDs (`advanced.database.generateId`). | Identity §5, TDD §2.1 |
+| `handles`, `passkeys`, `auth_tokens` | New tables | As Identity §5 (`handles` is authoritative). `passkeys` is better-auth's `passkey` model, mapped, plus our `verified_sign_count` and `last_used_at`. | Identity §5 |
+| `auth_accounts`, `auth_verifications` | New tables (better-auth) | better-auth's `account` and `verification` models, mapped to these names. `auth_accounts.password` is always NULL. better-auth's optional `rateLimit` table isn't created (`rate_counters` is the limiter storage). | Identity §5 |
+| better-auth tables | Migration rule | SQL from `npx auth generate`, edited to our names and checked in as expand-only feature migrations (`NNNN_identity_<change>.sql`, safe to re-run); runtime `getMigrations` is never used **(default)**. A better-auth upgrade that changes its schema gets a new reviewed migration, never an edit to a merged one. | Identity §5, TDD §6.5 |
+| better-auth date columns | Possible exception | If better-auth's D1 adapter can't store dates as epoch milliseconds, its own date columns (`sessions.expires_at`, `auth_verifications.expires_at`, `created_at` and `updated_at` on its tables) hold what the adapter writes, and this row records the exception to AGENTS §4.1. Checked in M1a. | Identity §11 |
 | `invitations.email` | Nullability | **NOT NULL** (copy-link invites always carry the email) | Identity §4.2 |
 | `invitations` | Add | `group_ids` | Identity §5 |
 | `groups`, `group_members` | Add | `groups.handle`; `group_members.role` (`manager`, `member`) | Identity §5 |
-| `sessions` | Add | `device_label`, `approx_location`, `previous_refresh_hash`, `rotated_at` (30-second refresh grace window) | Identity §4.5, §5 |
+| `sessions` | Add | `device_label`, `approx_location` (better-auth `additionalFields`). **Not created:** `refresh_token_hash`, `session_epoch`, `previous_refresh_hash`, `rotated_at`, `revoked_at` and the M1a draft's `retired_refresh_hashes` (15 Nov 2026: no refresh tokens) | Identity §4.5, §5 |
 | `users` | Add | `admin_reset_at`, `admin_reset_by`, `admin_reset_acknowledged_by` (no-email recovery flag) | Identity §4.6, §5 |
-| `auth_tokens.kind` | Values | `magic_link`, `password_reset`, `recovery`, `email_change`; plus a `payload` column (pending new email) | Identity §4.11, §5 |
+| `auth_tokens.kind` | Values | `recovery`, `email_change`, **`passkey_enrol`** (enrolment tickets); plus a `payload` column (pending new email). `magic_link` moves to better-auth's `auth_verifications`; `password_reset` is removed (15 Nov 2026). | Identity §4.4, §4.11, §5 |
+| `sign_in_throttle`, `sign_in_failure_buckets`, `sign_in_slots`, `users.password_version` | Dropped from the design (never on `main`) | Drafted in the M1a branch for password throttling and slow mode; not created, because there are no passwords (15 Nov 2026) | §8, Identity §2 |
 | `channels.type` | Add value | `public`, `private`, `dm`, **`group_dm`**. `dm_key` is required for `dm` and `group_dm`. Converting a group DM to a private channel clears `dm_key` and sets a name. | Chat §3.1 |
 | `channels` | Add | `topic`, `description`, `posting_policy`, **`config_version`** (`INTEGER NOT NULL DEFAULT 0`, bumped on every change pushed by `applyConfig`) | Chat §3.4, §15 |
 | `channel_members` | Add | `can_post`, `hidden` (no per-conversation email delay; the delay lives only in `user_preferences.email_delay`, Notifications §7) | Chat §15 |
@@ -593,18 +605,20 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
 
 | Secret | Purpose | Required | Rotation |
 |---|---|---|---|
-| `SESSION_SIGNING_KEY` | Signs access tokens (session cookie) | Yes | Rotating signs everyone out once access tokens expire (15 min); refresh tokens survive. Support a previous-key slot for overlap **(default)**. |
-| `TOKEN_HASH_KEY` | HMAC key for stored token hashes (`auth_tokens`, RSVP and opt-out tokens, `ws_tickets`) and email hashes | Yes | Rotation invalidates outstanding emailed links; schedule with care |
+| `BETTER_AUTH_SECRET` | better-auth's secret: signs the session cookie and signs or encrypts its other values. At least **32 characters**, random. Created by the deploy step if missing (TDD §6.1). | Yes (from M1) | Rotate through `BETTER_AUTH_SECRETS` (below), never by replacing the value outright, which signs everyone out and invalidates outstanding magic links. |
+| `BETTER_AUTH_SECRETS` | better-auth's rotation list: the new secret plus the previous ones, so values signed with an old secret still verify during the overlap (format per the pinned better-auth version) | No (rotation only) | Add the new secret, keep the old one for **30 days** (the session lifetime) **(default)**, then remove it and set `BETTER_AUTH_SECRET` to the new value |
+| `TOKEN_HASH_KEY` | HMAC key for our stored token hashes (`auth_tokens`, invitations, RSVP and opt-out tokens, `ws_tickets`), email hashes in rate-limit keys and audit metadata. Still needed: better-auth doesn't hold these tokens. Created by the deploy step if missing. | Yes | Rotation invalidates outstanding recovery, invitation, email-change and RSVP links; schedule with care |
 | `DATA_ENCRYPTION_KEY` | Encrypts ICS-in URLs (and MFA secrets later) | Yes (from M5c) | Re-encrypt on rotation (migration job) |
 | `POLL_SECRET_KEY` | Derives per-poll secrets for anonymous voter keys (alternatively, per-poll secrets are generated and stored in the channel DO) **(default: derive)** | Yes (from M3b) | Never rotated for existing polls; rotating changes keys only for new polls |
 | `SETUP_TOKEN` | First-run setup | Optional (generated if absent) | Ignored after setup; delete it |
-| `RECOVERY_TOKEN` | Owner recovery | Optional | Set only during recovery, then delete |
+| `RECOVERY_TOKEN` | Owner recovery: lets one owner register a new passkey, once ([Identity](identity.md) §4.6) | Optional | Set only during recovery, then delete |
 | Email provider key(s), SMTP credentials | Outgoing email when not using the default Cloudflare Email Service binding, which needs no secret | Optional | Rotate at the provider |
 | `REALTIME_APP_ID`, `REALTIME_APP_SECRET` | Realtime SFU for calls | Optional (calls) | Rotate in the Cloudflare dashboard |
 | `TURN_KEY_ID`, `TURN_KEY_API_TOKEN` | TURN credentials | Optional | Rotate in the dashboard |
 | `ANALYTICS_API_TOKEN` | Read-only usage panel | Optional | Rotate in the dashboard |
-| `PEPPER_1`, `PEPPER_2`, … | HMAC pepper applied to passwords before PBKDF2; the number is the `pepperId` in `pbkdf2-sha256-hmac$<pepperId>$…` (Identity §4.4). Each at least **32 random bytes**. | Yes (from M1); at least one | Add `PEPPER_<n+1>` and hash new passwords with it; re-hash at next sign-in; after a published deadline, accounts still on a retired pepper must reset; delete the old secret only after that deadline. **Restoring an export to another installation needs the same `PEPPER_*` secrets**, or every password must be reset. |
 | AI Gateway authentication token | Sent as `cf-aig-authorization` when the configured AI Gateway requires authentication (TDD §5.1) | Optional (assistant, authenticated gateway only) **(default)** | Rotate in the dashboard |
+
+**Removed 15 Nov 2026:** `SESSION_SIGNING_KEY` (and the M1a draft's `SESSION_SIGNING_KEY_PREVIOUS`), because better-auth signs the session cookie with `BETTER_AUTH_SECRET`; and `PEPPER_1`, `PEPPER_2`, …, because there are no passwords. The deploy step no longer creates either.
 
 **The assistant adds no other secrets** ([Assistant](assistant.md) §10.1, §11). Workers AI and Vectorize are bindings. BYOK provider keys live only in AI Gateway's Secrets Store (TDD §5.1), never in Worker secrets, D1, logs or client code. `assistant_gateway_id` is a setting (§7), not a secret.
 
@@ -621,9 +635,9 @@ Every Worker secret. Secrets are never stored in D1, logged or exported (TDD §8
   - a deleted whiteboard's embeds show "deleted"
   - purging a channel, event or document deletes its call notes, transcripts and their vectors; purging a file deletes its `file_derived_text` and vectors; each deleting pipeline enqueues `assistant-purge` for members whose memory cites the object, including disabled members.
 - **Retention:** document and event in-call chat survives the 365-day huddle purge. External attendee emails are gone 90 days after the event ends.
-- **Export:** an export contains file versions, calendars, time off and hashed poll votes. It contains no sessions, auth tokens, passkeys, ICS feed tokens or ICS-in URLs. A restore into a new domain requires passkey re-registration and works with owner passwords.
+- **Export:** an export contains file versions, calendars, time off and hashed poll votes. It contains no sessions, auth tokens, better-auth accounts or verifications, passkeys, Worker secrets, ICS feed tokens or ICS-in URLs. After a restore the restoring owner registers a passkey during the restore's setup step, and everyone else gets in with a magic link or an admin recovery link.
 - **Admin settings:** every key in §7 is enforced, changeable only by the listed role, and writes its audit event.
-- **Rate limits:** each limit in §8 returns `rate_limited` with retry-after at the threshold, using its stated mechanism. The 51st external recipient in a day is refused. Sign-in attempts 1–5 are immediate; the 6th onwards are delayed 1 s, 2 s, 4 s, 8 s, 16 s, capped at 30 s.
+- **Rate limits:** each limit in §8 returns `rate_limited` with retry-after at the threshold, using its stated mechanism. The 51st external recipient in a day is refused. The 4th magic-link request for one email within 15 minutes is refused, for unknown emails too. better-auth's limiter reads the client IP from `cf-connecting-ip`, so a forged `X-Forwarded-For` doesn't change the key.
 - **Outbound fetching:** preview and ICS fetches to IP-literal hosts `127.0.0.1`, `10.0.0.0/8`, `169.254.169.254`, `[::1]`, `fc00::/7`, `[::ffff:127.0.0.1]`, `2130706433` and `0177.0.0.1`, and redirects to them, are refused. Non-443 ports and `http://` URLs are refused. Responses over the byte cap are aborted. (DNS-rebinding protection is best-effort and not part of the pass criteria.)
 - **Email links:** a GET to any email link changes nothing (scanner-safe); only the confirmation POST does. An RSVP token works repeatedly until the event ends. Opted-out addresses can't be invited.
 - **Timers:**

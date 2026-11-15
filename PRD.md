@@ -1,8 +1,9 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.6  
+**Version:** 1.7  
 **Date:** 15 November 2026  
+**Changes in 1.7:** sign-in is **passwordless**: passkeys and magic links only, with no passwords, password resets or password policy, built on the **better-auth** library (MIT). Owners are asked for two passkeys and keep the recovery secret as a fallback (product-owner decisions, 15 Nov 2026; §6, §7, §10.1, §10.2, §13, §15, §16, Appendix A; detail in [specs/identity.md](specs/identity.md)).
 **Changes in 1.6:** the [assistant spec](specs/assistant.md) is adopted. Personal memory moves from deferred into the first AI release. New or changed: the assistant's display name, audience-safe mentions, voice, call notes and captions, AI Gateway logging off, indexing only while the assistant is enabled, the privacy scope, personal reminders, and assistant retention and export rules. Tasks and issues stay with projects. Phase 3 maps to PLAN M9 (§2, §4, §5.3, §5.8, §5.9, §10.2, §11, §13, §14, §15, §18, Appendix A).  
 **Changes in 1.5:** second independent review decisions: admin self-access to groups and drives needs an owner; recovery links issued without email are flagged on the sign-in page and to every owner; first-release setup creates identity objects only, with other objects arriving with their milestones; editors moderate comments; viewers can start document calls; admins moderate private channels they belong to; orphaned private events can be removed by owners and admins; one Trash restore rule; calendar purge moves events to organisers; time off has no Trash (§5.3, §5.8, §6, §8, §10.1, §10.2, §18).  
 **Changes in 1.4:** Feature specs ([identity](specs/identity.md), [chat](specs/chat.md), [calls](specs/calls.md), [calendar](specs/calendar.md), [documents](specs/documents.md)) and cross-cutting specs ([permissions](specs/permissions.md), [notifications](specs/notifications.md), [platform rules](specs/platform.md)) adopted. Calendar becomes a first-class feature (§5.10). Decisions from the spec interviews and the independent review are folded in: identity (§6), chat (§5.4), documents and files (§5.5, §5.7), calls (§5.8), notifications (§8), permissions (§10.1), retention (§10.2), export (§13), phases (§15) and limits (§18). **Where this PRD and a spec differ on feature detail, the spec wins.**  
@@ -443,10 +444,11 @@ Initial product direction:
 
 First-release sign-in and security (detail in [specs/identity.md](specs/identity.md)):
 
-- **Email and password, magic links by email, and passkeys.** Members may be passkey-only; **owners must keep a password**. Passkeys are tied to the workspace's domain (§13).
+- **Passwordless: passkeys and magic links by email only.** There are no passwords. Every account signs in with a passkey, or with a magic link when email is configured. Owners are asked to register **two passkeys** (for example a laptop and a phone). Passkeys are tied to the workspace's domain (§13).
+- Built on **better-auth**, an MIT-licensed authentication library, pinned to exact versions and upgraded only after reviewing its security advisories.
 - Secure browser sessions: 30 days, sliding. Members can see their devices and sign them out ("My devices" doubles as login-activity visibility).
 - **Scanner-safe email links:** magic-link, reset, recovery, invitation and email-change links open a confirmation page, and only a deliberate click uses them. Mail scanners can't use them up.
-- Password reset when email is configured. Email changes are confirmed through the new address.
+- A lost passkey is replaced by signing in with a magic link (when email is configured) or with an admin's recovery link. Email changes are confirmed through the new address.
 - **Admin powers are limited:**
   - Admins can disable, delete, change the email of, or issue a **recovery link** to *members*.
   - Doing any of those to admins or owners needs an owner.
@@ -461,8 +463,8 @@ First-release sign-in and security (detail in [specs/identity.md](specs/identity
 
 Further identity capabilities:
 
-- **SSO through Cloudflare Access (Phase 2):** customers can put their workspace behind Cloudflare Access, which is free for small teams. Officebox then signs members in with the company's identity provider, such as Google Workspace, Microsoft Entra, Okta or GitHub. This gives single sign-on and identity-provider MFA without Officebox implementing OIDC. Only existing or invited members can sign in this way. Owners can turn off local passwords for members.
-- **Owner recovery:** if every owner is locked out (password and MFA lost, and no email configured), someone with access to the Cloudflare account can set a one-time recovery secret. The secret allows resetting one owner's password and MFA. Recovery is audited, and a banner shows until the secret is removed.
+- **SSO through Cloudflare Access (Phase 2):** customers can put their workspace behind Cloudflare Access, which is free for small teams. Officebox then signs members in with the company's identity provider, such as Google Workspace, Microsoft Entra, Okta or GitHub. This gives single sign-on and identity-provider MFA without Officebox implementing OIDC. Only existing or invited members can sign in this way.
+- **Owner recovery:** if every owner is locked out (passkeys lost, and no email configured), someone with access to the Cloudflare account can set a one-time recovery secret. The secret lets one owner register a new passkey (and resets their MFA, once MFA exists). Recovery is audited, and a banner shows until the secret is removed.
 - **Disabled members:** their content stays, and so does their ownership. Their open issue assignments are flagged for reassignment. **Deleting** a member transfers their My files to an admin and erases their personal data. What happens per feature is set out in [platform §3](specs/platform.md).
 - **Device data:** signing out clears cached workspace data from the device. Revoking a session clears it the next time that device connects.
 
@@ -471,7 +473,7 @@ Further identity capabilities:
 Officebox does not operate a mail server. Outgoing email uses **Cloudflare Email Service** by default, when the workspace's domain is on Cloudflare DNS. An external email API provider or SMTP relay can be configured instead (TDD §7.6). Likely uses:
 
 - Invitations.
-- Password resets.
+- Magic sign-in links.
 - Email verification.
 - Optional notifications.
 - Important system/security notices.
@@ -546,7 +548,7 @@ All object relationships, previews, inbox aggregations, search results and AI re
 
 | Role | Can |
 |---|---|
-| Owner | Everything an admin can, plus invite, promote and manage admins and owners, transfer ownership, and see installation, upgrade, backup and export settings. Owners must keep a password. At least one active owner must always exist. |
+| Owner | Everything an admin can, plus invite, promote and manage admins and owners, transfer ownership, and see installation, upgrade, backup and export settings. Owners are asked to keep two passkeys. At least one active owner must always exist. |
 | Admin | Invite members; disable, delete, change the email of, or issue recovery links to *members* (acting on admins or owners needs an owner, and the person is always notified); manage groups (adding **themselves** to a group or drive needs an owner); configure workspace settings; archive or delete any channel or object (without reading private content); delete messages in public channels and in private channels they're a member of; view the audit log. |
 | Member | Use the workspace; create public and private channels, documents, whiteboards and files; share what they own. |
 
@@ -615,7 +617,7 @@ These rules are the baseline for the Phase 1 schema. Full detail per object, inc
 | Document revisions | Same as the parent document | Purged with the parent. |
 | Files | Kept until deleted | Moved to Trash for 30 days, then the R2 object and its metadata are purged. Files attached to a deleted message are purged with it. |
 | Inbox items | 90 days after being completed or dismissed | Purged automatically. Underlying objects are unaffected. |
-| User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, password, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents passes to an admin. |
+| User accounts | Disabled accounts are kept indefinitely | **Disable** (the default) blocks sign-in and keeps everything. **Delete** removes personal data (email, passkeys, MFA, sessions, preferences) and shows the person as "Former member". Content they authored belongs to the workspace and stays. Ownership of their documents passes to an admin. |
 | Audit log | 365 days, configurable | Purged automatically. It never stores message or document content. |
 | AI interaction logs (Phase 3) | 30 days, configurable by an owner (`assistant_interaction_retention_days`) | Metadata only, never prompts or replies. Purged automatically. |
 | Assistant memory (conversations and remembered items) | 365 days **(default)**, set by an owner (`assistant_memory_retention_days`). Members can shorten it for themselves. | Private to the member. Members can delete one item, a conversation or everything. Content derived from a deleted source is purged; content whose source the member can no longer open is hidden at once and deleted after 7 days **(default)**. Erased when the member is deleted. |
@@ -700,7 +702,7 @@ The primary deployment mechanism is the Deploy to Cloudflare button. It copies t
 
 During deployment the customer can set a setup token secret. If they skip it, the application generates a one-time token and writes it to the Worker's logs, which only the Cloudflare account can see. The first visit to the workspace asks for this token before the owner account can be created.
 
-**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later signs everyone out, push must be re-enabled, and passkeys stop working: passkey-only members recover through an admin recovery link. Officebox warns when a passkey is registered on a `workers.dev` address.
+**Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later signs everyone out, push must be re-enabled, and passkeys stop working: everyone signs in again with a magic link (when email is configured) or an admin recovery link, and registers a new passkey. Officebox warns when a passkey is registered on a `workers.dev` address.
 
 **Data location.** D1 keeps its primary copy in one location, chosen at deployment with a location hint. Durable Objects are created near their first user. Performance targets assume members are in the same broad region as the data; members elsewhere see higher latency. An **EU data-residency option** (Phase 2) keeps D1, R2 and Durable Objects in Cloudflare's EU jurisdiction wherever each service supports it.
 
@@ -823,7 +825,7 @@ Delivered in the milestones in [PLAN.md](PLAN.md): foundation → identity → r
 - Trash, purge and the retention rules in §10.2.
 - Member invitations and basic administration.
 - React application shell and responsive experience.
-- Sign-in with password, magic links and passkeys; profiles, @handles, groups and group managers (§6).
+- Passwordless sign-in with passkeys and magic links; profiles, @handles, groups and group managers (§6).
 - Notifications, levels, do-not-disturb and offline email (§8).
 - Chat: channels, announcement channels, DMs and group DMs, threads, pins, saved items, polls and link previews (§5.4).
 - Durable message history in channel Durable Objects, with a D1 copy for search.
@@ -914,7 +916,7 @@ Before Phase 1 exit, validate at minimum:
 - A member without access cannot read a private channel, DM or restricted document through any route: the API, WebSocket, search, previews or links.
 - The permission engine passes the matrix test across every role and object type in [specs/permissions.md](specs/permissions.md). Admins can't act on admins or owners without an owner.
 - Disabling or deleting a member behaves as the lifecycle matrix in [platform §3](specs/platform.md) says, including dropping them from open calls, documents and channels.
-- Email links (magic link, reset, recovery, invitation, RSVP) survive being opened by a mail scanner without being used up.
+- Email links (magic link, recovery, invitation, RSVP) survive being opened by a mail scanner without being used up.
 - Storage warnings and protective mode behave safely as D1 approaches its limit, and trimming the searchable message copy frees space without losing messages.
 - Durable Object WebSocket hibernation keeps idle channels connected without accruing billable duration.
 - Durable Object Yjs sync supports a stock Yjs client and persists document state across object eviction.
@@ -995,7 +997,8 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | Media | Cloudflare Realtime SFU (SFU + TURN) | Agreed |
 | File storage | R2 | Agreed |
 | AI | Workers AI by default; BYOK via AI Gateway optional, per model role | Agreed ([assistant](specs/assistant.md)) |
-| Authentication | Built-in local accounts: password, magic link and passkeys at launch; owners keep a password; TOTP after launch | Agreed |
+| Authentication | Built-in local accounts, **passwordless**: passkeys and magic links only, no passwords; owners asked for two passkeys, with the recovery secret as fallback; TOTP after launch | Agreed (revised 15 Nov 2026) |
+| Authentication library | **better-auth** (MIT) for sessions, magic links and passkeys; exact version pins and an advisory review on every upgrade | Agreed (15 Nov 2026) |
 | First-run setup | Protected by a one-time setup token; disabled after use | Agreed |
 | Role model | Owner/admin/member workspace roles; channel, drive and calendar roles; union inheritance; admins cannot read or join private content; only owners act on admins and owners | Agreed ([permissions](specs/permissions.md)) |
 | Retention and deletion | Kept until deleted; 30-day Trash; immediate message deletion; documented 30-day platform recovery window | Baseline |

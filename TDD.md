@@ -1,9 +1,16 @@
 # Officebox — Technical Design Document (TDD)
 
 **Status:** Draft for engineering review  
-**Version:** 1.6  
+**Version:** 1.7  
 **Date:** 15 November 2026  
 **Companion to:** [Officebox PRD v1.5](PRD.md) and the feature and cross-cutting specs in [`specs/`](specs/)  
+**Changes in 1.7:** passwordless sign-in on **better-auth** (product-owner decision, 15 Nov 2026; [Identity](specs/identity.md) §2):
+- passkeys and magic links only; passwords, password reset, peppers and PBKDF2 removed (§3.1, §8.1)
+- better-auth (MIT) for sessions, magic links and passkeys on D1, its configuration, and the advisory policy (§8.1)
+- database sessions with the cookie cache off; no refresh tokens or `session_epoch`; revocation closes sockets by session (§2.1, §3.1, §3.5)
+- setup registers the owner's passkey (§6.8); `BETTER_AUTH_SECRET` replaces `SESSION_SIGNING_KEY` and `PEPPER_*` (§6.1)
+- CSRF alongside better-auth's origin check (§8.2); export exclusions (§7.5); tests (§9.1); decisions, with the PBKDF2 spike result kept for the record (§10).
+
 **Changes in 1.6:** brought in line with the [Assistant spec](specs/assistant.md) (§17 there):
 - assistant tables, reserved `system` and `assistant` user rows, purge jobs and the `assistant-purge` fan-out (§2.1, §2.3)
 - ReminderScheduler kinds, the room-registry kind `assistant` and the `/ws/assistant` socket (§2.2, §3.1, §3.5)
@@ -203,10 +210,9 @@ CREATE TABLE users (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE COLLATE NOCASE,  -- NULL only once deleted
   display_name TEXT NOT NULL,
-  password_hash TEXT,                -- NULL once deleted (and for future SSO-only accounts)
+  email_verified INTEGER NOT NULL DEFAULT 0,  -- better-auth's emailVerified
   role TEXT NOT NULL DEFAULT 'member',  -- owner | admin | member | guest (guest reserved for Phase 2; Zod)
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'deleted', 'system')),
-  session_epoch INTEGER NOT NULL DEFAULT 0,  -- increment to invalidate every session
   pending_security_notice TEXT,      -- shown on the sign-in page (Identity §4.6)
   admin_reset_at INTEGER,            -- no-email recovery flag shown to owners (Identity §4.6)
   admin_reset_by TEXT,
@@ -216,13 +222,18 @@ CREATE TABLE users (
   deleted_at INTEGER,
   CHECK (status IN ('deleted', 'system') OR email IS NOT NULL)
 );
--- Reserved rows: id 'system' and id 'assistant', status 'system', no email or password (default).
+-- No password_hash and no session_epoch: sign-in is passwordless, and revocation deletes sessions (§3.5, §8.1).
+-- better-auth's `user` model maps onto this table (Identity §5): name -> display_name,
+-- emailVerified -> email_verified, image -> avatar_key; role, status, handle and profile columns are
+-- additionalFields with input: false. IDs are ULIDs (advanced.database.generateId).
+-- Reserved rows: id 'system' and id 'assistant', status 'system', no email (default).
 -- They exist so messages.sender_id can reference them (Chat §4.6, Assistant §14.2). They are not
 -- members: excluded from the directory, seat counts, sign-in and the permission engine (§2.1
 -- "Permission resolution", step 1). The baseline migration inserts both with INSERT OR IGNORE.
 -- Profile columns, `handle` (copy of the authoritative `handles` table) and the
--- `handles`, `passkeys` and `auth_tokens` tables are defined in Identity §5.
--- `auth_tokens.kind`: magic_link | password_reset | recovery | email_change (Zod), with a `payload` column.
+-- `handles`, `passkeys`, `auth_accounts`, `auth_verifications` and `auth_tokens` tables are defined in Identity §5.
+-- `auth_tokens.kind`: recovery | email_change | passkey_enrol (Zod), with a `payload` column.
+-- Magic-link tokens live in better-auth's `auth_verifications`.
 
 CREATE TABLE invitations (
   id TEXT PRIMARY KEY,
@@ -237,21 +248,20 @@ CREATE TABLE invitations (
   created_at INTEGER NOT NULL
 );
 
-CREATE TABLE sessions (
+CREATE TABLE sessions (             -- better-auth `session` model, mapped (Identity §5)
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  refresh_token_hash TEXT NOT NULL UNIQUE,
-  session_epoch INTEGER NOT NULL,    -- must equal users.session_epoch to stay valid
-  previous_refresh_hash TEXT,        -- 30-second grace window after rotation (§8.1)
-  rotated_at INTEGER,
+  token TEXT NOT NULL UNIQUE,        -- better-auth session token; the cookie carries it signed with BETTER_AUTH_SECRET
+  ip_address TEXT,
   user_agent TEXT,
-  device_label TEXT,
+  device_label TEXT,                 -- additionalFields, set in databaseHooks.session.create.before
   approx_location TEXT,
   created_at INTEGER NOT NULL,
-  last_seen_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  revoked_at INTEGER
+  updated_at INTEGER NOT NULL,       -- last refresh of the sliding expiry ("last seen", at most a day old)
+  expires_at INTEGER NOT NULL
 );
+-- No refresh token, epoch or revoked_at: revoking a session deletes its row (§3.5, §8.1).
+-- Exact columns follow the generated SQL of the pinned better-auth version.
 CREATE INDEX sessions_user ON sessions(user_id);
 
 CREATE TABLE ws_tickets (            -- one-time WebSocket connect tickets (§3.1)
@@ -543,7 +553,7 @@ CREATE INDEX embedding_jobs_source ON embedding_jobs(source_type, source_id);
 
 | Area | Change | Defined in |
 |---|---|---|
-| Identity | `users` profile columns, `handle` (copy of the authoritative `handles` table), `pending_security_notice` and the `admin_reset_*` flag; new `handles`, `passkeys`, `auth_tokens` (kinds `magic_link`, `password_reset`, `recovery`, `email_change`, plus `payload`); `invitations.group_ids`; `groups.handle`; `group_members.role` (manager, member); `sessions.device_label` / `approx_location` / `previous_refresh_hash` / `rotated_at` | Identity §5 |
+| Identity | `users` profile columns, `handle` (copy of the authoritative `handles` table), `pending_security_notice`, the `admin_reset_*` flag and `email_verified`; no `password_hash` or `session_epoch`; new `handles`, `passkeys` (better-auth's model plus `verified_sign_count`), better-auth's `auth_accounts` and `auth_verifications`, and `auth_tokens` (kinds `recovery`, `email_change`, `passkey_enrol`, plus `payload`); `invitations.group_ids`; `groups.handle`; `group_members.role` (manager, member); `sessions.device_label` / `approx_location` | Identity §5 |
 | Chat | `channels.topic` / `description` / `posting_policy` / `config_version`; `channel_members.can_post` / `hidden` (no per-conversation email delay); message copy columns `kind` (`user`, `call_chat` or a Chat §4.6 system kind), `format`, `system_payload`, `reply_count`, `also_in_channel`, `forwarded_from`, `previews` (`body` stays the plain-text copy); new `thread_follows`, `saved_items` (`in_progress` / `done`), `sidebar_prefs`, `link_previews`, `message_previews` | Chat §15 |
 | Permissions | `resource_grants` value lists; `general_access` values including `workspace_freebusy` (calendars only); `access_requests` with `expires_at` and a unique pending request per requester and object | Permissions §9 |
 | Documents | `drives`, `file_versions`, `stars`, `recent_items`, `comment_threads`, `comments`, `item_activity`; `folders.drive_id` / `channel_id`; `documents.folder_id` / `drive_id` / `created_by`; `files.drive_id` / `current_version` / `copied_from_file_id` | Documents §9 |
@@ -860,34 +870,33 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 
 ### 3.1 Connection lifecycle and authentication
 
-1. The client signs in with `POST /auth/password`, a magic link or a passkey (below). The Worker sets two cookies, both `HttpOnly`, `Secure` and `SameSite=Lax`:
-   - `ob_session`: a short-lived (15-minute) signed access token carrying user ID, session ID and `session_epoch`.
-   - `ob_refresh`: a 30-day rotating refresh token, scoped to `/auth/refresh` and stored hashed in `sessions`.
+1. The client signs in with a passkey or a magic link (below), through **better-auth** (§8.1). better-auth sets one **session cookie** (`HttpOnly`, `Secure`, `SameSite=Lax`, with an Officebox cookie prefix) holding its session token, signed with `BETTER_AUTH_SECRET`. The session row lives in `sessions` (§2.1): 30 days, sliding (`expiresIn` 30 days, `updateAge` 1 day). There are **no access or refresh tokens**.
 
-   JavaScript can't read either token, and neither ever appears in a URL.
+   JavaScript can't read the token, and it never appears in a URL.
 2. The client opens WebSockets to `/ws/hub`, `/ws/channels/:id`, `/ws/docs/:id`, `/ws/calls/:id` (after `POST /calls/:id/join`, §3.6) or, from M9, `/ws/assistant` (always the member's own Assistant DO, §5.5). Browsers send same-origin cookies with the upgrade request.
-3. The Worker validates the cookie and checks the `Origin` header against the installation's origin, which blocks cross-site WebSocket hijacking. It then resolves the user's role for the target and forwards the request to the Durable Object.
+3. The Worker validates the cookie with better-auth (`auth.api.getSession`, which reads the session row because the cookie cache is off) and checks that the user is `active`. It checks the `Origin` header against the installation's origin, which blocks cross-site WebSocket hijacking. It then resolves the user's role for the target and forwards the request to the Durable Object.
 4. The DO accepts the socket with `ctx.acceptWebSocket(server)` and stores the user ID, session ID, role and connection ID with `serializeAttachment`.
-5. Sockets deliberately outlive the 15-minute token. Revocation closes them (§3.5), not token expiry. The client refreshes the access cookie in the background so reconnects succeed.
+5. Sockets live until they close or are revoked (§3.5); the session's sliding expiry doesn't close them. Revoking a session deletes its row and closes every socket whose attachment carries that session ID.
 6. **Clients that can't send cookies** (a stock Yjs client, future native apps) use a one-time connect ticket:
    - The client calls `POST /auth/ws-ticket` while authenticated.
    - The ticket is single-use, valid for 30 seconds and bound to one target. It is passed as `?ticket=` and stored hashed in `ws_tickets`.
    - A logged URL therefore never leaks a reusable credential.
 7. When the DO wakes from hibernation, the constructor runs and state is restored from the attachments.
 
-**Sign-in methods** (Identity §4.4):
-- **Password:** `POST /auth/password`.
-- **Magic link:** single-use and valid for 15 minutes, on any device.
-- **Passkeys:** WebAuthn with **discoverable credentials**.
+**Sign-in methods** (Identity §4.4). **Passwordless:** there are no passwords, password resets or peppers (product-owner decision, 15 Nov 2026).
+- **Passkeys** (better-auth `@better-auth/passkey`, SimpleWebAuthn underneath): WebAuthn with **discoverable credentials**.
   - User verification is **"preferred"**.
-  - `sign_count` is checked, and a backwards count is rejected as a possible clone.
-  - Credentials are bound to the **relying-party ID (the domain)**: a domain change or a restore to a new domain leaves passkeys unusable. Registering on `*.workers.dev` warns about this.
-- **Owners must keep a password**; members may be passkey-only.
-- The WebAuthn library choice needs a spike before M1 (§10).
+  - Our after hook checks the counter: at or below our stored `verified_sign_count` (not both 0) is refused as `clone_detected`, with a compare-and-set update (§8.1).
+  - Credentials are bound to the **relying-party ID**, which is the request's host (§8.1): a domain change or a restore to a new domain leaves passkeys unusable. Registering on `*.workers.dev` warns about this.
+  - The first passkey after setup, invitation acceptance or recovery is registered with an **enrolment ticket** instead of a session (`registration.requireSession: false`, `resolveUser`).
+- **Magic link** (better-auth `magicLink` plugin): single-use and valid for 15 minutes, on any device; never creates an account (`disableSignUp`). Scanner-safe through our confirmation page (below).
+- Every account is passkey-only, plus magic links when email is configured. Owners are asked for two passkeys; `RECOVERY_TOKEN` is the fallback (§8.1).
 
-**Other identity endpoints** (Identity §6): `POST /setup` takes a `handle` with the owner's details; `GET /me` returns the signed-in member; `POST /auth/ws-ticket` issues connect tickets (above). Email change uses an `email_change` token (pending address in `auth_tokens.payload`) with a GET confirmation page and a POST that applies it; the old address is notified and other pending tokens are revoked.
+**better-auth routes** are mounted at `/api/auth/*` and handed to `auth.handler(c.req.raw)`. Only an allowlist is reachable from outside: get-session, sign-out, the magic-link request, and passkey sign-in and registration. Everything else answers 404, and our routes call the rest on the server through `auth.api` (Identity §6). Our own routes under that prefix (`/api/auth/ws-ticket`, `/api/auth/recover/:token`) are registered first.
 
-**Email links are scanner-safe** (Platform §10). Magic-link, password-reset, recovery, invitation, email-confirmation and RSVP links open a **confirmation page**. Only a **POST** from that page uses the token, so mail scanners and link prefetchers can't use it up. Tokens live in `auth_tokens`, hashed. RSVP tokens are per attendee and reusable until the event ends.
+**Other identity endpoints** (Identity §6): `POST /setup` takes a `handle` with the owner's details and returns an enrolment ticket for the owner's passkey; `GET /me` returns the signed-in member; `POST /auth/ws-ticket` issues connect tickets (above); "My devices" wraps better-auth's list and revoke and never returns session tokens. Email change uses an `email_change` token (pending address in `auth_tokens.payload`) with a GET confirmation page and a POST that applies it; the old address is notified and other pending tokens and magic links are revoked. better-auth's own change-email route isn't exposed.
+
+**Email links are scanner-safe** (Platform §10). Magic-link, recovery, invitation, email-confirmation and RSVP links open a **confirmation page**. Only a **POST** from that page uses the token, so mail scanners and link prefetchers can't use it up. Our tokens live in `auth_tokens`, hashed. RSVP tokens are per attendee and reusable until the event ends. **Magic links:** better-auth verifies with a GET, so its link is never sent. `sendMagicLink({ email, token, url })` emails a link to our confirmation page with the token; the page's POST (`POST /api/sign-in/link`) calls `auth.api` magic-link verification on the server and returns better-auth's session cookie. better-auth's GET verify route isn't reachable from outside.
 
 ### 3.2 Hibernation
 
@@ -1008,7 +1017,9 @@ Tabs of the same browser elect a leader with `BroadcastChannel` and share one hu
 
 Losing assistant access (removal from `assistant_access`) closes `/ws/assistant` sockets with `4403`; disabling closes them with `4401` (Assistant §10.1, §13).
 
-To find every affected DO, each ChatChannel, DocRoom, BoardRoom, HuddleRoom and Assistant DO registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, call contexts, and the member's own Assistant DO, which is always included for a user-wide revocation or loss of assistant access) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and refresh is refused, a disabled user loses all realtime access within seconds.
+To find every affected DO, each ChatChannel, DocRoom, BoardRoom, HuddleRoom and Assistant DO registers a new connection with the user's UserHub (`registerRoom(kind, roomId, connectionId)`), and reports its close. The registry is **stored in UserHub SQLite and never pruned by age** while the socket lives; a daily sweep asks each room whether the connection still exists. A **Worker-side fallback** recomputes affected rooms from D1 (channel membership, grants, call contexts, and the member's own Assistant DO, which is always included for a user-wide revocation or loss of assistant access) and calls `closeConnections` directly, so revocation works even if the registry is incomplete (Platform §12). For a user-wide revocation, the UserHub closes its own sockets and calls `closeConnections` on every registered room. Each DO closes matching sockets with application close code `4401` (session revoked) or `4403` (access removed). The client re-authenticates or leaves the view. Because a session's hub socket is closed and its session row is deleted, a disabled user loses all realtime access within seconds.
+
+**Session revocation and better-auth** (Identity §4.5). `closeConnections(userId, reason, scope)` takes a scope of one **session ID** (sockets carry it in their attachment) or the whole user, so no `session_epoch` is needed. better-auth deletes session rows; we trigger the socket close from one helper, called by better-auth **after hooks** on its sign-out route (and a session-delete database hook where the pinned version has one) and directly by our routes that revoke through `auth.api`: My devices, sign out everywhere, admin sign-out, disable, recovery and owner recovery.
 
 
 ### 3.6 Calls (huddles): audio, video and screen sharing
@@ -1343,7 +1354,9 @@ The Deploy to Cloudflare button copies the repository into the customer's GitHub
 node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangler deploy
 ```
 
-**Secrets** (complete inventory with purpose, required/optional and rotation in [Platform](specs/platform.md) §16): `SESSION_SIGNING_KEY` (access tokens), `TOKEN_HASH_KEY` (HMAC for stored token hashes), `DATA_ENCRYPTION_KEY` (ICS-in URLs; MFA secrets later), `POLL_SECRET_KEY` (or per-poll secrets in the DO), `SETUP_TOKEN`, `RECOVERY_TOKEN`, email provider keys, `REALTIME_APP_ID` / `REALTIME_APP_SECRET`, `TURN_KEY_ID` / `TURN_KEY_API_TOKEN`, and the optional analytics token.
+**Secrets** (complete inventory with purpose, required/optional and rotation in [Platform](specs/platform.md) §16): `BETTER_AUTH_SECRET` (better-auth: session cookie signing and its other values; rotated through `BETTER_AUTH_SECRETS`), `TOKEN_HASH_KEY` (HMAC for our stored token hashes), `DATA_ENCRYPTION_KEY` (ICS-in URLs; MFA secrets later), `POLL_SECRET_KEY` (or per-poll secrets in the DO), `SETUP_TOKEN`, `RECOVERY_TOKEN`, email provider keys, `REALTIME_APP_ID` / `REALTIME_APP_SECRET`, `TURN_KEY_ID` / `TURN_KEY_API_TOKEN`, and the optional analytics token.
+
+**Missing secrets on deploy (kept from M1a).** The deploy step lists the Worker's secrets and creates any of **`BETTER_AUTH_SECRET`** and **`TOKEN_HASH_KEY`** that are missing, each from 32 random bytes piped to `wrangler secret put`. It never overwrites an existing secret, never prints a value, and stops the deploy if it fails. It no longer creates `SESSION_SIGNING_KEY` or `PEPPER_1` (15 Nov 2026). Until the required secrets exist, setup and sign-in show the **`/not-configured`** page and the Worker logs which secret is missing, never its value. Because there are no password hashes, losing a generated secret signs everyone out (and invalidates outstanding links) but locks nobody out for good: members sign in again with a passkey or magic link.
 
 `SETUP_TOKEN` is declared in `.dev.vars.example`, which the Deploy flow uses to prompt for secrets. Cloudflare doesn't document whether a prompted secret can be left blank, so the generated-token fallback (§6.8) covers that case. The Deploy flow writes the IDs of newly created resources back into the `wrangler.jsonc` committed to the customer's repository. The release-sync merge script (§6.4, step 5) keeps them. The Deploy button also supports GitLab, but release-sync needs GitHub Actions, so the README recommends GitHub. AI Gateway, BYOK keys, Realtime SFU credentials, SMTP credentials and custom domains are not provisioned automatically. They appear in the admin post-deploy checklist:
 
@@ -1353,8 +1366,9 @@ node scripts/preflight.mjs && wrangler d1 migrations apply DB --remote && wrangl
 | Setup token | Prompted at deploy, or generated (§6.8) | First-run setup |
 | Allow GitHub Actions to create pull requests | Manual repository setting | Upgrades |
 | Make the repository private | Recommended | Keeps scheduled release-sync running |
-| Custom domain | Manual; recommended before inviting the team | Stable sign-in, PWA and push |
-| Email: Cloudflare Email Service sender domain (default), or an email provider API key or SMTP credentials | Manual: onboard the domain in the dashboard, or add the Worker secrets | Email invitations, resets and notifications |
+| Custom domain | Manual; recommended **before the owner registers passkeys**, or at least before inviting the team (passkeys are bound to the domain) | Stable sign-in, PWA and push |
+| Owner's second passkey | Prompted in setup and the checklist | Owner recovery without `RECOVERY_TOKEN` |
+| Email: Cloudflare Email Service sender domain (default), or an email provider API key or SMTP credentials | Manual: onboard the domain in the dashboard, or add the Worker secrets | Email invitations, **magic links** and notifications |
 | Realtime SFU app and TURN key | Manual (Worker secrets) | Calls and screen sharing (M4) |
 | AI Gateway | Manual; **recommended** for assistant logging control: set `assistant_gateway_id` so every assistant call runs with logging and caching off (§5.10). The checklist tells owners that logging stays off for assistant traffic. | Assistant (M9a); Workers AI works without it |
 | BYOK provider keys | Optional (AI Gateway Provider Keys); switching a role needs the owner to acknowledge that content goes to that provider | Assistant roles on another provider |
@@ -1468,29 +1482,35 @@ A security release that hasn't been installed after 48 hours raises a persistent
 
 ### 6.8 First-run setup
 
-Until `installation.setup_completed_at` is set, every route except `/setup`, `/health` and static assets redirects to `/setup`.
+Until `installation.setup_completed_at` is set, every route except `/setup`, `/setup/resume`, better-auth's passkey registration routes (which still need an enrolment ticket), `/not-configured`, `/health` and static assets redirects to `/setup`.
 
 **Token source:**
 
 1. **`SETUP_TOKEN` secret set:** it is used as the token. It must be at least 32 characters.
 2. **No secret:** on the first request, the Worker generates a 32-byte random token. It stores the SHA-256 hash and a 24-hour expiry with `INSERT … ON CONFLICT DO NOTHING`, so concurrent first requests produce a single token. It logs the token once to Workers Logs with a clear marker. Only members of the Cloudflare account can see these logs. An expired token is replaced and logged again on the next visit.
 
-**Setup submission:** `POST /setup` with `{ token, workspaceName, ownerEmail, ownerName, ownerHandle, password }`. Setup creates **identity objects only** (installation, the owner user, their handle, settings). `#general`, calendars and drives are created by the milestones that own them, with backfill jobs (Platform §13).
+**Setup submission:** `POST /setup` with `{ token, workspaceName, ownerEmail, ownerName, ownerHandle }`. There is no password: the response sets an **enrolment ticket** cookie, and the owner **registers a passkey** straight away through better-auth's passkey registration (`resolveUser` accepts the ticket). Setup creates **identity objects only** (installation, the owner user, their handle, settings). `#general`, calendars and drives are created by the milestones that own them, with backfill jobs (Platform §13).
 
 - Rate-limited by IP (Rate Limiting binding).
 - Token hashes are compared in constant time.
-- Completion is one atomic D1 batch, so only one request can ever win:
+- The **claim** is one atomic D1 batch, so only one request can ever win:
   ```sql
   UPDATE installation
-     SET setup_claim = :nonce, setup_completed_at = :now, setup_token_hash = NULL
-   WHERE id = 1 AND setup_completed_at IS NULL;
+     SET setup_claim = :nonce
+   WHERE id = 1 AND setup_claim IS NULL AND setup_completed_at IS NULL;
 
-  INSERT INTO users (id, email, display_name, password_hash, role, status, created_at, updated_at)
-  SELECT :id, :email, :name, :hash, 'owner', 'active', :now, :now
+  INSERT INTO users (id, email, display_name, email_verified, role, status, created_at, updated_at)
+  SELECT :id, :email, :name, 0, 'owner', 'active', :now, :now
     FROM installation
    WHERE id = 1 AND setup_claim = :nonce;
   ```
-- An audit entry is written.
+  The owner row is written through better-auth's adapter in the real code, so `databaseHooks.user.create.before` sees the setup claim and allows it (Identity §4.4); the batch shows the intent.
+- **Completion:** when the owner's first passkey is registered, a better-auth after hook sets `setup_completed_at` and clears `setup_token_hash`, and the owner is signed in.
+- **Resume (default):** until completion, `POST /setup/resume` with the same token issues a new enrolment ticket **for the claimed owner only**, so an owner who left before registering a passkey isn't locked out and nobody else can take over.
+- The page then recommends a **second passkey** and shows the `*.workers.dev` warning when it applies (Identity §4.1).
+- An audit entry is written for the claim and for completion.
+
+**Required secrets:** if `BETTER_AUTH_SECRET` or `TOKEN_HASH_KEY` is missing, `/setup` and sign-in show `/not-configured` instead (§6.1).
 
 **After setup:** `/setup` returns 404 permanently and `SETUP_TOKEN` is ignored. The admin UI recommends deleting the secret.
 
@@ -1568,7 +1588,7 @@ CREATE TABLE exports (
 | Path | Content |
 |---|---|
 | `manifest.json` | Format version, Officebox version, D1 schema version, creation time, row/object counts, SHA-256 for every part, each channel's exported `seq`, each document's state vector |
-| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `mfa_factors`, setup fields, job tables, `passkeys`, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6). From M9 also `file_derived_text` (rebuilt like `search_index`), `personal_reminders` (personal export only) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
+| `d1/<table>.jsonl` | One JSON object per row, written in pages of 1,000. Excludes `search_index`, `sessions`, `auth_accounts`, `auth_verifications`, `mfa_factors`, setup fields, job tables, `passkeys`, `auth_tokens`, `ws_tickets`, ICS feed tokens and ICS-in URLs, `poll_secret`, `pending_emails`, `notify_anyway_log`, `scheduled_triggers`, `trigger_outbox` and `rate_counters` (Platform §6). From M9 also `file_derived_text` (rebuilt like `search_index`), `personal_reminders` (personal export only) and `assistant_source_refs` (a mirror of assistant memory, which isn't exported) **(default)**. |
 | `channels/<id>/messages.jsonl` | Current message state from the ChatChannel DO, including tombstones |
 | `docs/<id>/state.ystate` | Native Yjs state |
 | `docs/<id>/content.md` or `content.json` | Readable rendering (Markdown for documents, JSON for whiteboards) |
@@ -1577,7 +1597,7 @@ CREATE TABLE exports (
 
 **Rules:**
 
-- **Secrets are never exported:** SMTP credentials, AI keys and the setup token stay out. MFA secrets are encrypted with an installation-specific key, so they are left out and users re-enrol after a restore. Password hashes are included, so passwords keep working.
+- **Secrets are never exported:** SMTP credentials, AI keys, `BETTER_AUTH_SECRET`, `TOKEN_HASH_KEY` and the setup token stay out. MFA secrets are encrypted with an installation-specific key, so they are left out and users re-enrol after a restore. There are no password hashes (sign-in is passwordless), so a restore needs no secret carried over.
 - **Download:** owners download a single `.tar` streamed by the Worker. The command-line tool (`officebox export pull`) fetches parts with resume support.
 - **Consistency:** each object is internally consistent. **Maintenance mode** makes the workspace read-only for a fully consistent export. It closes every socket through the UserHubs, reconnects them read-only, and makes the Worker reject writes.
 - **Scheduled exports** (optional; weekly by default when enabled) keep the latest 4. Exports count towards R2 storage.
@@ -1588,13 +1608,13 @@ CREATE TABLE exports (
 2. The archive is uploaded through the Worker with R2 multipart upload. Very large archives can instead be placed in the bucket with Wrangler, and `officebox-restore` then starts the Workflow.
 3. The Restore Workflow checks the manifest and checksums. It accepts exports from the same Officebox version or older, and maps older logical schemas forward.
 4. It inserts D1 rows in foreign-key order in batches. It rebuilds each ChatChannel DO with `importMessages`, keeping `seq`, and each DocRoom or BoardRoom with its state and versions. It writes files back to their R2 keys and rebuilds `search_index`. Derived file text and vectors are rebuilt by the assistant back-fill (§5.2) once the assistant is enabled; assistant memory is not part of a restore (Assistant §13).
-5. It completes setup. All sessions are invalid and users with MFA must re-enrol.
+5. It completes setup. The restoring owner (chosen from the export's owners by email) registers a passkey, as in §6.8. All sessions are invalid; everyone else signs in with a magic link (email configured) or an admin recovery link, and registers a new passkey. The restore summary lists who needs a recovery link. Users with MFA must re-enrol.
 
 **Coverage** ([Platform](specs/platform.md) §6 is authoritative):
 - **Added:** calendars, events, attendees, time off, drives, folders, file versions, comments, polls (anonymous votes as hashed `voter_key` only), saved items, preferences, and in-call chat from both D1 and channel threads. From M9: `assistant_interactions` metadata, and `call_notes` and `call_transcript_segments` within retention (Assistant §13).
 - **Excluded:**
-  - sessions, `auth_tokens`, `ws_tickets` and MFA secrets
-  - **passkeys** (bound to the domain; members re-register after a restore to a new domain)
+  - sessions, better-auth's `auth_accounts` and `auth_verifications`, `auth_tokens`, `ws_tickets` and MFA secrets
+  - **passkeys** (bound to the domain; everyone registers a new one after a restore; exporting public keys for same-domain restores is an open question, Identity §11)
   - ICS feed tokens, and ICS-in subscription URLs (subscriptions are exported without URLs and must be re-entered)
   - `poll_secret`
   - **assistant conversations and memory** (they live only in Assistant DOs, which admins can't read) and **personal reminders**; members get both through their personal export, "Download my assistant data" (Assistant §4.3, §13)
@@ -1668,7 +1688,7 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 |---|---|---|
 | Snooze wake-ups | 5 minutes | PRD §5.3 |
 | Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
-| Purge due objects, time-based retention (audit log, inbox items, sessions, invitations, tickets, huddle records) | Daily | §2.3 |
+| Purge due objects, time-based retention (audit log, inbox items, expired sessions and `auth_verifications`, invitations, tickets, huddle records) | Daily | §2.3 |
 | Assistant purge jobs: expired `assistant_interactions`, transcripts past retention and their vectors, `file_derived_text` for purged versions, finished `personal_reminders` (M9) | Daily | §2.3, Assistant §14.3 |
 | ChatChannel event-log trimming, D1 copy reconciliation, version thinning | Daily | §2.2, §3.3, §4.3 |
 | Release manifest check | Daily | §6.7 |
@@ -1710,35 +1730,68 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 
 ### 8.1 Authentication and sessions
 
-- **Passwords:**
-  - Hashed with PBKDF2-HMAC-SHA256 via WebCrypto at **100,000 iterations with a 16-byte salt, after an HMAC-SHA256 pepper**: the PBKDF2 input is `HMAC-SHA256(PEPPER_<id>, password)`, with the pepper held in Worker secrets (platform §16), at least 32 random bytes.
-  - **Why 100k plus a pepper:** the M0 foundation spike (§10) found that workerd's default limit enforcer caps PBKDF2 at 100,000; local `wrangler dev` lifts the cap, which is why 600,000 works locally. A D1 dump or export without the pepper can't be attacked offline. The production probe **confirmed** the 100,000 cap (§10), so there is no 600,000 variant.
-  - Stored in a versioned format (`pbkdf2-sha256-hmac$<pepperId>$100000$<salt>$<hash>`), so parameters and peppers can change and hashes upgrade at next sign-in. Verification refuses stored iteration counts outside 100,000–1,000,000.
-  - Pepper rotation, restore and the dummy derivation for unknown accounts (no timing enumeration) follow Identity §4.4.
-  - Chosen over Argon2id because native WebCrypto avoids WASM memory limits and CPU spikes in Workers. Argon2id via `hash-wasm` needs its WASM imported as precompiled modules, since Workers forbid runtime WASM compilation (spike finding).
-  - Sign-in needs Workers Paid: PBKDF2 at 100,000 iterations takes about 12 ms of CPU, above the Free plan's 10 ms limit.
-  - Minimum length 10, checked against a bundled list of common passwords. No composition rules.
-- **Sessions:**
-  - Cookies as in §3.1.
-  - Refresh-token rotation with reuse detection: presenting an old refresh token revokes the session, **except within a 30-second grace window** after rotation, when the previous token returns the same successor (two tabs refreshing at once).
-  - **Every authenticated request** checks the session's `session_epoch` and the user's status (cached per isolate for at most 60 seconds), so a disabled member loses REST access within 60 seconds, as well as their sockets.
-  - `session_epoch` revocation, a 30-day idle timeout, and **Sign out everywhere** for users and admins.
-- **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins.
+**Passwordless** (product-owner decision, 15 Nov 2026; Identity §2). Sign-in is **passkeys and magic links only**. There are no passwords, so there is no password hashing, PBKDF2, pepper, password reset, password change or password throttle. The M0 spike's PBKDF2 result is kept for the record in §10.
+
+**Library: better-auth** (MIT; [docs](https://www.better-auth.com/docs)) for sessions, magic links (`magicLink` plugin) and passkeys (`@better-auth/passkey`, built on SimpleWebAuthn). It replaces the hand-built sign-in and session code of the M1a design.
+
+- **Runtime:** D1 is built in (`database: env.DB`, through Kysely). It needs `nodejs_compat`, which is on by default from compatibility date 2026-08-04; `wrangler.jsonc` uses 2026-11-01, so no flag is needed. Hono passes the mounted routes to `auth.handler(c.req.raw)`; our routes call `auth.api` on the server.
+- **One instance per host.** The passkey relying-party ID (`rpID`) and `rpName` are static options in better-auth, but nothing deployment-specific may be configured (AGENTS §4.1). So the Worker **builds the better-auth instance from the request**: `rpID` is the request's hostname, `baseURL` and the expected origin are the request's origin, and `trustedOrigins` is a function returning only that origin. Instances are cached per isolate by host. A workspace reachable on both `*.workers.dev` and a custom domain therefore has two relying parties, and passkeys registered on one don't work on the other (Identity §4.4).
+- **Configuration (summary):**
+
+  | Option | Value | Why |
+  |---|---|---|
+  | `emailAndPassword.enabled` | `false` (the default, set explicitly) | Passwordless |
+  | `session.expiresIn` / `updateAge` | 30 days / 1 day | 30-day sliding sessions |
+  | `session.cookieCache` | **disabled** | Revocation is immediate only without it; advisory GHSA-fvxx-76fc-893x found revoked sessions surviving through the cache |
+  | `advanced.cookiePrefix` | an Officebox prefix | Cookie naming |
+  | `advanced.ipAddress` | `ipAddressHeaders: ["cf-connecting-ip"]`, `ipv6Subnet` 64 | Correct client IP for limits and sessions; advisory GHSA-p6v2-xcpg-h6xw |
+  | `advanced.database.generateId` | ULID | AGENTS §4.1 |
+  | `modelName` and `fields` for user, session, account, verification and passkey | `users`, `sessions`, `auth_accounts`, `auth_verifications`, `passkeys`, snake_case | Our schema (Identity §5, Platform §14) |
+  | `user.additionalFields` | `role`, `status`, `handle`, profile columns, all `input: false` | No better-auth route can set them |
+  | `magicLink` | `expiresIn: 900`, `disableSignUp: true`, `sendMagicLink` to our email adapter with **our** confirmation link | 15-minute links; invite-only; scanner-safe (Platform §10) |
+  | passkey plugin | `rpID` and origin from the request; user verification `"preferred"`; `registration.requireSession: false` with `resolveUser` accepting only an enrolment ticket | First passkey without a session, never for an arbitrary user |
+  | `databaseHooks.user.create.before` | refuse unless the email has a valid pending invitation or setup is being claimed | better-auth has no invite-only mode |
+  | `databaseHooks.session.create.before` | set `device_label` and `approx_location` (from `request.cf`) | "My devices" |
+  | `hooks.after` | passkey sign-in: counter check; first passkey: complete setup or acceptance; sign-out: close sockets | Below and §3.5 |
+  | `rateLimit` | enabled, with custom storage on `rate_counters` (an atomic consume); never memory storage | Isolates don't share memory (Platform §8) |
+  | `secret` | `BETTER_AUTH_SECRET`; rotation through `BETTER_AUTH_SECRETS` | Platform §16 |
+
+- **Route allowlist.** Only get-session, sign-out, the magic-link request, and passkey sign-in and registration are reachable at `/api/auth/*`. The magic-link GET verify, session listing and revocation, passkey listing, renaming and deletion, user update, change email, delete user and every email-and-password route answer 404 from outside (Identity §6). An upgrade that adds routes adds nothing reachable until it's reviewed.
+- **Account creation.** Our accept and setup routes create users through better-auth's adapter, so `databaseHooks.user.create.before` runs on every path. Tests cover each path: setup, acceptance, a magic-link verify for an unknown email, passkey registration without a session or ticket, and each user-creating `auth.api` call.
+- **Enrolment tickets.** Setup, invitation acceptance, admin recovery links and owner recovery return a single-use ticket (32 random bytes, stored hashed as `auth_tokens.kind = 'passkey_enrol'`, 15 minutes, bound to one user) in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie scoped to the passkey registration routes. `resolveUser` accepts nothing else when there's no session. Registering consumes it and signs the person in.
+- **Passkey counter check (ours).** better-auth doesn't document counter regression or clone detection. A before hook on passkey sign-in reads our `passkeys.verified_sign_count` for the asserted credential; after better-auth has verified the signature, the after hook reads the counter from the verified authenticator data. A counter **at or below** the stored value, unless both are 0, is refused as `clone_detected`, and so is losing the compare-and-set `UPDATE passkeys SET verified_sign_count = :new WHERE id = :id AND verified_sign_count = :old`. A refusal deletes the session better-auth just created, clears the cookie, returns the typed error, and raises a `security_notice` for the member and owners (Notifications §3). This is the M0 spike's rule (§10), applied on top of the library.
+- **Magic links** (Platform §10). `sendMagicLink({ email, token, url })` sends only to active members, ignores `url`, and queues an email with a link to our confirmation page. The page's POST calls `auth.api` magic-link verification with the token and returns better-auth's session cookie. The request route answers the same for every email. Magic links need email: Cloudflare Email Service by default, or another driver (§7.6).
+
+**Sessions:**
+- better-auth database sessions in `sessions`, cookie as in §3.1. **No refresh tokens**: no rotation, reuse detection or grace window. better-auth doesn't offer refresh-token rotation, and with the cookie cache off every request reads the session row, so a stolen cookie stops working as soon as its session is revoked.
+- **Every authenticated request** loads the session through better-auth and checks the user's `status`, so a revoked session or a disabled member is refused on the next request (no 60-second cache any more).
+- **`session_epoch` is removed**: §3.5 doesn't need it, because sockets carry their session ID. Revoking deletes session rows.
+- **My devices** uses better-auth's list and revoke (one, others, all) through our routes, which return session IDs and device fields but never tokens. **Sign out everywhere** is revoke-all. Admins sign a member out through our permission-checked route, which calls better-auth's revoke for that user. The admin plugin isn't used **(default)**: it would add impersonation, which conflicts with the admin-power limits (Permissions §6).
+- Every revocation closes the matching sockets (§3.5).
+
+**Other controls:**
+- **MFA (Phase 2):** TOTP with recovery codes. Owners can require MFA for owners and admins. (Less needed with passkeys; revisit before Phase 2.)
 - **Rate limiting** (mechanisms per platform §8):
   - The Workers Rate Limiting binding supports periods of exactly 10 or 60 seconds, counts per Cloudflare location, and is approximate. The wrapper treats it as advisory and returns `rate_limited` with retry-after equal to the period. Longer windows and exact quotas use D1 or Durable Object counters.
-  - Sign-in: 5 attempts per minute per IP (binding) and 10 per hour per account (D1 counter), with progressive delays. There is no hard lockout, which would let attackers lock users out.
-  - Setup, recovery, invitation acceptance and password reset are limited the same way.
-- **Tokens:** invitation, reset and recovery tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days and resets after 1 hour.
-- **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: reset one owner's password and MFA. The action is audited, and a banner shows until the secret is deleted.
+  - better-auth's limiter uses custom storage on `rate_counters` with an atomic consume. Magic-link requests are limited **per email** (an HMAC of the address, so unknown emails count the same) and **per IP**; passkey sign-in, setup, recovery and invitation acceptance per IP. There is nothing to guess, so the password throttle (per-account progressive delays, and the slow mode drafted in M1a) is removed.
+- **Tokens:** invitation, recovery, email-change and enrolment tokens are 32 random bytes, stored hashed and single-use. Invitations expire after 7 days, recovery links after 24 hours, enrolment tickets after 15 minutes. Magic-link tokens are better-auth's, in `auth_verifications`, deleted on use.
+- **Owner recovery:** setting a `RECOVERY_TOKEN` secret enables `/recover` for one use: **register a new passkey for one owner** (named by email) and sign out that owner's sessions. There's no password to reset. The action is audited, and a banner shows until the secret is deleted. Owners are asked for a second passkey so this is rarely needed.
+- **Advisory policy.** better-auth has published **49 security advisories since December 2024**, many High or Critical, including GHSA-4vcf-q4xf-f48m (any user could delete other users' passkeys; High), GHSA-gv75-j3v8-3crm (passkey origin and user verification not enforced; Low), GHSA-fvxx-76fc-893x (revoked sessions surviving through the cookie cache) and GHSA-p6v2-xcpg-h6xw (client IP detection). So:
+  - **pin exact versions** of `better-auth`, `@better-auth/passkey` and the SimpleWebAuthn packages they bring, at versions with every known advisory fixed
+  - enable **Dependabot security updates or GitHub advisory alerts** for the repository
+  - **review the better-auth advisories list on every upgrade**, and record the review in the PR
+  - a fixed better-auth advisory that affects our configuration ships as an Officebox security release (§6.7)
+  - keep our own defences where an advisory showed the library's could fail: passkey deletion only through our routes, which check ownership; origin checks in our CSRF middleware; the cookie cache off; tests for each.
 - **SSO through Cloudflare Access (Phase 2):**
   - When enabled, the Worker validates the `Cf-Access-Jwt-Assertion` header against the team's Access signing keys and application audience. Follow Cloudflare's current Access JWT validation guidance at implementation.
-  - It maps the asserted email to an existing active user or a pending invitation, never creating accounts automatically, and skips the password step.
-  - Owners can disable local passwords for members.
+  - It maps the asserted email to an existing active user or a pending invitation, never creating accounts automatically, and creates a better-auth session for them.
 
 ### 8.2 Web application
 
 - **Authorisation:** the role model in PRD §10.1, resolved as described in §2.1. Owners and admins get management rights but no implicit read access to private content. Every check happens in the Worker before a DO is reached.
 - **CSRF:** `SameSite=Lax` cookies, plus a required custom header (`X-Officebox-Request: 1`) and an `Origin` check on every state-changing REST request. WebSocket upgrades check `Origin` too (§3.1).
+  - **With better-auth** (unchanged from M1a): our CSRF middleware runs **before** `auth.handler`, so better-auth's routes need the header and a same-origin `Origin` like every other route. better-auth's own origin check (against `trustedOrigins`, which is the request's own origin) runs as well; neither replaces the other. The web app's better-auth client sends the header on every request.
+  - The magic-link confirmation, recovery and invitation POSTs come from our own pages, so they carry the header; scanners' GETs reach only the pages.
 - **Headers:**
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'` plus the Realtime SFU endpoints.
   - HSTS, `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`.
@@ -1818,7 +1871,7 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Upgrade test: the release-sync workflow opens a correct PR from a fresh customer copy (with signature verification), including a `wrangler.jsonc` merge that keeps resource IDs. Merging deploys. A conflicted release opens as a draft and can't deploy. Stable → beta works.
 - Rollback test: rolling back one version after a release with migrations works without a database restore (expand/contract). The previous release's integration tests pass against the new schema.
 - Storage test: as D1 fills, warnings appear at 70% and 85%. At 95%, protective mode blocks new objects while messages continue. At 98%, D1 copying pauses without losing anything. Trimming the search copy frees space. An R2 hard budget blocks uploads when set.
-- Security test: CSRF and cross-origin WebSocket attempts are rejected. HTML and SVG files download instead of rendering. Reusing a refresh token revokes the session. Owner recovery works only with the secret and is audited. Sign-out clears local caches. One-time tickets can't be reused.
+- Security test: CSRF and cross-origin WebSocket attempts are rejected. HTML and SVG files download instead of rendering. A revoked better-auth session is refused on its next request (cookie cache off). better-auth routes outside the allowlist answer 404. Owner recovery works only with the secret and is audited. Sign-out clears local caches. One-time tickets can't be reused.
 - Export/restore test: export a fixture installation, restore into a fresh installation from first-run setup, and compare row counts, checksums, channel `seq` positions and document content. Missing export configuration warns but does not block startup.
 - Search test: results match permitted messages and documents only. Deleting or trashing removes results. **Rebuild search index** reproduces the index.
 - Revocation test: disabling a user, or removing them from a private channel or document, closes their open sockets within 5 seconds.
@@ -1828,11 +1881,12 @@ The web application follows **OWASP ASVS Level 2** as its baseline.
 - Durable registry test: after UserHub eviction, revoking a member still closes every open socket; the Worker-side fallback closes sockets missing from the registry.
 - Trigger delivery test: a crash between marking a trigger fired and sending its effect leads to exactly one effect after recovery (outbox, idempotent consumer).
 - `pending_emails` dedupe: repeated events in one conversation produce one email; holds longer than 24 hours are released by `email_release`.
-- Session tests: two tabs refreshing within 30 seconds both stay signed in; replaying a refresh token after the grace window revokes the session; a disabled member's REST calls fail within 60 seconds.
+- Session tests: a session unused for 30 days is rejected and one used on day 29 is extended; signing out one device, other devices or everywhere closes those sessions' sockets; a disabled member's next REST call fails.
+- Passwordless tests: every account-creation path is refused without an invitation or setup claim (`databaseHooks.user.create.before`); a counter regression is `clone_detected` with no session left behind; an assertion for another origin or relying-party ID is refused; one build serves two hosts with separate relying-party IDs; a member can't delete another member's passkey.
 - Cascade tests: channel, group, calendar, drive and event deletions follow Platform §4, including channel purge moving folder documents to their creators.
-- Export exclusions: no `auth_tokens`, passkeys, ICS tokens or URLs, or `poll_secret` in an export; anonymous votes appear only as voter keys.
+- Export exclusions: no sessions, `auth_tokens`, `auth_accounts`, `auth_verifications`, passkeys, ICS tokens or URLs, or `poll_secret` in an export; anonymous votes appear only as voter keys.
 - SSRF tests: previews and ICS fetches refuse private IPs, including after redirects and DNS rebinding.
-- Scanner-safe links: a GET of a magic, reset, recovery, invitation or RSVP link changes nothing; only the confirmation POST does.
+- Scanner-safe links: a GET of a magic, recovery, invitation or RSVP link changes nothing; only the confirmation POST does. better-auth's GET magic-link verify route answers 404 from outside.
 - Timer catch-up: after simulated downtime, ReminderScheduler triggers less than 1 hour overdue fire once, older ones are dropped, and no trigger fires twice.
 - Compaction test: a long editing session compacts on the size and count thresholds. A document with a snapshot over 4 MB loads correctly from chunks. Hourly versions appear and restore correctly.
 
@@ -1869,6 +1923,9 @@ Every question open at v1.1 now has a decision:
 | D1 migration transactions | Not documented, so migrations are treated as possibly partly applied: one change per file, safe to re-run, expand/contract | §6.5 |
 | Event log horizon and outbox batching | Defaults: 30-day horizon, 250 ms batching delay, 100 events per batch | §2.2, §3.3 |
 | Search text projection and FTS export | DocRoom extracts plain text through an outbox to `document_text` and FTS5; the export excludes FTS and restore rebuilds it | §2.4 |
+| Sign-in methods (15 Nov 2026) | **Passwordless:** passkeys and magic links only; no passwords, reset, peppers or PBKDF2 (product-owner decision) | §3.1, §8.1 |
+| Authentication library (15 Nov 2026) | **better-auth** (MIT): database sessions (cookie cache off, 30-day sliding), `magicLink` behind our confirmation page, `@better-auth/passkey` with our counter check; one instance per host for the relying-party ID; exact pins and the advisory policy | §8.1 |
+| Sessions (15 Nov 2026) | No refresh rotation or `session_epoch`; revocation deletes session rows and closes sockets by session ID | §3.1, §3.5, §8.1 |
 
 Resolved in v1.1:
 - Message storage split: the DO is the source of truth, with an outbox to a D1 copy (§2.0, §3.3).
@@ -1877,23 +1934,30 @@ Resolved in v1.1:
 Decided in v1.3 (from the review):
 - WebSocket auth: cookies plus `Origin` check; one-time tickets for clients without cookies (§3.1).
 - Whiteboard: Excalidraw (MIT) with an Officebox-maintained Yjs binding (§4.2).
-- Password hashing: PBKDF2-SHA256, versioned format (§8.1). Revised after the M0 foundation spike to 100,000 iterations plus an HMAC pepper; the production probe confirmed the cap.
+- ~~Password hashing: PBKDF2-SHA256, versioned format. Revised after the M0 foundation spike to 100,000 iterations plus an HMAC pepper; the production probe confirmed the cap.~~ **Superseded 15 Nov 2026:** sign-in is passwordless (§8.1).
 - File handling: streamed through the binding; multipart above 50 MB; allow-listed inline types (§8.3).
 - Huddle signalling: HuddleRoom DO with Worker-mediated SFU calls and confined track subscriptions (§3.6).
 - Screen sharing: one presenter, simulcast, detail and motion modes (§3.6). Present mode via Yjs awareness (§4.5).
 - Storage: protective mode and trimming of the D1 search copy (§7.7).
 
-To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), and EU jurisdiction support per service (§8.5).
+To confirm at implementation: the Realtime SFU endpoint and simulcast controls (§3.6), the D1 size metadata field (§7.7), Cloudflare Access JWT validation (§8.1), better-auth's adapter and hook details (below, v1.7), and EU jurisdiction support per service (§8.5).
 
-**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md), and the decisions below are applied in §8.1, §8.3, Identity §4.4 and platform §8, §11 and §16:
-- **PBKDF2 production cap:** **100,000, confirmed in production** (the probe's 100,001 and 600,000 calls fail with "iteration counts above 100000 are not supported"). The standalone server used by `wrangler dev` removes the cap, which is why 600k works locally. **Decision (final):** M1 uses **PBKDF2 100k + HMAC pepper** (`pbkdf2-sha256-hmac$<pepperId>$100000$salt$hash`, §8.1). Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works with precompiled modules, also in production (19 MiB/t=2 in ~85 ms round trip); scrypt N=2^17 also runs. Both remain later upgrade options. *Confirmed in production.*
-- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, replay refusal and `sign_count` clone detection. **Decision:** use it with `requireUserVerification: false`; compare counters ourselves after signature verification (≤ stored and not both 0 → `clone_detected`) and update with compare-and-set (`UPDATE … WHERE sign_count = ?`) (Identity §4.4). *Verified locally.*
-- **Rate Limiting binding:** periods are exactly 10 or 60 s; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. **Decision:** binding only for abuse throttles (sign-in per IP, setup/recovery/invites, link previews, general API); the wrapper treats results as advisory and returns `rate_limited` with retry-after equal to the period; the other platform §8 rows stay DO or D1. Production let **one call over** the limit (6 of 12 at limit 5) and accepted an unvalidated per-call `period`, so the wrapper never passes one. *Confirmed in production (one colo).*
+**M0 foundation spike** (before M1). Results are in [`spikes/foundation`](spikes/foundation/README.md), and the decisions below are applied in §8.1, §8.3, Identity §4.4 and platform §8, §11 and §16 (the PBKDF2 result no longer applies, since sign-in is passwordless):
+- **PBKDF2 production cap** (**no longer used**: sign-in became passwordless on 15 Nov 2026, §8.1; kept for the record): **100,000, confirmed in production** (the probe's 100,001 and 600,000 calls fail with "iteration counts above 100000 are not supported"). The standalone server used by `wrangler dev` removes the cap, which is why 600k works locally. **Decision at the time:** M1 would use **PBKDF2 100k + HMAC pepper** (`pbkdf2-sha256-hmac$<pepperId>$100000$salt$hash`); superseded by the passwordless decision. Argon2id via `hash-wasm` fails as published (Workers forbid runtime WASM compilation) and works with precompiled modules, also in production (19 MiB/t=2 in ~85 ms round trip); scrypt N=2^17 also runs. *Confirmed in production.*
+- **WebAuthn library:** `@simplewebauthn/server` 14.0.3 (MIT) runs in workerd. Verified end to end with a Chromium virtual authenticator: registration, discoverable sign-in, replay refusal and `sign_count` clone detection. **Decision:** use it with `requireUserVerification: false`; compare counters ourselves after signature verification (≤ stored and not both 0 → `clone_detected`) and update with compare-and-set (`UPDATE … WHERE sign_count = ?`) (Identity §4.4). *Verified locally.* **Since 15 Nov 2026** SimpleWebAuthn comes through better-auth's passkey plugin; the counter rule and compare-and-set carry over as our own after hook on `verified_sign_count` (§8.1).
+- **Rate Limiting binding:** periods are exactly 10 or 60 s; limits are per Cloudflare location, approximate and eventually consistent (documented). Miniflare is exact. **Decision:** binding only for abuse throttles (passkey sign-in and magic-link confirmation per IP, setup/recovery/invites, link previews, general API); the wrapper treats results as advisory and returns `rate_limited` with retry-after equal to the period; the other platform §8 rows stay DO or D1. Production let **one call over** the limit (6 of 12 at limit 5) and accepted an unvalidated per-call `period`, so the wrapper never passes one. *Confirmed in production (one colo).*
 - **Queue `delaySeconds` maximum:** **24 hours** (86,400 s) for send, sendBatch and retries per current docs, not 12 hours; Miniflare rejects 86,401. **Decision:** the `email_release` threshold is 24 h; delays are Zod-validated (0–86,400) and out-of-range values are typed results (platform §11). Production rejects 86,401 on `send` (10210) and `sendBatch` (10202). *Confirmed in production.*
 - **PDF preview under `Content-Security-Policy: sandbox`:** Chromium's viewer renders it, directly and in an `<iframe>`. An `<iframe sandbox>` attribute blocks it. **Decision:** keep the CSP header and preview in an iframe without the `sandbox` attribute (§8.3); Firefox, Safari and branded Chrome are M6 acceptance checks, with PDF.js as the fallback. The headless shell has no PDF viewer. *Verified locally (Chromium 153).*
 
 **New in v1.4:**
-- **WebAuthn library spike before M1:** done. SimpleWebAuthn runs in Workers (see the M0 foundation spike above).
+- **WebAuthn library spike before M1:** done. SimpleWebAuthn runs in Workers (see the M0 foundation spike above); since 15 Nov 2026 it is used through better-auth's passkey plugin.
+
+**New in v1.7** (better-auth, to settle in M1a):
+- Whether better-auth's D1 adapter can store its dates as epoch milliseconds; if not, its date columns are an exception recorded in Platform §14.
+- Whether the pinned `magicLink` plugin can store tokens hashed in `auth_verifications`.
+- The exact route names, before and after hook contexts and session-delete hooks of the pinned version, against the allowlist, counter check and socket revocation in §8.1 and §3.5.
+- The cost of building one better-auth instance per host (cached per isolate) and of reading the session row on every request with the cookie cache off.
+- Bundle size of better-auth and its passkey plugin against the Worker limit (AGENTS §4.4).
 - **Holiday dataset before M5:** licence compatible with AGPL, plus the bundle size against the Worker limit.
 - **Size version compare before M6b:** a custom diff of two document states (§4.3); it may move to Later.
 - **ReminderScheduler load:** confirm a single instance handles a 100-member workspace's 48-hour trigger window, or shard it.

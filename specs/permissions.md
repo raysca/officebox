@@ -1,7 +1,7 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; token wording updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
 **Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Platform](platform.md)
 
@@ -28,7 +28,7 @@ It replaces TDD §2.1's "stop at first match" resolution with a **union** rule.
 | Group principals | Valid on **documents, whiteboards, folders, files, drives and calendars**. **Not on channels**: "invite this group" adds the current members individually. |
 | Private channel membership | **Any member can add people; channel admins remove them.** This corrects PRD §10.1. |
 | Admin powers over people | Admins act on **members only**. Recovery, email change, disable and delete on **admins or owners need an owner**. **Only owners invite or promote admins.** |
-| Notice of admin actions | Every recovery link or email change **notifies the person** (email to the old address and an in-app banner) and **revokes their pending sign-in, reset and recovery tokens**. |
+| Notice of admin actions | Every recovery link or email change **notifies the person** (email to the old address and an in-app banner) and **revokes their pending magic links and recovery tokens**. |
 | Admins and private content | Admins see that private objects **exist** but can't read them. They **can't add themselves to private channels**; they can archive, delete and remove members. In private channels they **are** members of (added by a member), admins can delete messages. |
 | Admins giving themselves access | An admin **adding themselves** to a group, or **granting themselves** a role on a group drive or folder, **needs an owner**. Audited. |
 | Recovery links without email | Allowed for members, **loudly flagged**: a notice on the member's **sign-in page** and a flag on the member list for **every owner** until acknowledged (Identity §4.6). |
@@ -279,9 +279,9 @@ effective role(user, item) = max(
   - an email goes to the person's **current (old) address** (if email is configured): "Your Officebox email was changed by *Admin Name* on *date*" or "*Admin Name* issued a recovery link for your account"
   - a **notice on the sign-in page** and after sign-in, on any device (`users.pending_security_notice`), plus a `security_notice` inbox item
   - **without email configured**, the recovery link is also **flagged to every owner** on the member list until an owner acknowledges it (Identity §4.6)
-  - all their **pending magic-link, password-reset and recovery tokens are revoked**, except the newly issued recovery link
+  - all their **pending magic links and recovery tokens are revoked**, except the newly issued recovery link
   - an audit entry is written.
-- Using a recovery link also signs out all the person's existing sessions (Identity §4.6).
+- Using a recovery link also signs out all the person's existing sessions and closes their sockets (Identity §4.6).
 
 **Privacy statement** (help and admin guide): admins can't read private channels, DMs or restricted documents through Officebox. These things are stated plainly:
 - **Recovery links.** An admin could sign in as an ordinary **member** by issuing them a recovery link. Officebox emails the member (if email is configured), shows a notice on their sign-in page, flags it to every owner when email isn't configured, and audits it. The member may only find out at their next sign-in, so this is visible, not prevented.

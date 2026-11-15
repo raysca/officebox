@@ -115,8 +115,8 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
   - API client and error handling
 - **Shared package:** Zod schema conventions, message envelope `{ type, id?, ... }`, error codes.
 - **Foundation spike.** Short, throwaway checks on production Cloudflare, before M1 code depends on them. Each result is recorded in TDD §10. **Answered** in [`spikes/foundation`](spikes/foundation/README.md), and **confirmed in production** by the probe run of 15 November 2026 (PBKDF2 capped at 100k, rate limits approximate, queue delays up to 24 h).
-  - **PBKDF2 limit:** answered: production very likely caps at 100k, so M1 adopts **100k plus an HMAC pepper** (Identity §4.4). *Pending production run* for the 600k question.
-  - **WebAuthn:** answered: `@simplewebauthn/server` runs in Workers (verified end to end locally).
+  - **PBKDF2 limit:** answered: production caps at 100k. **No longer used:** sign-in became passwordless on 15 Nov 2026 (Identity §2); the result is kept for the record (TDD §10).
+  - **WebAuthn:** answered: `@simplewebauthn/server` runs in Workers (verified end to end locally). M1 uses it through better-auth's passkey plugin.
   - **Rate Limiting binding:** answered: periods are exactly 10 or 60 s, per location and approximate; platform §8 assignments unchanged. *Pending production run* for measured behaviour.
   - **Queue delays:** answered: the maximum `delaySeconds` is 24 hours (platform §11 updated).
   - **PDF preview under `Content-Security-Policy: sandbox`:** answered: Chromium renders it; previews use an iframe without the `sandbox` attribute (TDD §8.3). Firefox and Safari are checked in M6.
@@ -128,59 +128,62 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 
 ### M1 — Identity and access
 
-**Goal:** a team can set up a workspace, invite people and sign in safely. Every later permission check runs on this milestone's permission engine.
+**Goal:** a team can set up a workspace, invite people and sign in safely, **without passwords**. Every later permission check runs on this milestone's permission engine.
 
-**Must:**
-- **First-run setup** with the setup token, either the deploy secret or a generated token in the logs, and an atomic claim (TDD §6.8).
+**Must** (passwordless on better-auth, product-owner decisions of 15 Nov 2026; Identity §2, TDD §8.1):
+- **First-run setup** with the setup token, either the deploy secret or a generated token in the logs, and an atomic claim (TDD §6.8). The owner **registers a passkey during setup**; setup recommends a second one.
+- **better-auth foundation:** `better-auth` and `@better-auth/passkey` pinned to exact versions, on D1, with its tables mapped onto ours and checked-in `NNNN_identity_*` migrations generated with `npx auth generate`; one instance per request host (relying-party ID derived, never configured); the route allowlist; `databaseHooks.user.create.before` for invite-only sign-up; `cf-connecting-ip` for client IPs; the advisory policy (TDD §8.1).
 - **Sign-in:**
-  - email and password, hashed with PBKDF2-SHA256 at 100k iterations plus an HMAC pepper, in a versioned format (Identity §4.4; the production probe confirmed the 100k cap)
-  - **magic links** by email and **passkeys** (members may be passkey-only; owners must keep a password)
-  - `HttpOnly` session cookie plus rotating refresh cookie, reuse detection, and `session_epoch` revocation
-  - sign out and sign out everywhere
+  - **sign in with a passkey** (all accounts are passkey-only; owners asked for two passkeys), with our counter check (`clone_detected`)
+  - **magic links** by email through **our confirmation page** and a server-side better-auth verify (platform §10)
+  - better-auth database sessions: 30 days sliding, cookie cache off, no refresh tokens or `session_epoch`
+  - sign out, sign out everywhere, and "My devices"; every revocation closes live sockets
 - **Invitations:**
   - single-use links that expire after 7 days, roles at invite time
   - **copy link** (no email needed) and **email**
-  - accept flow that creates the account
-- **Email:** the adapter interface, with the **Cloudflare Email Service** binding as the default driver, plus HTTP-API drivers (Resend, Postmark, SES) and SMTP over STARTTLS. Includes the queue, retries, DLQ and **Send test email** (TDD §7.6).
-- **Password reset** when email is configured.
+  - accept flow that creates the account and **registers a passkey**
+- **Email:** the adapter interface, with the **Cloudflare Email Service** binding as the default driver, plus HTTP-API drivers (Resend, Postmark, SES) and SMTP over STARTTLS. Includes the queue, retries, DLQ and **Send test email** (TDD §7.6). Magic links need it.
+- **Recovery:** admin recovery links (copy link) for members, owners acting on admins and owners; magic links when email is configured; owner recovery through the `RECOVERY_TOKEN` secret. Each registers a new passkey.
 - **Profiles:** display name, avatar (R2), **time zone**, **working hours** and **location/region** (the calendar needs all three), and status text with an emoji.
 - **Roles and groups:** owner, admin and member; admin-managed groups (PRD §10.1).
 - **Members administration:** list, invite, change role, disable, delete (anonymise). Content transfer for deleted members arrives with the features that own the content.
 - **Permission engine** in `packages/shared` plus Worker services, implementing [specs/permissions.md](specs/permissions.md). It uses the union rule across item, folders, drive and general access, and includes the admin-power limits. Its **matrix test grows per milestone**: M1 covers workspace roles, groups and profiles; channels, calls, calendars and documents are added by their milestones.
-- **Only identity objects are created in M1** (users, handles, groups, invitations, sessions, passkeys, settings). `#general` and default channels arrive in M3a, calendars in M5a, and drives and folders in M6a. Each of those milestones provisions its objects with an idempotent backfill for existing people and groups (platform §13).
+- **Only identity objects are created in M1** (users, handles, groups, invitations, sessions, better-auth accounts and verifications, passkeys, settings). `#general` and default channels arrive in M3a, calendars in M5a, and drives and folders in M6a. Each of those milestones provisions its objects with an idempotent backfill for existing people and groups (platform §13).
 - **Security:**
-  - CSRF header and `Origin` checks, the CSP and security headers
-  - rate limits on sign-in, setup, invitations and reset
+  - CSRF header and `Origin` checks (alongside better-auth's origin check), the CSP and security headers
+  - rate limits on magic-link requests (per email and per IP), passkey sign-in, setup, invitations and recovery
   - audit entries for every admin action
-- **Owner recovery** through the `RECOVERY_TOKEN` secret.
+  - the deploy step that creates missing secrets (`BETTER_AUTH_SECRET`, `TOKEN_HASH_KEY`) and the `/not-configured` page.
 
 **Must (also):** the "My devices" session list. **Should:** the "allowed email domains" setting for invitations.
 
-**Slices** (product-owner decision, 15 Nov 2026). Each is one branch and PR with its own independent review, built in this order:
-- **M1a — Setup, sessions and the permission engine core:**
-  - first-run setup with the setup token and an atomic claim
-  - email and password sign-in (PBKDF2 100k + HMAC pepper)
-  - session and rotating refresh cookies, reuse detection, `session_epoch`
-  - sign out, sign out everywhere, and "My devices"
-  - CSRF header and `Origin` checks; rate limits on setup and sign-in
+**Slices** (product-owner decision, 15 Nov 2026; revised the same day for passwordless sign-in). Each is one branch and PR with its own independent review, built in this order:
+- **M1a — better-auth foundation, setup with a passkey, sessions and the permission engine core:**
+  - better-auth wired into Hono (`auth.handler`), pinned, configured per request host, with the route allowlist, mapped tables and generated migrations
+  - first-run setup with the setup token and an atomic claim, **registering the owner's passkey** (enrolment ticket, resumable until done)
+  - **passkey sign-in**, with our counter check
+  - better-auth sessions (30 days sliding, cookie cache off), sign out, sign out everywhere and "My devices", with socket revocation hooks
+  - CSRF header and `Origin` checks; rate limits on setup and passkey sign-in
   - the permission engine in `packages/shared` with workspace roles, and the first matrix test
-- **M1b — Email and invitations:**
+  - the `/not-configured` page and the deploy step that creates `BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` if missing
+  - the M1a branch's password sign-in, refresh rotation, `session_epoch`, sign-in throttle, slow mode and `PEPPER_1` / `SESSION_SIGNING_KEY` are replaced, not merged
+- **M1b — Email, invitations and magic links:**
   - the email adapter (Cloudflare Email Service binding by default; Resend, Postmark, SES and SMTP over STARTTLS as alternatives), its queue, retries and dead-letter queue, and **Send test email**
   - invitations: copy link and email, single-use, 7-day expiry, role at invite time
-  - the accept flow that creates the account
+  - the accept flow that creates the account (through better-auth, so `databaseHooks.user.create.before` runs) and **registers a passkey**
+  - **magic links** through our confirmation page and a server-side better-auth verify, limited per email and per IP
   - the "allowed email domains" setting (Should)
-- **M1c — Passwordless and recovery:**
-  - magic links
-  - passkeys, including passkey-only members (owners keep a password)
-  - password reset
+- **M1c — Recovery and passkey management:**
+  - admin recovery links (copy link), with the notices, owner flag and token revocation
   - owner recovery with `RECOVERY_TOKEN`
+  - extra passkeys: add, rename, remove (last-method and owner rules), the owners' second-passkey reminder and the `*.workers.dev` warning
 - **M1d — Profiles and directory:**
   - display name, avatar (R2), time zone, working hours, location or region, status text with emoji
   - @handles
   - the member directory
 - **M1e — Groups and administration:**
   - admin-managed groups
-  - members administration: list, change role, disable, delete (anonymise)
+  - members administration: list, change role, disable, delete (anonymise), sign out all sessions
   - admin-power limits
   - audit coverage for every admin action
   - the full M1 permission matrix (workspace roles, groups, profiles)
@@ -188,7 +191,8 @@ Each milestone has a **must** scope (needed for the exit criteria), a **should**
 **Later:** TOTP MFA; Cloudflare Access SSO (PRD §6).
 
 **Exit criteria:**
-- These end-to-end tests pass: setup with a token, invite by link with no email configured, invite by email, password reset, disable user, and an expired invitation being refused.
+- These end-to-end tests pass: setup with a token (registering a passkey), **sign in with a passkey**, invite by link with no email configured (accepting registers a passkey), invite by email, **magic link via the confirmation page**, recovery link, disable user, and an expired invitation being refused.
+- Every account-creation path without an invitation or setup claim is refused (Identity §9).
 - The permission engine passes its M1 matrix test (workspace roles, groups, profiles).
 
 ### M2 — Realtime backbone
@@ -453,7 +457,7 @@ The Today, Upcoming, Inbox, Assigned to me and Following views (PRD §5.3).
 
 | Spike module | Becomes | Changes when promoted |
 |---|---|---|
-| `auth.ts` | `core/auth`, `features/auth` | Add refresh rotation, password hashing and invitations; move dev login behind a test-only flag |
+| `auth.ts` | `core/auth`, `features/auth` | Replace with better-auth (sessions, magic links, passkeys) and add invitations; move dev login behind a test-only flag |
 | `chat-channel.ts`, `projection.ts` | `features/chat` | Typed results; generic outbox from `core`; files and pins events |
 | `doc-room.ts` | `features/docs` | Search projection, versions to R2, comment anchors |
 | `user-hub.ts`, `presence.ts`, `fanout.ts` | `features/realtime` | Generic fan-out API; tab leader election on the client |
@@ -475,6 +479,7 @@ Resolved:
 3. **Holiday regions:** all countries, from a bundled dataset. UK & Ireland, US & Canada and EU are verified first.
 4. **Stack:** Hono, Zod, TanStack Router and Query, and Tailwind without Radix.
 5. **Milestone order:** auth → chat → calls → calendar → documents. Event and document calls ship with their features.
+6. **Authentication (15 Nov 2026):** passwordless (passkeys and magic links only) on the better-auth library; M1 slices revised to match (§4 M1, Identity §2).
 
 Open:
-6. **Upgrades.** Confirm the release-sync upgrade work stays deferred until just before the first external install (M7).
+7. **Upgrades.** Confirm the release-sync upgrade work stays deferred until just before the first external install (M7).
