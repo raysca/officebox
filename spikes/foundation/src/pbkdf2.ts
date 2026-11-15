@@ -105,7 +105,7 @@ function safeFromB64(s: string | undefined): Uint8Array<ArrayBuffer> | null {
 export async function verifyPeppered(stored: string, password: string, peppers: Peppers): Promise<boolean> {
   const parts = stored.split("$");
   const [scheme, pepperId, iter, salt, hash] = parts;
-  const iterations = Number(iter);
+  const iterations = iter !== undefined && /^\d+$/.test(iter) ? Number(iter) : Number.NaN;
   const saltBytes = safeFromB64(salt);
   const hashBytes = safeFromB64(hash);
   const pepper = pepperId ? lookupPepper(peppers, pepperId) : null;

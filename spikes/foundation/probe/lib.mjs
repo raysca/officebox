@@ -34,17 +34,28 @@ export function queueExists(name) {
   return false;
 }
 
-/** True if a Worker with this name exists in the account. Unknown errors stop the script rather than guess. */
+/**
+ * True if a Worker with this name exists in the account. Only Cloudflare's "worker not found" API error (code
+ * 10007, "This Worker does not exist") counts as absent; any other failure (wrong account, auth, network, npx)
+ * stops the script rather than risk deploying over, and later deleting, an existing Worker.
+ */
 export function workerExists(name) {
   const { status, out } = wrangler(["deployments", "list", "--name", name, "--json"], { quiet: true });
   if (status === 0) return true;
-  if (/10007|does not exist|not found|could not be found/i.test(out)) return false;
-  fail(`Checking for an existing Worker "${name}" failed:\n${out.slice(-2000)}`);
+  if (/\b10007\b/.test(out) || /This Worker does not exist/.test(out)) return false;
+  fail(`Couldn't tell whether a Worker "${name}" exists, so nothing was changed:\n${out.slice(-2000)}`);
 }
 
+/** Parsed probe/.probe.json, or null if absent. A corrupt file stops the script with a clear message. */
 export function readState() {
   if (!existsSync(STATE_FILE)) return null;
-  return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+  try {
+    const state = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    if (typeof state !== "object" || state === null || Array.isArray(state)) throw new Error("not a JSON object");
+    return state;
+  } catch (e) {
+    fail(`probe/.probe.json is unreadable (${e.message}). Inspect or delete it; nothing was changed.`);
+  }
 }
 
 /** State holds the probe token, so it is written owner-read/write only. */

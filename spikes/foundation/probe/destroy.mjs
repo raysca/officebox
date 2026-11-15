@@ -5,7 +5,7 @@
 // With no state file it touches nothing: it can't know what the probe created.
 // Rate Limiting namespaces (910001, 910002) are not separate resources: they exist only as binding config.
 import { rmSync } from "node:fs";
-import { QUEUE, readState, STATE_FILE, WORKER, wrangler } from "./lib.mjs";
+import { queueExists, QUEUE, readState, STATE_FILE, WORKER, wrangler } from "./lib.mjs";
 
 const state = readState();
 if (!state) {
@@ -17,16 +17,28 @@ if (!state) {
   process.exit(0);
 }
 
+if (state.workerCreatedByProbe !== true && state.queueCreatedByProbe !== true) {
+  rmSync(STATE_FILE, { force: true });
+  console.log("Nothing is recorded as created by the probe, so nothing was deleted. Removed probe/.probe.json.");
+  process.exit(0);
+}
+
 let ok = true;
-if (state.workerCreatedByProbe) {
+if (state.workerCreatedByProbe === true) {
   const del = wrangler(["delete", "--config", "probe/wrangler.jsonc", "--force"], { input: "y\n" });
-  if (del.status !== 0 && !/10007|not found|does not exist/i.test(del.out)) ok = false;
+  // Already gone (Cloudflare error 10007) counts as done; anything else is a failure.
+  if (del.status !== 0 && !/\b10007\b|This Worker does not exist/.test(del.out)) ok = false;
 } else {
   console.log(`Leaving Worker "${WORKER}" in place: the probe didn't create it.`);
 }
-if (state.queueCreatedByProbe) {
-  const q = wrangler(["queues", "delete", QUEUE], { input: "y\n" });
-  if (q.status !== 0 && !/not found|does not exist|11000/i.test(q.out)) ok = false;
+if (state.queueCreatedByProbe === true) {
+  // `queues delete` resolves the name through a filtered list; confirm the exact name exists first.
+  if (!queueExists(QUEUE)) {
+    console.log(`Queue "${QUEUE}" no longer exists; skipping.`);
+  } else {
+    const q = wrangler(["queues", "delete", QUEUE], { input: "y\n" });
+    if (q.status !== 0) ok = false;
+  }
 } else {
   console.log(`Leaving queue "${QUEUE}" in place: the probe didn't create it.`);
 }

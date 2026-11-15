@@ -50,7 +50,8 @@ describe("Fallback A: HMAC pepper + PBKDF2 100k", () => {
     const peppers = { "1": env.PEPPER_1 as string };
     const r = await pepperedPbkdf2(PW, peppers["1"], "1");
     if (!r.ok) throw new Error(r.error);
-    for (const iter of ["999999999", "1000", "1e5x", "-1"]) {
+    // Out of range, or not a plain decimal integer ("1e5" and "100000.0" are numerically 100000 but refused).
+    for (const iter of ["999999999", "1000", "1e5x", "-1", "1e5", "100000.0", " 100000", "0x186a0"]) {
       expect(await verifyPeppered(r.hash.replace("$100000$", `$${iter}$`), PW, peppers)).toBe(false);
     }
   });
@@ -89,20 +90,20 @@ describe("Fallback A: HMAC pepper + PBKDF2 100k", () => {
   });
 
   it("refusal paths and the unknown-user path cost about as much as a real verify", async () => {
-    // Timing parity check. workerd's clock has 1 ms resolution and a real verify takes ~12 ms here, so the bound is
-    // a generous ratio (0.5x..2x of the real verify's median) rather than an exact match. It still fails if a path
-    // returns early (~0 ms) or derives at a different iteration count (600k would be ~6x).
+    // Timing parity check. workerd's clock has 1 ms resolution and a real verify takes ~12 ms here, so it compares
+    // the minimum of 7 runs (least affected by a loaded machine) with a wide window, 0.4x..3x of the real verify.
+    // It still fails if a path returns early (~0 ms) or derives at a different iteration count (600k is ~6x).
     const peppers = { "1": env.PEPPER_1 as string };
     const r = await pepperedPbkdf2(PW, peppers["1"], "1");
     if (!r.ok) throw new Error(r.error);
     const time = async (fn: () => Promise<boolean>) => {
       const ms: number[] = [];
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 7; i++) {
         const t0 = performance.now();
         await fn();
         ms.push(performance.now() - t0);
       }
-      return ms.sort((a, b) => a - b)[2]!;
+      return Math.min(...ms);
     };
     const real = await time(() => verifyPeppered(r.hash, "wrong password", peppers));
     const paths = {
@@ -113,8 +114,8 @@ describe("Fallback A: HMAC pepper + PBKDF2 100k", () => {
     };
     console.log(`real verify ${real} ms; refusal paths ${JSON.stringify(paths)}`);
     for (const [name, ms] of Object.entries(paths)) {
-      expect(ms, name).toBeGreaterThanOrEqual(real * 0.5);
-      expect(ms, name).toBeLessThanOrEqual(real * 2);
+      expect(ms, name).toBeGreaterThanOrEqual(real * 0.4);
+      expect(ms, name).toBeLessThanOrEqual(real * 3);
     }
   });
 });

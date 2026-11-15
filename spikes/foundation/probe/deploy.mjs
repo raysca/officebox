@@ -5,10 +5,12 @@
 //   1. refuses if a Worker named officebox-foundation-probe already exists, or a queue of that name exists
 //      (unless --reuse-queue), so the probe never overwrites, attaches to, or later deletes something it didn't
 //      create
-//   2. creates the queue; any error other than "already exists" stops the deploy
-//   3. writes probe/.probe.json (mode 0600) recording what the probe created, BEFORE deploying, so destroy.mjs
-//      knows what it may delete even if a later step fails
-//   4. deploys the Worker to workers.dev, then stores a random PROBE_TOKEN with `wrangler secret put`
+//   2. writes probe/.probe.json (mode 0600) with both "created" flags false, BEFORE creating anything
+//   3. creates the queue (any error other than "already exists" stops the deploy) and records
+//      queueCreatedByProbe right after a successful create
+//   4. records workerCreatedByProbe, deploys the Worker to workers.dev, then stores a random PROBE_TOKEN with
+//      `wrangler secret put`
+// So destroy.mjs always knows what it may delete, even if a later step fails or the script is killed.
 import { randomBytes } from "node:crypto";
 import { fail, queueExists, QUEUE, readState, WORKER, workerExists, wrangler, writeState } from "./lib.mjs";
 
@@ -18,7 +20,9 @@ if (readState()) fail("probe/.probe.json already exists: a probe may still be de
 if (workerExists(WORKER)) {
   fail(`A Worker named "${WORKER}" already exists in this account. The probe won't overwrite a Worker it didn't create.`);
 }
-if (queueExists(QUEUE)) {
+const queueAlreadyThere = queueExists(QUEUE);
+if (reuse && !queueAlreadyThere) fail(`--reuse-queue was given, but there is no queue named "${QUEUE}" to reuse.`);
+if (queueAlreadyThere) {
   if (!reuse) {
     fail(
       `A queue named "${QUEUE}" already exists in this account. The probe won't attach to a queue it didn't create.\n` +
@@ -30,10 +34,12 @@ if (queueExists(QUEUE)) {
 
 const token = randomBytes(24).toString("base64url");
 const state = { url: null, token, queueCreatedByProbe: false, workerCreatedByProbe: false };
+writeState(state); // before creating anything
 if (!reuse) {
   const { status, out } = wrangler(["queues", "create", QUEUE]);
   if (status !== 0 && !/already exists/i.test(out)) fail(`Creating queue "${QUEUE}" failed (see above). Nothing was deployed.`);
   state.queueCreatedByProbe = status === 0;
+  writeState(state);
 }
 // Recorded before the deploy: we checked the Worker didn't exist, so whatever exists under that name after this
 // point (even after a failed or partial deploy) was created by the probe.
