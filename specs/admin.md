@@ -443,7 +443,7 @@ For data-protection access requests. Members can't run these themselves.
 - **Running:** a Workflow, packed like §11.1. The archive expires **7 days (default)** after completion. Downloads check `expires_at` themselves, and the daily job deletes expired archives.
 - **Download:** step-up re-authentication (§11.3), with the subject's role re-checked at download; audited (`member_export.started`, `.completed`, `.failed`, `.downloaded`, `.expired`).
 - **Limits:** one running per-member export per subject, and **10 per actor per day (default)** (Platform §8). Per-member exports don't block workspace exports.
-- **Notice to the subject:** a `security_notice` ("An admin exported your data on *date*") **(default)**, sent **when the export completes**. It's delivered as Notifications §3 defines (in-app and email, not held by DND), without the sign-in banner. This is a confirmation of a request, unlike workspace exports, which members aren't told about (§2).
+- **Notice to the subject:** a `security_notice` ("An admin exported your data on *date*") **(default)**, sent **when the export completes**. It's delivered as Notifications §3 defines: on the **sign-in banner** until acknowledged on a fresh passkey sign-in, plus email when configured, not held by DND (product-owner decision, 15 Nov 2026: like every other security notice). This is a confirmation of a request, unlike workspace exports, which members aren't told about (§2).
   - A **disabled** subject gets the notice when re-enabled.
   - A **deleted** subject gets none.
 
