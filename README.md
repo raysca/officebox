@@ -6,6 +6,8 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 
 ## Deploy
 
+**Full guide: [docs/deployment.md](docs/deployment.md)**, from an empty Cloudflare account to deployment, first-time setup, email and inviting your team. The sections below are a summary.
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/raysca/officebox)
 
 The button copies this repository into your GitHub account, provisions the D1 database, R2 bucket and queues, and runs:
