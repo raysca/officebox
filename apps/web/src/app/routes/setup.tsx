@@ -71,6 +71,20 @@ export function SetupPage() {
   const status = useQuery(setupStatusQuery);
   const [enrolment, setEnrolment] = useState<SetupEnrolment | null>(null);
   const [done, setDone] = useState(false);
+  const failing = status.data?.services.some((service) => !service.ok) ?? false;
+  const wasFailing = useRef(false);
+  useEffect(() => {
+    // The checklist gave way to the setup form: move focus to its heading, so keyboard and screen
+    // reader users land on the new page rather than on a button that's gone.
+    if (wasFailing.current && !failing) {
+      const heading = document.querySelector<HTMLElement>("main h1");
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.focus();
+      }
+    }
+    wasFailing.current = failing;
+  }, [failing]);
 
   if (status.isPending) {
     return (
@@ -115,7 +129,7 @@ export function SetupPage() {
   }
   const data = status.data;
   // Nothing else is offered until every required service passes (M1b-1).
-  if (data && data.services.some((service) => !service.ok)) {
+  if (data && failing) {
     return (
       <ServicesChecklist
         services={data.services}
@@ -129,6 +143,9 @@ export function SetupPage() {
     <ClaimForm
       tokenSource={data?.tokenSource ?? "generated"}
       openUntil={data?.mode === "open" ? (data.openUntil ?? null) : null}
+      // The server's clock minus the browser's when the status arrived: the countdown follows the
+      // server, so a fast browser clock doesn't end the window early.
+      skewMs={data?.now !== undefined ? data.now - status.dataUpdatedAt : 0}
       onEnrolled={setEnrolment}
       onServicesFailing={() => void status.refetch()}
     />
@@ -160,8 +177,12 @@ function ServicesChecklist({
   checking: boolean;
   onRecheck: () => void;
 }) {
+  const failingCount = services.filter((service) => !service.ok).length;
   return (
     <PublicPage title={copy.servicesTitle} description={copy.servicesDescription}>
+      <VisuallyHidden role="status" aria-live="polite">
+        {checking ? copy.servicesRechecking : copy.servicesSummary(failingCount)}
+      </VisuallyHidden>
       <ul aria-label={copy.servicesListLabel} className="flex flex-col gap-3">
         {services.map((service: SetupService) => (
           <li
@@ -174,13 +195,17 @@ function ServicesChecklist({
             </span>
             <span className="flex flex-col gap-1">
               <strong>{copy.serviceNames[service.id]}</strong>
-              <span>{service.ok ? copy.servicesOk : serviceFix(service.id, service.problem)}</span>
+              <span>
+                {service.ok ? null : <VisuallyHidden>{copy.servicesNeedsAttention} </VisuallyHidden>}
+                {service.ok ? copy.servicesOk : serviceFix(service.id, service.problem)}
+              </span>
             </span>
           </li>
         ))}
       </ul>
       <div>
-        <Button variant="primary" onClick={onRecheck} disabled={checking}>
+        {/* Stays focusable while checking (aria-busy), so focus isn't lost to the page. */}
+        <Button variant="primary" aria-busy={checking} onClick={() => (checking ? undefined : onRecheck())}>
           {checking ? copy.servicesRechecking : copy.servicesRecheck}
         </Button>
       </div>
@@ -200,8 +225,18 @@ function minutesLeft(openUntil: number, now: number): number {
  * separate polite announcement only at 10 minutes and at 1 minute left, never on every update. Calls
  * `onClosed` when the window ends, so the page can ask for the token.
  */
-function OpenWindowNotice({ openUntil, onClosed }: { openUntil: number; onClosed: () => void }) {
-  const [now, setNow] = useState(() => Date.now());
+function OpenWindowNotice({
+  openUntil,
+  skewMs,
+  onClosed,
+}: {
+  openUntil: number;
+  /** Server clock minus browser clock (ms). */
+  skewMs: number;
+  onClosed: () => void;
+}) {
+  const serverNow = useCallback(() => Date.now() + skewMs, [skewMs]);
+  const [now, setNow] = useState(serverNow);
   const [announcement, setAnnouncement] = useState("");
   const left = minutesLeft(openUntil, now);
   const announced = useRef<number | null>(null);
@@ -212,10 +247,10 @@ function OpenWindowNotice({ openUntil, onClosed }: { openUntil: number; onClosed
       return;
     }
     // Wake when the rounded-up minute changes (or the window ends), not on a fixed tick.
-    const untilChange = (openUntil - Date.now()) % MINUTE || MINUTE;
-    const timer = setTimeout(() => setNow(Date.now()), untilChange + 50);
+    const untilChange = (openUntil - serverNow()) % MINUTE || MINUTE;
+    const timer = setTimeout(() => setNow(serverNow()), untilChange + 50);
     return () => clearTimeout(timer);
-  }, [left, openUntil, onClosed]);
+  }, [left, openUntil, onClosed, serverNow]);
 
   useEffect(() => {
     if ((left === 10 || left === 1) && announced.current !== left) {
@@ -240,12 +275,14 @@ function OpenWindowNotice({ openUntil, onClosed }: { openUntil: number; onClosed
 function ClaimForm({
   tokenSource,
   openUntil,
+  skewMs,
   onEnrolled,
   onServicesFailing,
 }: {
   tokenSource: "secret" | "generated";
   /** End of the open claim window, or null outside it. */
   openUntil: number | null;
+  skewMs: number;
   onEnrolled: (enrolment: SetupEnrolment) => void;
   onServicesFailing: () => void;
 }) {
@@ -336,7 +373,9 @@ function ClaimForm({
 
   return (
     <PublicPage title={copy.title} description={copy.description}>
-      {open && openUntil !== null ? <OpenWindowNotice openUntil={openUntil} onClosed={closeWindow} /> : null}
+      {open && openUntil !== null ? (
+        <OpenWindowNotice openUntil={openUntil} skewMs={skewMs} onClosed={closeWindow} />
+      ) : null}
       {closedNotice && !errors.token ? <Alert tone="info">{copy.windowClosed}</Alert> : null}
       {formError ? <Alert>{formError}</Alert> : null}
       <form ref={formRef} noValidate onSubmit={onSubmit} className="flex flex-col gap-6">

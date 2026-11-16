@@ -8,6 +8,14 @@ export type GeneratedKeyName = (typeof GENERATED_KEY_NAMES)[number];
 /** 32 random bytes, as every generated key is (Platform §16). */
 const GENERATED_KEY_BYTES = 32;
 
+/** Where a sign-in key came from when an isolate last resolved it. */
+export type RecordedKeySource = "worker_secret" | "generated";
+
+export interface KeySourceChange {
+  /** The source recorded before, and since when (epoch ms); null when unchanged or first seen. */
+  previous: { source: RecordedKeySource; since: number } | null;
+}
+
 function isGeneratedKeyName(name: string): name is GeneratedKeyName {
   return (GENERATED_KEY_NAMES as readonly string[]).includes(name);
 }
@@ -29,6 +37,10 @@ function randomKey(): string {
  *   between, so concurrent callers from any isolate converge on the first value written, and the write
  *   is durable before the RPC returns (output gate). Values never leave this object except as the RPC
  *   result to the Worker: never logged, never copied to D1.
+ *
+ * - `recordKeySource(name, source)`: remembers which source each key last resolved from (in `meta`),
+ *   and returns the previous one when it changed, so the Worker can log the switch (a Worker secret set
+ *   or deleted on a running workspace signs everyone out or invalidates links, Platform §16).
  *
  * The class is never renamed or deleted (TDD §6.5): losing its storage signs everyone out.
  */
@@ -55,7 +67,24 @@ export class SystemObject extends CoreDurableObject {
       return ok({ value: row.value });
     });
   }
+
+  recordKeySource(name: GeneratedKeyName, source: RecordedKeySource): Promise<RpcResult<KeySourceChange>> {
+    return this.rpc(() => {
+      if (!isGeneratedKeyName(name) || (source !== "worker_secret" && source !== "generated")) {
+        return err(apiError("validation_failed", "Unknown key or source."));
+      }
+      const key = `key_source:${name}`;
+      const match = SOURCE_PATTERN.exec(this.getMeta(key) ?? "");
+      if (match?.[1] === source) return ok({ previous: null });
+      this.setMeta(key, `${source}:${Date.now()}`);
+      return ok({
+        previous: match ? { source: match[1] as RecordedKeySource, since: Number(match[2]) } : null,
+      });
+    });
+  }
 }
+
+const SOURCE_PATTERN = /^(worker_secret|generated):(\d+)$/;
 
 const SYSTEM_MIGRATIONS: readonly DoMigration[] = [
   {

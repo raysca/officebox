@@ -126,13 +126,13 @@ const setupRoutes = new Hono<AppEnv>()
   .post("/", async (c) => {
     const ctx = coreContext(c);
     if (await setupDone(c)) return respond(c, err(NOT_FOUND));
+    const limited = await limitSetup(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
     // While any required service fails, no claim (M1b-1).
     const report = await checkSetupServices(c.env, c.var.log);
     if (!report.allOk) return respond(c, err(SETUP_SERVICES_FAILING));
     const secrets = await identitySecrets(c.env, c.var.log);
     if (!secrets.ok) return respond(c, secrets);
-    const limited = await limitSetup(ctx, c.req.raw);
-    if (!limited.ok) return respond(c, limited);
     const body = await readJson(c, setupBodySchema, SMALL_BODY);
     if (!body.ok) return respond(c, body);
     // The origin setup runs on becomes the canonical origin (Identity §4.1).

@@ -158,6 +158,9 @@ export const messages = {
     servicesRecheck: "Check again",
     servicesRechecking: "Checking…",
     servicesOk: "Working",
+    servicesNeedsAttention: "Needs attention:",
+    servicesSummary: (failing: number) =>
+      failing === 1 ? "1 required service needs attention." : `${failing} required services need attention.`,
     serviceNames: {
       d1: "Database (D1)",
       durable_objects: "Durable Objects",

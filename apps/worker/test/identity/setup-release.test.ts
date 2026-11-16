@@ -148,6 +148,34 @@ describe("scripts/setup-release.sql", () => {
     expect((await row())?.setup_opened_at).toBeGreaterThan(0);
   });
 
+  it("after setup completes, the hourly job never writes: no marker, no entry, setup_opened_at unchanged", async () => {
+    const { browser } = await openClaim();
+    expect((await registerPasskey(browser, new SoftAuthenticator())).verify?.status).toBe(200);
+    const before = await row();
+    const writes = await env.DB.prepare("SELECT count(*) AS n FROM audit_log").first<{ n: number }>();
+    await repair();
+    await repair();
+    expect(await row()).toEqual(before);
+    expect(await releaseEntries()).toBe(0);
+    const after = await env.DB.prepare("SELECT count(*) AS n FROM audit_log").first<{ n: number }>();
+    expect(after?.n).toBe(writes?.n);
+    // Completion revoked the setup resume code; the daily prune deletes it a day after it expires.
+    const code = await env.DB.prepare(
+      "SELECT revoked_at, expires_at FROM auth_tokens WHERE kind = 'setup_resume'",
+    ).first<{
+      revoked_at: number | null;
+      expires_at: number;
+    }>();
+    expect(code?.revoked_at).not.toBeNull();
+    const prune = IDENTITY_JOBS.find((j) => j.name === "identity.prune")!;
+    const later = code!.expires_at + 24 * 60 * 60 * 1000 + 1;
+    await prune.run({ env, log: silent, now: () => later, scheduledTime: later });
+    const left = await env.DB.prepare("SELECT count(*) AS n FROM auth_tokens WHERE kind = 'setup_resume'").first<{
+      n: number;
+    }>();
+    expect(left?.n).toBe(0);
+  });
+
   it("a release that matched nothing produces no audit entry, and a second run changes nothing", async () => {
     await new Browser().json("/api/setup"); // the window open, nothing claimed
     expect(await runReleaseScript()).toEqual([false, false, false]);

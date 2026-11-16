@@ -3,7 +3,7 @@ import { Database, expectOk } from "../../core/db";
 import { pruneCounterEventsStatement } from "./counters";
 import { repairInvitations } from "./invitations";
 import { DEVICE_RETENTION_MS } from "./known-devices";
-import { expireStaleClaim, observeRelease, repairSetup } from "./setup";
+import { expireStaleClaim, observeReleaseIfMarked, repairSetup } from "./setup";
 
 const INVITATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const EMAIL_DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -28,7 +28,7 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
       const completed = await repairSetup(ctx);
       const released = await expireStaleClaim(ctx);
       // A release made with scripts/setup-release.sql is audited by whichever observer comes first (M1b-1).
-      const releasedOutsideApp = await observeRelease(ctx);
+      const releasedOutsideApp = await observeReleaseIfMarked(ctx);
       if (completed || released || releasedOutsideApp) {
         ctx.log.info("identity repair", { completed, released, releasedOutsideApp });
       }
@@ -63,6 +63,8 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
           ),
           // Email delivery records: 30 days (default).
           db.statement("DELETE FROM email_deliveries WHERE created_at < ?", now - EMAIL_DELIVERY_RETENTION_MS),
+          // Setup resume codes a day after they expire (M1b-1); completion already revoked them.
+          db.statement("DELETE FROM auth_tokens WHERE kind = 'setup_resume' AND expires_at < ?", now - day),
         ]),
       );
       ctx.log.info("pruned identity rows", {
@@ -73,6 +75,7 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
         devices: result[5]?.changes ?? 0,
         invitations: result[6]?.changes ?? 0,
         emailDeliveries: result[7]?.changes ?? 0,
+        setupResumeCodes: result[8]?.changes ?? 0,
       });
     },
   }),

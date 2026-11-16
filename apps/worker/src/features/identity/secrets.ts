@@ -7,7 +7,7 @@ import {
   type SetupServiceProblem,
   type SignInKeySource,
 } from "@officebox/shared";
-import { generatedKey, KEY_UNREACHABLE, secretIsSet } from "../../core/keys";
+import { generatedKey, KEY_UNREACHABLE, noteKeySource, secretIsSet } from "../../core/keys";
 import type { Logger } from "../../core/log";
 import type { Env } from "../../env";
 import { byteLength } from "./crypto";
@@ -124,10 +124,13 @@ export async function resolveBetterAuthSecret(
     const list = secretIsSet(env.BETTER_AUTH_SECRETS)
       ? (parseSecretList(env.BETTER_AUTH_SECRETS) ?? [])
       : [{ version: 1, value: env.BETTER_AUTH_SECRET ?? "" }];
+    await noteKeySource(env, "better_auth_secret", "worker_secret", log);
     return ok({ value: list, source: "worker_secret" });
   }
   const key = await generatedKey(env, "better_auth_secret", log);
-  return key.ok ? ok({ value: [{ version: 1, value: key.value }], source: "generated" }) : err("unreachable");
+  if (!key.ok) return err("unreachable");
+  await noteKeySource(env, "better_auth_secret", "generated", log);
+  return ok({ value: [{ version: 1, value: key.value }], source: "generated" });
 }
 
 /** `TOKEN_HASH_KEY`: the Worker secret when set, otherwise the generated key. */
@@ -142,10 +145,13 @@ export async function resolveTokenHashKey(
       problems.push(problem);
       return err("invalid_secret");
     }
+    await noteKeySource(env, "token_hash_key", "worker_secret", log);
     return ok({ value: env.TOKEN_HASH_KEY, source: "worker_secret" });
   }
   const key = await generatedKey(env, "token_hash_key", log);
-  return key.ok ? ok({ value: key.value, source: "generated" }) : err("unreachable");
+  if (!key.ok) return err("unreachable");
+  await noteKeySource(env, "token_hash_key", "generated", log);
+  return ok({ value: key.value, source: "generated" });
 }
 
 /** Both keys, or the error the route returns (`unavailable`). */

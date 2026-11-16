@@ -93,3 +93,44 @@ export async function tokenHashKeyOrNull(env: Pick<Env, "TOKEN_HASH_KEY"> & Part
   const key = await generatedKey({ SYSTEM: env.SYSTEM }, "token_hash_key", log);
   return key.ok ? key.value : null;
 }
+
+let noted = new WeakMap<object, Set<string>>();
+
+/** Forgets which key sources this isolate has already recorded (tests). */
+export function clearKeySourceNotes(): void {
+  noted = new WeakMap();
+}
+
+/**
+ * Records, once per isolate per key and source, where a key resolved from, and logs a warning when that
+ * differs from what the SystemObject recorded before: a Worker secret set (or deleted) on a running
+ * workspace signs everyone out or invalidates outstanding links (Platform §16). Never logs a value.
+ * Best effort: a failure here never fails the request.
+ */
+export async function noteKeySource(
+  env: Partial<Pick<Env, "SYSTEM">>,
+  name: GeneratedKeyName,
+  source: SignInKeySource,
+  log: Logger,
+): Promise<void> {
+  const binding = env.SYSTEM as object | undefined;
+  if (!env.SYSTEM || !binding) return;
+  const seen = noted.get(binding) ?? new Set<string>();
+  noted.set(binding, seen);
+  const tag = `${name}:${source}`;
+  if (seen.has(tag)) return;
+  seen.add(tag);
+  try {
+    const result = await env.SYSTEM.getByName("system").recordKeySource(name, source);
+    if (result.ok && result.value.previous) {
+      log.warn("sign-in key source changed: sessions or outstanding links made with the old key no longer work", {
+        key: name,
+        from: result.value.previous.source,
+        to: source,
+        previousSince: new Date(result.value.previous.since).toISOString(),
+      });
+    }
+  } catch {
+    seen.delete(tag); // try again on a later request
+  }
+}

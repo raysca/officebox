@@ -56,6 +56,12 @@ export async function completeSetupClaim(ctx: CoreContext, claim: string, ownerI
         { action: "setup.complete", actor: ownerId, target: { type: "user", id: ownerId } },
         { onlyIfPreviousChanged: true },
       ),
+      // The setup resume code (M1b-1) has no use once the owner has a passkey.
+      db.statement(
+        "UPDATE auth_tokens SET revoked_at = ? WHERE user_id = ? AND kind = 'setup_resume' AND revoked_at IS NULL",
+        now,
+        ownerId,
+      ),
     ]),
   );
   const done = (result[0]?.changes ?? 0) === 1;

@@ -181,11 +181,17 @@ describe("setup (Identity §4.1)", () => {
       within(list).getByText("R2 isn't enabled on this Cloudflare account: dashboard → R2, then redeploy."),
     ).toBeDefined();
     expect(within(list).getAllByText("Working")).toHaveLength(5);
+    expect(within(list).getByText("Needs attention:")).toBeDefined();
+    expect(screen.getByText("1 required service needs attention.")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Create workspace" })).toBeNull();
     await expectNoViolations();
     failing = false;
     await user.click(screen.getByRole("button", { name: "Check again" }));
     expect(await screen.findByRole("button", { name: "Create workspace" })).toBeDefined();
+    // Focus moves to the new page's heading.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1, name: "Set up your workspace" })),
+    );
   });
 
   it("inside the open window: the notice with the time left, no token needed, and the resume code shown once", async () => {
@@ -234,6 +240,30 @@ describe("setup (Identity §4.1)", () => {
       "resume-code-0123456789abcdefghijklmnopqrstu",
     );
     await expectNoViolations();
+  });
+
+  it("counts the time left against the server's clock, not a skewed browser clock", async () => {
+    // The browser runs 20 minutes fast: the server says it's 20 minutes earlier than the browser thinks.
+    const serverNow = Date.now() - 20 * 60_000;
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () =>
+          jsonResponse({
+            setupRequired: true,
+            tokenSource: "generated",
+            claimed: false,
+            services: allServices(),
+            mode: "open",
+            openUntil: serverNow + 30 * 60_000 - 1000,
+            now: serverNow,
+          }),
+        ),
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    expect(await screen.findByText(/\(30 minutes left\)/)).toBeDefined();
   });
 
   it("a claim refused with setup_token_required keeps what was typed and asks for the token", async () => {

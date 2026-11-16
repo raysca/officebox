@@ -145,6 +145,11 @@ export const setupStatusSchema = z.object({
   mode: setupModeSchema,
   /** End of the open claim window (epoch ms); present only while `mode` is `open`. */
   openUntil: z.number().int().optional(),
+  /**
+   * The server's clock when it answered (epoch ms), so the page counts the time left against the
+   * server, not a skewed browser clock (M1b-1). Optional so an older Worker's answer still parses.
+   */
+  now: z.number().int().optional(),
 });
 export type SetupStatus = z.infer<typeof setupStatusSchema>;
 

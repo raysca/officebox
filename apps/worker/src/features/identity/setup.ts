@@ -143,9 +143,12 @@ export async function observeRelease(ctx: CoreContext): Promise<boolean> {
   return observed;
 }
 
-/** Observes a release only when the marker says there is one (a read first, so most requests don't write). */
-async function observeReleaseIfMarked(ctx: CoreContext): Promise<void> {
-  if ((await readSetupOpenedAt(ctx)) === 0) await observeRelease(ctx);
+/**
+ * Observes a release only when the marker says there is one (a read first, so most requests and the
+ * hourly job don't write). Returns whether this call wrote the audit entry.
+ */
+export async function observeReleaseIfMarked(ctx: CoreContext): Promise<boolean> {
+  return (await readSetupOpenedAt(ctx)) === 0 ? observeRelease(ctx) : false;
 }
 
 /**
@@ -202,6 +205,36 @@ export async function expireIfStale(ctx: CoreContext): Promise<boolean> {
 }
 
 /**
+ * Undoes a claim whose owner was created but whose later steps failed: deletes that owner (only while
+ * it has no passkey and never signed in; its tickets and resume code go with it) and their handle,
+ * then releases the claim, which now has no owner row. The window and the setup token are kept.
+ */
+async function undoClaim(ctx: CoreContext, claim: string, ownerId: string): Promise<void> {
+  try {
+    const db = new Database(ctx.env.DB);
+    expectOk(
+      await db.batchRun([
+        db.statement(
+          `DELETE FROM users WHERE id = ? AND created_attempt_id = ? AND role = 'owner'
+              AND NOT EXISTS (SELECT 1 FROM passkeys WHERE user_id = users.id) AND first_signed_in_at IS NULL`,
+          ownerId,
+          claim,
+        ),
+        db.statement(
+          "DELETE FROM handles WHERE created_attempt_id = ? AND NOT EXISTS (SELECT 1 FROM users WHERE created_attempt_id = ?)",
+          claim,
+          claim,
+        ),
+      ]),
+    );
+    await releaseOrphanedClaim(ctx, claim);
+  } catch (error) {
+    // The 24-hour expiry (or the release script) still releases it.
+    ctx.log.error("setup: couldn't undo a failed claim", { error });
+  }
+}
+
+/**
  * Releases a claim that has no owner row (only while it's still the current, incomplete claim). The
  * setup token is kept, so the same token works again. Returns whether it released one.
  */
@@ -226,7 +259,14 @@ export async function releaseOrphanedClaim(ctx: CoreContext, claim: string): Pro
 export async function setupStatus(ctx: CoreContext, report: ServicesReport): Promise<Result<SetupStatus, ApiError>> {
   const tokenSource = setupTokenSource(ctx.env);
   if (!report.d1Ok) {
-    return ok({ setupRequired: true, tokenSource, claimed: false, services: report.services, mode: "token" });
+    return ok({
+      setupRequired: true,
+      tokenSource,
+      claimed: false,
+      services: report.services,
+      mode: "token",
+      now: ctx.now(),
+    });
   }
   if (await isSetupComplete(ctx)) return err(NOT_FOUND);
   await observeReleaseIfMarked(ctx);
@@ -241,6 +281,7 @@ export async function setupStatus(ctx: CoreContext, report: ServicesReport): Pro
     claimed: installation?.setupClaim != null,
     services: report.services,
     ...window,
+    now: ctx.now(),
   });
 }
 
@@ -359,8 +400,17 @@ export async function claimSetup(
     await releaseOrphanedClaim(ctx, nonce);
     return owner;
   }
-  const ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, owner.value, "setup", nonce, now);
-  const resumeCode = mode === "open" ? await issueResumeCode(ctx, secrets, owner.value, nonce, now) : undefined;
+  let ticket: IssuedTicket;
+  let resumeCode: string | undefined;
+  try {
+    ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, owner.value, "setup", nonce, now);
+    resumeCode = mode === "open" ? await issueResumeCode(ctx, secrets, owner.value, nonce, now) : undefined;
+  } catch (error) {
+    // Without its ticket or resume code an open-window claimer couldn't resume: undo the claim so
+    // setup can be tried again at once, rather than locking it for 24 hours.
+    await undoClaim(ctx, nonce, owner.value);
+    throw error;
+  }
   // One line for the operator (Identity §4.1): mode, time, origin and country; never an email or name.
   const country = currentStore()?.cf?.country;
   ctx.log.info("officebox setup claimed", {

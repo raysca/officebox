@@ -232,6 +232,38 @@ function bodyOf(owner: OwnerDetails) {
   };
 }
 
+describe("a claim whose later steps fail is undone (review finding)", () => {
+  it("if the resume code can't be written, the owner, handle and claim are removed, so setup can be tried again at once", async () => {
+    await status();
+    const owner = ownerDetails();
+    const broken = failingDb((sql) => sql.includes("'setup_resume'"));
+    const failed = await openClaim(new Browser(), owner, { DB: broken });
+    expect(failed.status).toBe(500);
+    expect(await claimRow()).toBeNull();
+    const left = await env.DB.prepare(
+      "SELECT (SELECT count(*) FROM users WHERE email = ?1) AS users, (SELECT count(*) FROM handles WHERE handle = ?2) AS handles",
+    )
+      .bind(owner.email, owner.handle)
+      .first<{ users: number; handles: number }>();
+    expect(left).toEqual({ users: 0, handles: 0 });
+    // The window is untouched, and the same person can claim again straight away.
+    expect(await openedAt()).toBe(T0);
+    expect((await openClaim(new Browser(), owner)).status).toBe(201);
+  });
+
+  it("the same holds when the enrolment ticket can't be issued (token mode)", async () => {
+    await seedSetupToken(SETUP_TOKEN, T0 + SETUP_CLAIM_TTL_MS);
+    const broken = failingDb((sql) => sql.includes("'passkey_enrol'") && sql.startsWith("INSERT"));
+    const failed = await new Browser().json("/api/setup", {
+      body: { token: SETUP_TOKEN, ...bodyOf(ownerDetails()) },
+      env: { DB: broken },
+    });
+    expect(failed.status).toBe(500);
+    expect(await claimRow()).toBeNull();
+    expect((await claim(new Browser(), ownerDetails(), SETUP_TOKEN)).status).toBe(201);
+  });
+});
+
 describe("the setup resume code (Identity §2 'Resuming an open-window claim')", () => {
   it("resumes registration for that owner only, on any device, under the same 410 guards", async () => {
     await status();
@@ -377,6 +409,29 @@ describe("the required-services check (Identity §4.1; TDD §6.8)", () => {
     expect(later.body).toMatchObject({ mode: "open", openUntil: T0 + SETUP_OPEN_WINDOW_MS });
     clock.now = T0 + SETUP_OPEN_WINDOW_MS;
     expect((await openClaim(new Browser())).body).toMatchObject({ error: { code: "setup_token_required" } });
+  });
+
+  it("a completely unmigrated D1 (no installation table) shows migrations_pending, not a 500", async () => {
+    const empty = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (/installation/.test(sql)) throw new Error("D1_ERROR: no such table: installation: SQLITE_ERROR");
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const browser = new Browser();
+    const report = await status(browser, { DB: empty });
+    expect(report.status).toBe(200);
+    expect(report.body.services).toContainEqual({ id: "d1", ok: false, problem: "migrations_pending" });
+    expect(report.body).toMatchObject({ mode: "token", claimed: false });
+    const refused = await openClaim(browser, ownerDetails(), { DB: empty });
+    expect(refused.body).toMatchObject({ error: { code: "setup_services_failing" } });
+    expect(browser.bodies.join("\n")).not.toMatch(/SQLITE|D1_ERROR|no such table/);
   });
 
   it("the services are listed in a fixed order, with no detail beyond the problem code", async () => {

@@ -44,6 +44,19 @@ function configWithoutR2(): string {
   return path;
 }
 
+/** Resolves once nothing answers on the port (or after 15 s). */
+async function waitForPortFree(port: number): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) });
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 async function waitForHealth(url: string, child: ChildProcess, output: () => string): Promise<void> {
   const deadline = Date.now() + 120_000;
   while (Date.now() < deadline) {
@@ -62,6 +75,7 @@ async function waitForHealth(url: string, child: ChildProcess, output: () => str
 /** Starts `wrangler dev` with only the test email sink as a variable: no secrets. */
 async function startServer(slot: number, options: { state?: string; config?: string } = {}): Promise<Server> {
   const port = BASE_PORT + slot;
+  await waitForPortFree(port);
   const state = options.state ?? mkdtempSync(join(tmpdir(), "officebox-e2e-quick-"));
   const config = options.config ?? join(ROOT, "wrangler.jsonc");
   if (!options.state) {
@@ -106,14 +120,28 @@ async function startServer(slot: number, options: { state?: string; config?: str
     state,
     config,
     async stop() {
-      if (child.exitCode !== null || child.pid === undefined) return;
-      const exited = new Promise((r) => child.once("exit", r));
-      try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {
-        return;
+      // The whole process group (npx, wrangler, workerd): SIGTERM, then SIGKILL after 10 s, then wait
+      // until the port is free, so a retry or the next test can reuse it.
+      const pid = child.pid;
+      if (pid !== undefined) {
+        const exited = child.exitCode !== null ? Promise.resolve() : new Promise((r) => child.once("exit", r));
+        const signal = (name: NodeJS.Signals) => {
+          try {
+            process.kill(-pid, name);
+          } catch {
+            // already gone
+          }
+        };
+        signal("SIGTERM");
+        const timedOut = await Promise.race([
+          exited.then(() => false),
+          new Promise<boolean>((r) => setTimeout(() => r(true), 10_000)),
+        ]);
+        // Children of the group can outlive npx: always finish with SIGKILL.
+        signal("SIGKILL");
+        if (timedOut) await Promise.race([exited, new Promise((r) => setTimeout(r, 5_000))]);
       }
-      await Promise.race([exited, new Promise((r) => setTimeout(r, 10_000))]);
+      await waitForPortFree(port);
     },
   };
 }
@@ -157,7 +185,8 @@ async function finishWithPasskey(page: Page) {
   await expect(page.getByRole("banner")).toContainText("Quick Start Co");
 }
 
-test.describe.configure({ mode: "parallel", timeout: 240_000 });
+// Serial: each test owns a fixed port pair, and a retry must not overlap a server still shutting down.
+test.describe.configure({ mode: "serial", timeout: 240_000 });
 
 test("a fresh deploy with no secrets: set up inside the open window with no token, and signed in", async ({
   page,
