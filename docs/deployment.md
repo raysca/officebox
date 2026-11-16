@@ -1,6 +1,6 @@
 # Deploying Officebox
 
-This guide takes you from an empty Cloudflare account to a working workspace with its first owner and, optionally, email and file storage. It covers:
+This guide takes you from an empty Cloudflare account to a working workspace with its first owner and, optionally, email. It covers:
 
 1. [Before you start](#1-before-you-start)
 2. [Choose your address](#2-choose-your-address)
@@ -9,19 +9,18 @@ This guide takes you from an empty Cloudflare account to a working workspace wit
 5. [Check the deployment](#5-check-the-deployment)
 6. [First-time setup](#6-first-time-setup)
 7. [Turn on email](#7-turn-on-email) (optional)
-8. [Turn on file storage](#8-turn-on-file-storage) (optional)
-9. [Invite your team](#9-invite-your-team)
-10. [Updating, rolling back and troubleshooting](#10-updating-rolling-back-and-troubleshooting)
+8. [Invite your team](#8-invite-your-team)
+9. [Updating, rolling back and troubleshooting](#9-updating-rolling-back-and-troubleshooting)
 
 ## Quick start
 
 To try Officebox with almost no setup:
 
-1. **Deploy** with the Deploy to Cloudflare button ([step 3](#option-a-deploy-to-cloudflare-button)).
+1. **Enable R2** on the Cloudflare account (dashboard → R2), then **deploy** with the Deploy to Cloudflare button ([step 3](#option-a-deploy-to-cloudflare-button)).
 2. **Open the address and finish within the hour.** For the first 60 minutes after the setup page is first opened, setup needs no setup token. The page shows how long is left.
-3. **Create your passkey.** Enter the workspace name and your name, @handle and email, then create a passkey when the browser asks.
+3. **Check, then create your passkey.** The page first checks that everything the workspace needs is working, and tells you how to fix anything that isn't. Then enter the workspace name and your name, @handle and email, then create a passkey when the browser asks.
 
-You don't need to set any secrets, and you don't need R2. The Worker generates its own sign-in keys, and file storage can be turned on later.
+You don't need to set any secrets: the Worker generates its own sign-in keys.
 
 > **Until setup is done, anyone who opens the address in that first hour can claim the workspace.** Do it straight away. If you'd rather not take that chance, set a `SETUP_TOKEN` secret before opening the address: then there's no open hour at all ([step 6](#6-first-time-setup)).
 
@@ -36,7 +35,7 @@ Throughout, `<your-domain>` stands for the address your workspace will use, for 
 You need:
 
 - **A Cloudflare account.** The free plan runs the core app. **Workers Paid** is needed for Cloudflare Email Service, and is recommended for production limits.
-- **R2 is optional.** You need it only to store files (avatars, attachments, documents' files and exports, as those features arrive). Enabling it needs a payment method on file, even within the free allowance. See [step 8](#8-turn-on-file-storage).
+- **R2 enabled** on the account: dashboard → R2. This needs a payment method on file, even if you stay within the free allowance. Setup won't proceed without it.
 - **A `workers.dev` subdomain** if the account has never had one: dashboard → Workers & Pages.
 - **A domain on Cloudflare DNS** (recommended). You need one for a custom address and for Cloudflare Email Service.
 - **A device that can create passkeys** for the first owner: a phone, a laptop with a screen lock (Touch ID, Windows Hello and so on), or a security key with a PIN or biometric. Two devices are better (see [step 6](#6-first-time-setup)).
@@ -62,7 +61,7 @@ Pick **one** of these paths. Don't use two at once, or deploys race on every pus
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/raysca/officebox)
 
-The button copies the repository into your GitHub account, provisions the D1 database and queues, and runs `npm run build` and `npm run deploy` (preflight → D1 migrations → `wrangler deploy`). Workers Builds then redeploys every push to your copy.
+The button copies the repository into your GitHub account, provisions the D1 database, R2 bucket and queues, and runs `npm run build` and `npm run deploy` (preflight → D1 migrations → `wrangler deploy`). Workers Builds then redeploys every push to your copy.
 
 The button may prompt for secrets. You can leave them all empty: the Worker generates its own sign-in keys. For a production workspace, set them ([step 4](#4-secrets)).
 
@@ -75,9 +74,9 @@ If your copy came from the Deploy button, first disconnect Workers Builds: dashb
 1. **Create an API token.** Dashboard → My Profile → API Tokens → Create Token → Create Custom Token, scoped to your account, with these **Account** permissions:
    - Workers Scripts: Edit
    - D1: Edit
+   - Workers R2 Storage: Edit
    - Queues: Edit
    - Account Settings: Read
-   - Workers R2 Storage: Edit, only once you [turn on file storage](#8-turn-on-file-storage)
 
    An account-owned token (Manage Account → Account API Tokens) works too. If a deploy fails with an authorisation error naming another product, add that permission.
 2. **Find your account ID**: dashboard → Workers & Pages → Account details.
@@ -93,7 +92,7 @@ Each run deploys the commit CI tested, and only if it is still the tip of `main`
 2. Creates the `officebox` D1 database if the account has none by that name.
 3. Applies D1 migrations.
 4. Creates `BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` as Worker secrets if they're missing. It never overwrites or prints them.
-5. Runs `wrangler deploy`, which creates the queues (and the R2 bucket, if you turned on file storage) on first use.
+5. Runs `wrangler deploy`, which creates the R2 bucket and queues on first use.
 
 If you move a workspace that's already in use from the Deploy button to GitHub Actions, step 4 replaces the keys the Worker generated: everyone is signed out once, and outstanding invitation and sign-in links stop working ([step 4](#4-secrets)). Do it at a quiet time.
 
@@ -150,7 +149,7 @@ Open `https://<your-domain>/health`, or the `workers.dev` address. You should se
 { "status": "ok", "version": "…" }
 ```
 
-`https://<your-domain>/api/setup` should report `"setupRequired": true` and `"claimed": false`, and `"mode"`: `"open"` (with `"openUntil"`) during the first hour after it was first opened, or `"token"`. Opening it counts as opening the workspace, so the hour starts then. If `/health` reports a failing check, see [troubleshooting](#troubleshooting).
+`https://<your-domain>/api/setup` should report `"setupRequired": true` and `"claimed": false`, and `"mode"`: `"open"` (with `"openUntil"`) during the first hour after it was first opened, or `"token"`, plus a `"services"` list showing whether each required service passes (never secret values or account details). Once every service passes, opening it counts as opening the workspace, so the hour starts then. If `/health` reports a failing check, see [troubleshooting](#troubleshooting).
 
 ## 6. First-time setup
 
@@ -165,7 +164,7 @@ Do this **on the address you'll keep** ([step 2](#2-choose-your-address)), as so
 1. **Get the setup token, if you need one.**
    - If you set `SETUP_TOKEN`, that's the token.
    - Otherwise, open `https://<your-domain>/setup` once. Then, in the dashboard, go to Workers & Pages → `officebox` → Logs and find the entry **officebox setup token**. Only members of your Cloudflare account can read these logs. The token expires after 24 hours; visiting `/setup` again after that writes a new one. It also works during the open hour.
-2. **Open `https://<your-domain>/setup`.** It checks that this browser can create a passkey.
+2. **Open `https://<your-domain>/setup`.** It first checks the services the workspace needs: the database, Durable Objects, queues, R2 and the sign-in keys. If any fails, the page lists it with how to fix it (for example, "R2 isn't enabled on this Cloudflare account: dashboard → R2, then redeploy") and goes no further. The open hour doesn't start until everything passes. Then it checks that this browser can create a passkey.
 3. **Enter** the setup token if asked, the workspace name, and the first owner's name, @handle and email. If you claimed without a token, the page shows a **setup resume code** once: keep it until your passkey exists, in case you need to continue on another device.
 4. **Create a passkey** when the browser asks: screen lock, phone or security key. User verification (PIN or biometric) is required. Setup is complete once this passkey exists, and `/setup` is then gone for good.
 5. **Add a second passkey straight away**, on another device: account menu → Passkeys → Add a passkey. An owner with only one passkey can't invite anyone until they add a second one or set `RECOVERY_TOKEN`. This is your safety net: there are no passwords, so lost passkeys are replaced, not recovered.
@@ -183,8 +182,8 @@ Every claim writes an entry **officebox setup claimed** to the Worker's logs, wi
   npx wrangler d1 execute officebox --remote --file scripts/setup-release.sql
   ```
 
-  It never removes an owner who has created a passkey or signed in.
-- **Finished by someone else:** start over. Nothing of yours is in the workspace yet. In the dashboard, delete the `officebox` Worker and the `officebox` D1 database, then deploy again. This time, set `SETUP_TOKEN` first or open the address straight away.
+  It never removes an owner who has created a passkey or signed in. The workspace's audit log records the release the next time the Worker sees it.
+- **Finished by someone else:** start over with a fresh deployment; there's no in-app reset. Nothing of yours is in the workspace yet. In the dashboard, delete the `officebox` Worker and the `officebox` D1 database, then deploy again. This time, set `SETUP_TOKEN` first or open the address straight away.
 
 ## 7. Turn on email
 
@@ -215,17 +214,7 @@ If the test email doesn't arrive, check the Worker logs for the delivery outcome
 
 Also under Admin → Settings: turn **sign-in links** off, or limit **allowed invitation domains**.
 
-## 8. Turn on file storage
-
-File storage uses R2. It's off by default, so you can deploy without R2. Until it's on, features that store files say so, and owners and admins see "File storage isn't set up". Today's milestone stores no files yet; avatars, attachments, document files and exports use it as they arrive.
-
-1. **Enable R2** on the account: dashboard → R2. It needs a payment method on file.
-2. **Add the binding.** In your copy of the repository, open `wrangler.jsonc` and uncomment the `r2_buckets` block for the `FILES` binding.
-3. **Deploy** (push to `main`, or run `npm run deploy`). `wrangler deploy` creates the bucket. With GitHub Actions, add *Workers R2 Storage: Edit* to the API token first.
-
-Upgrades keep the block. Don't remove it once files exist: they stay in the bucket but can't be reached until it's added back.
-
-## 9. Invite your team
+## 8. Invite your team
 
 Go to **Admin → Invitations → Invite**, and enter an email and a role. Admins invite members; only owners invite admins.
 
@@ -235,7 +224,7 @@ Go to **Admin → Invitations → Invite**, and enter an email and a role. Admin
 
 Pending invitations can be copied again, resent or revoked.
 
-## 10. Updating, rolling back and troubleshooting
+## 9. Updating, rolling back and troubleshooting
 
 ### Updating
 
@@ -257,7 +246,8 @@ Dashboard → your Worker → Deployments → pick the previous version → Roll
 | No **officebox setup token** in the logs | Open `/setup` once to generate it, then refresh the Logs view. Check that observability is enabled on the Worker. |
 | "The setup token is not valid." | It expired after 24 hours, or it's from a different visit. Open `/setup` again and use the newest token. |
 | Passkey prompt fails or offers no passkeys | You're on a different address from the one setup ran on. Passkeys only work on the canonical origin. |
-| Deploy fails with an R2 error | You added the `FILES` binding before enabling R2 on the account (dashboard → R2), or the API token lacks *Workers R2 Storage: Edit* ([step 8](#8-turn-on-file-storage)). |
+| Deploy fails on the first run with an R2 error | R2 isn't enabled on the account (dashboard → R2). |
+| The setup page lists a failing service | Follow the fix it shows, then reload. R2: enable it (dashboard → R2) and redeploy. Database: redeploy so migrations run. Sign-in keys: a Worker secret is set but too short; fix or delete it. |
 | GitHub deploy shows green but nothing deployed | The `production` environment secrets are missing (the workflow skips with a notice), or a newer commit superseded the run. |
 | Test email never arrives | Settings shows a missing secret, the domain isn't onboarded or verified with the provider, or the message is waiting on a retry. Check the Worker logs. |
 | "Too many requests" while several people join at once | The per-IP limit on invitation pages (5 a minute). Wait a minute and try again. |

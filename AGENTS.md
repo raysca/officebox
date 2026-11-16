@@ -111,7 +111,7 @@ The structure is set out in `PLAN.md` §2: `apps/worker`, `apps/web`, `packages/
 - **TypeScript strict** everywhere. No `any` without a comment explaining why.
 - **Nothing deployment-specific in the repository.** Anyone can deploy Officebox to their own Cloudflare account, so code, `wrangler.jsonc`, migrations, tests and defaults never contain a real domain, hostname, email address, account ID or zone.
   - **Derive** what you can from the request: origin, host, WebAuthn relying-party ID.
-  - Take everything else from **admin settings, Worker secrets or environment variables** set per deployment, such as the email sender address.
+  - Take everything else from **admin settings, Worker secrets or environment variables** set per deployment, such as the email sender address. The only secrets the Worker may generate itself are the `BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` fallbacks, kept in Durable Object storage (§4.2).
   - Docs and tests use placeholders like `example.com` or `<your-domain>`.
 - **Validation:** every API body and every WebSocket message is validated with a **Zod schema from `packages/shared`**. Clients and the Worker share the same types.
 - **IDs** are ULIDs. **Timestamps** are UTC epoch milliseconds. **Calendar dates** are ISO `YYYY-MM-DD` together with an IANA time zone.
@@ -129,7 +129,7 @@ The structure is set out in `PLAN.md` §2: `apps/worker`, `apps/web`, `packages/
   - follow the hibernation rules in TDD §3.2: no heavy constructor work, and no timers that keep the object awake.
 - **D1 migrations** follow **expand/contract** (TDD §6.5). Each file holds one logical change and is safe to re-run, named `NNNN_<feature>_<change>.sql`. Never edit a migration that has been merged.
 - **Messages and other derived data:** the Durable Object is the source of truth, and the D1 copy goes through the **outbox** helper (TDD §3.3).
-- **Secrets** stay in Worker secrets, never in D1, client code or logs.
+- **Secrets** stay in Worker secrets. The one exception is the two keys the Worker generates when their Worker secrets aren't set (`BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` fallbacks), which live in Durable Object storage (platform §16). Neither ever goes in D1, client code, logs or exports.
 
 ### 4.3 Web app
 

@@ -10,7 +10,7 @@ A self-owned, Cloudflare-native workspace for small teams: chat, calls, calendar
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/raysca/officebox)
 
-**Quick start:** deploy, open the address within an hour, create your passkey. For the first 60 minutes after the setup page is first opened, setup needs no token (unless you set `SETUP_TOKEN`), the Worker generates its own sign-in keys, and R2 isn't needed. Quick start arrives with milestone M1b-1; until then, use the setup token and set the two secrets below. For a workspace your team relies on: a custom domain first, sign-in keys as Worker secrets, and a second passkey ([guide](docs/deployment.md)).
+**Quick start:** deploy, open the address within an hour, create your passkey. For the first 60 minutes after the setup page is first opened, setup needs no token (unless you set `SETUP_TOKEN`), and the Worker generates its own sign-in keys. R2 must be enabled first; the setup page checks it and the other required services, and says how to fix any that fail. Quick start arrives with milestone M1b-1; until then, use the setup token and set the two secrets below. For a workspace your team relies on: a custom domain first, sign-in keys as Worker secrets, and a second passkey ([guide](docs/deployment.md)).
 
 The button copies this repository into your GitHub account, provisions the D1 database and queues, and runs:
 
@@ -19,7 +19,7 @@ npm run build    # builds the web app and checks the Worker bundle
 npm run deploy   # preflight → wrangler d1 migrations apply DB --remote → wrangler deploy
 ```
 
-R2 is optional: turn on file storage later ([guide, step 8](docs/deployment.md#8-turn-on-file-storage)). After deploying, open `https://<your-worker>.workers.dev/health`; it returns `{ "status": "ok", "version": "…" }`. Then [set up the workspace](#first-run-setup), and for production set the [secrets](#secrets).
+R2 must be enabled on the Cloudflare account (dashboard → R2) before the first deploy. After deploying, open `https://<your-worker>.workers.dev/health`; it returns `{ "status": "ok", "version": "…" }`. Then [set up the workspace](#first-run-setup), and for production set the [secrets](#secrets).
 
 To deploy by hand instead: `npx wrangler login`, create the database with `npx wrangler d1 create officebox` and add its `database_id` to `wrangler.jsonc`, then run `npm run build && npm run deploy`.
 
@@ -29,13 +29,13 @@ Instead of the Deploy button's Workers Builds, this repository can deploy itself
 
 **Use one deploy path, not both.** If your copy came from the Deploy button, Workers Builds already deploys every push. Disconnect it (dashboard → your Worker → Settings → Builds → Disconnect) before adding the secrets below, or two deploys race on every push. Until both secrets exist, the workflow skips with a notice and the run shows as green.
 
-1. If the account has never had a `workers.dev` subdomain, register one (dashboard → Workers & Pages). R2 isn't needed unless you turn on file storage.
+1. **Enable R2** on the Cloudflare account (dashboard → R2; it needs a payment method). If the account has never had a `workers.dev` subdomain, register one (dashboard → Workers & Pages).
 2. **Create an API token.** In the dashboard go to My Profile → API Tokens → Create Token → Create Custom Token. An account-owned token (Manage Account → Account API Tokens) also works. Scope it to the account you deploy to, with these **Account** permissions:
    - Workers Scripts: Edit
    - D1: Edit
+   - Workers R2 Storage: Edit
    - Queues: Edit
    - Account Settings: Read
-   - Workers R2 Storage: Edit, only once you turn on file storage
 
    If a deploy fails with an authorisation error naming another product, add that permission. Please tell us too, so we can update this list.
 3. **Find your account ID**: dashboard → Workers & Pages → Account details.
@@ -49,7 +49,7 @@ Each run checks out the commit CI tested, and deploys only if it is still the ti
 - **Database.** Creates the `officebox` D1 database if the account has none by that name. It's found by name, so no ID is committed.
 - **Migrations.** Applies D1 migrations.
 - **Secrets (default).** Creates `BETTER_AUTH_SECRET` and `TOKEN_HASH_KEY` if the Worker doesn't have them yet, each from 32 random bytes, so sign-in works on the first deploy. It never overwrites a secret that exists, never prints a value, and logs only "created NAME" or "NAME already set". It doesn't create `SETUP_TOKEN` (the Worker generates a one-time token into its logs instead), `BETTER_AUTH_SECRETS` or `RECOVERY_TOKEN`. If this step fails, the deploy stops before the new version goes live. On a workspace already running on keys the Worker generated (for example a Deploy-button copy moved to Actions), creating these secrets signs everyone out once and invalidates outstanding links ([Secrets](#secrets)).
-- **Deploy.** `wrangler deploy` creates the queues (and the R2 bucket, once file storage is on) on first use.
+- **Deploy.** `wrangler deploy` creates the R2 bucket and queues on first use.
 
 If a step fails, the run stops and the previous Worker version stays live. Migrations that already ran stay applied, which is safe by design (expand/contract, TDD §6.5).
 
@@ -76,15 +76,15 @@ There are no passwords, so there are no password peppers to keep: lost passkeys 
 
 ## First-run setup
 
-Open your workspace's address **on the domain you'll keep using**: the address setup runs on becomes the workspace's canonical origin, and passkeys are bound to it. Until setup is done, every page leads to **Set up your workspace**, which checks that the browser can create a passkey, then asks for the setup token (none in the open first hour, below), the workspace name and the first owner's name, handle and email. The owner then creates a passkey (this device's screen lock, a phone, or a security key with a PIN or biometric; user verification is required). Setup is complete once that passkey exists, and `/setup` is gone for good. Add a second passkey straight away if you can: an owner with one passkey can't invite anyone until they add another (or set `RECOVERY_TOKEN`).
+Open your workspace's address **on the domain you'll keep using**: the address setup runs on becomes the workspace's canonical origin, and passkeys are bound to it. Until setup is done, every page leads to **Set up your workspace**, which first checks the required services (database, Durable Objects, queues, R2 and sign-in keys; from M1b-1) and shows how to fix any that fail, then checks that the browser can create a passkey, then asks for the setup token (none in the open first hour, below), the workspace name and the first owner's name, handle and email. The owner then creates a passkey (this device's screen lock, a phone, or a security key with a PIN or biometric; user verification is required). Setup is complete once that passkey exists, and `/setup` is gone for good. Add a second passkey straight away if you can: an owner with one passkey can't invite anyone until they add another (or set `RECOVERY_TOKEN`).
 
-**The open first hour (from M1b-1).** Without a `SETUP_TOKEN` secret, setup needs no token for the first 60 minutes after the setup page is first opened, and the page shows how long is left. Until setup is claimed, anyone who opens the address in that hour can claim the workspace, so do it straight away, or set `SETUP_TOKEN` to turn the open hour off. A claim without a token shows a **setup resume code** once, for continuing on another device.
+**The open first hour (from M1b-1).** Without a `SETUP_TOKEN` secret, setup needs no token for the first 60 minutes after the setup page is first opened with every required service passing, and the page shows how long is left. Until setup is claimed, anyone who opens the address in that hour can claim the workspace, so do it straight away, or set `SETUP_TOKEN` to turn the open hour off. A claim without a token shows a **setup resume code** once, for continuing on another device.
 
 Otherwise, the setup token is either:
 - the `SETUP_TOKEN` secret, if you set one, or
 - a one-time token the Worker generates on the first visit. Find it in the dashboard: Workers & Pages → your Worker → Logs, in the entry **officebox setup token** (only members of your Cloudflare account can read these logs). It expires after 24 hours; visiting the setup page again after that writes a new one.
 
-If you leave before creating the passkey, open `/setup` again (on any device) and enter the same token (or the setup resume code) to continue. An unfinished setup is released 24 hours after it started, or at once with `npx wrangler d1 execute officebox --remote --file scripts/setup-release.sql`, which also ends the open hour. If someone else finished setup on your deployment, start over with a fresh deployment ([guide, step 6](docs/deployment.md#6-first-time-setup)); each claim is logged as **officebox setup claimed**. On a `*.workers.dev` address the workspace usually has no email, so a second passkey matters even more; moving to a custom domain later means adding passkeys again.
+If you leave before creating the passkey, open `/setup` again (on any device) and enter the same token (or the setup resume code) to continue. An unfinished setup is released 24 hours after it started, or at once with `npx wrangler d1 execute officebox --remote --file scripts/setup-release.sql`, which also ends the open hour (the audit log records the release the next time the Worker sees it). If someone else finished setup on your deployment, start over with a fresh deployment ([guide, step 6](docs/deployment.md#6-first-time-setup)); each claim is logged as **officebox setup claimed**. On a `*.workers.dev` address the workspace usually has no email, so a second passkey matters even more; moving to a custom domain later means adding passkeys again.
 
 Setup is rate-limited and recorded in the audit log. For extra protection while the workspace is unclaimed, you can put Cloudflare Access in front of it until setup is done.
 
