@@ -49,7 +49,7 @@ export default defineConfig({
     {
       name: "chromium",
       dependencies: ["setup"],
-      testIgnore: [/first-run\.setup\.ts/, /passkeys\.spec\.ts/, /onboarding\.spec\.ts/],
+      testIgnore: [/first-run\.setup\.ts/, /passkeys\.spec\.ts/, /onboarding\.spec\.ts/, /quick-start\.spec\.ts/],
       use: { ...devices["Desktop Chrome"], storageState: OWNER_STATE },
     },
     {
@@ -64,6 +64,13 @@ export default defineConfig({
       name: "onboarding",
       dependencies: ["passkeys"],
       testMatch: /onboarding\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    // M1b-1 quick start: each test starts its own fresh deploy (wrangler dev on E2E_PORT + 3…5, with no
+    // Worker secrets), so it needs nothing from the shared installation above.
+    {
+      name: "quick-start",
+      testMatch: /quick-start\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
     },
   ],

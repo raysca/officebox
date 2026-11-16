@@ -1,7 +1,14 @@
-import { isWorkersDevHost, type SetupEnrolment } from "@officebox/shared";
+import {
+  isWorkersDevHost,
+  type SetupEnrolment,
+  type SetupService,
+  type SetupServiceId,
+  type SetupServiceProblem,
+  type SetupStatus,
+} from "@officebox/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiRequestError, describeApiError, errorCodeOf } from "../../lib/api/client";
 import {
   claimSetup,
@@ -16,6 +23,7 @@ import { Alert } from "../../lib/ui/Alert";
 import { Button } from "../../lib/ui/Button";
 import { Link } from "../../lib/ui/Link";
 import { TextField } from "../../lib/ui/TextField";
+import { VisuallyHidden } from "../../lib/ui/VisuallyHidden";
 import { toastStore } from "../../lib/ui/toast-store";
 import {
   describePasskeyFailure,
@@ -35,10 +43,10 @@ type Field = "token" | "workspaceName" | "ownerName" | "ownerHandle" | "ownerEma
 
 const copy = messages.setup;
 
-function validate(values: Record<Field, string>): FieldErrors<Field> {
+function validate(values: Record<Field, string>, tokenNeeded = true): FieldErrors<Field> {
   const errors: FieldErrors<Field> = {};
   const checks: Record<Field, string | null> = {
-    token: requiredError(values.token),
+    token: tokenNeeded ? requiredError(values.token) : null,
     workspaceName: nameError(values.workspaceName),
     ownerName: nameError(values.ownerName),
     ownerHandle: handleError(values.ownerHandle),
@@ -53,9 +61,11 @@ function onWorkersDev(): boolean {
 }
 
 /**
- * First-run setup (Identity §4.1, §7 screen 1): the WebAuthn preflight, the setup token and the
- * workspace and owner (the claim), then the owner's passkey, then the second-passkey recommendation.
- * A claim left before the passkey is resumed with the same token, on any device.
+ * First-run setup (Identity §4.1, §7 screen 1): the required-services checklist (M1b-1), the WebAuthn
+ * preflight, the setup token (none needed while the open claim window lasts, M1b-1) and the workspace
+ * and owner (the claim), then the owner's passkey, then the second-passkey recommendation. A claim
+ * left before the passkey is resumed with the same token, or the setup resume code an open-window
+ * claim showed once, on any device.
  */
 export function SetupPage() {
   const status = useQuery(setupStatusQuery);
@@ -104,19 +114,154 @@ export function SetupPage() {
     );
   }
   const data = status.data;
-  if (data?.claimed) return <ResumeForm onEnrolled={setEnrolment} />;
-  return <ClaimForm tokenSource={data?.tokenSource ?? "generated"} onEnrolled={setEnrolment} />;
+  // Nothing else is offered until every required service passes (M1b-1).
+  if (data && data.services.some((service) => !service.ok)) {
+    return (
+      <ServicesChecklist
+        services={data.services}
+        checking={status.isFetching}
+        onRecheck={() => void status.refetch()}
+      />
+    );
+  }
+  if (data?.claimed) return <ResumeForm open={data.mode === "open"} onEnrolled={setEnrolment} />;
+  return (
+    <ClaimForm
+      tokenSource={data?.tokenSource ?? "generated"}
+      openUntil={data?.mode === "open" ? (data.openUntil ?? null) : null}
+      onEnrolled={setEnrolment}
+      onServicesFailing={() => void status.refetch()}
+    />
+  );
+}
+
+function serviceFix(id: SetupServiceId, problem: SetupServiceProblem | undefined): string {
+  const fixes = copy.serviceFixes;
+  switch (id) {
+    case "d1":
+      return fixes.d1[problem ?? "unreachable"];
+    case "durable_objects":
+    case "queues":
+    case "r2":
+      return fixes[id];
+    case "better_auth_secret":
+    case "token_hash_key":
+      return problem === "invalid_secret" ? fixes[id].invalid_secret : fixes[id].unreachable;
+  }
+}
+
+/** The required-services checklist (Identity §4.1): a tick or a plain fix for each service. */
+function ServicesChecklist({
+  services,
+  checking,
+  onRecheck,
+}: {
+  services: SetupStatus["services"];
+  checking: boolean;
+  onRecheck: () => void;
+}) {
+  return (
+    <PublicPage title={copy.servicesTitle} description={copy.servicesDescription}>
+      <ul aria-label={copy.servicesListLabel} className="flex flex-col gap-3">
+        {services.map((service: SetupService) => (
+          <li
+            key={service.id}
+            className="flex gap-3 rounded-md border border-border-strong px-3 py-2 text-sm"
+            data-service={service.id}
+          >
+            <span aria-hidden="true" className={service.ok ? "text-fg" : "text-danger"}>
+              {service.ok ? "✓" : "✗"}
+            </span>
+            <span className="flex flex-col gap-1">
+              <strong>{copy.serviceNames[service.id]}</strong>
+              <span>{service.ok ? copy.servicesOk : serviceFix(service.id, service.problem)}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div>
+        <Button variant="primary" onClick={onRecheck} disabled={checking}>
+          {checking ? copy.servicesRechecking : copy.servicesRecheck}
+        </Button>
+      </div>
+    </PublicPage>
+  );
+}
+
+const MINUTE = 60_000;
+
+/** Whole minutes left, rounded up, so "1 minute" shows until the window really ends. */
+function minutesLeft(openUntil: number, now: number): number {
+  return Math.max(0, Math.ceil((openUntil - now) / MINUTE));
+}
+
+/**
+ * The open-window notice (Identity §4.1): the time left as text that changes once a minute, and a
+ * separate polite announcement only at 10 minutes and at 1 minute left, never on every update. Calls
+ * `onClosed` when the window ends, so the page can ask for the token.
+ */
+function OpenWindowNotice({ openUntil, onClosed }: { openUntil: number; onClosed: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  const [announcement, setAnnouncement] = useState("");
+  const left = minutesLeft(openUntil, now);
+  const announced = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (left <= 0) {
+      onClosed();
+      return;
+    }
+    // Wake when the rounded-up minute changes (or the window ends), not on a fixed tick.
+    const untilChange = (openUntil - Date.now()) % MINUTE || MINUTE;
+    const timer = setTimeout(() => setNow(Date.now()), untilChange + 50);
+    return () => clearTimeout(timer);
+  }, [left, openUntil, onClosed]);
+
+  useEffect(() => {
+    if ((left === 10 || left === 1) && announced.current !== left) {
+      announced.current = left;
+      setAnnouncement(copy.openAnnouncement(left));
+    }
+  }, [left]);
+
+  const until = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(openUntil);
+  return (
+    <>
+      <div className="rounded-md border border-border-strong bg-surface px-3 py-2 text-sm text-fg">
+        <p>{copy.openNotice(until, left)}</p>
+      </div>
+      <VisuallyHidden role="status" aria-live="polite">
+        {announcement}
+      </VisuallyHidden>
+    </>
+  );
 }
 
 function ClaimForm({
   tokenSource,
+  openUntil,
   onEnrolled,
+  onServicesFailing,
 }: {
   tokenSource: "secret" | "generated";
+  /** End of the open claim window, or null outside it. */
+  openUntil: number | null;
   onEnrolled: (enrolment: SetupEnrolment) => void;
+  onServicesFailing: () => void;
 }) {
   const navigate = useNavigate();
   const formRef = useRef<HTMLFormElement>(null);
+  // Starts open while the window lasts; switches to the token form for good once it ends.
+  const [open, setOpen] = useState(openUntil !== null);
+  const [closedNotice, setClosedNotice] = useState(false);
+  const [focusToken, setFocusToken] = useState(0);
+  useEffect(() => {
+    if (focusToken > 0) focusFirstInvalid(formRef.current);
+  }, [focusToken]);
+  const closeWindow = useCallback(() => {
+    setOpen(false);
+    setClosedNotice(true);
+  }, []);
   const [values, setValues] = useState<Record<Field, string>>({
     token: "",
     workspaceName: "",
@@ -136,6 +281,16 @@ function ClaimForm({
       const code = errorCodeOf(error);
       if (code === "not_found") return setFormError(copy.alreadyDone);
       if (code === "unavailable") return void (await navigate({ to: "/not-configured" }));
+      if (code === "setup_services_failing") return onServicesFailing();
+      if (code === "setup_token_required") {
+        // The window ended while the form was open: keep what was typed and ask for the token.
+        closeWindow();
+        setErrors({ token: copy.windowClosed });
+        // After the re-render that relabels the field (an effect, not a frame callback, so it runs once
+        // the new form is in the DOM).
+        setFocusToken((n) => n + 1);
+        return;
+      }
       if (code === "forbidden") {
         setErrors({ token: copy.tokenInvalid });
         requestAnimationFrame(() => focusFirstInvalid(formRef.current));
@@ -143,7 +298,7 @@ function ClaimForm({
       }
       const invalid = serverInvalidFields(error);
       if (invalid.length > 0) {
-        const local = validate(values);
+        const local = validate(values, !open);
         const next: FieldErrors<Field> = {};
         for (const field of invalid as Field[]) next[field] = local[field] ?? messages.errors.byCode.validation_failed;
         setErrors(next);
@@ -168,26 +323,30 @@ function ClaimForm({
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFormError(null);
-    const found = validate(values);
+    const found = validate(values, !open);
     setErrors(found);
     if (Object.keys(found).length > 0) {
       requestAnimationFrame(() => focusFirstInvalid(formRef.current));
       return;
     }
-    mutation.mutate({ ...values });
+    const { token, ...rest } = values;
+    // Inside the window an empty token is left out: an open-mode claim (M1b-1).
+    mutation.mutate(token.trim() === "" ? rest : { ...rest, token });
   }
 
   return (
     <PublicPage title={copy.title} description={copy.description}>
+      {open && openUntil !== null ? <OpenWindowNotice openUntil={openUntil} onClosed={closeWindow} /> : null}
+      {closedNotice && !errors.token ? <Alert tone="info">{copy.windowClosed}</Alert> : null}
       {formError ? <Alert>{formError}</Alert> : null}
       <form ref={formRef} noValidate onSubmit={onSubmit} className="flex flex-col gap-6">
         <TextField
-          label={copy.tokenLabel}
-          hint={tokenSource === "secret" ? copy.tokenHintSecret : copy.tokenHintGenerated}
+          label={open ? copy.tokenLabelOptional : copy.tokenLabel}
+          hint={open ? copy.tokenHintOpen : tokenSource === "secret" ? copy.tokenHintSecret : copy.tokenHintGenerated}
           value={values.token}
           onChange={(e) => set("token")(e.target.value)}
           error={errors.token}
-          required
+          required={!open}
           autoComplete="off"
           spellCheck={false}
         />
@@ -244,7 +403,7 @@ function ClaimForm({
   );
 }
 
-function ResumeForm({ onEnrolled }: { onEnrolled: (enrolment: SetupEnrolment) => void }) {
+function ResumeForm({ open, onEnrolled }: { open: boolean; onEnrolled: (enrolment: SetupEnrolment) => void }) {
   const queryClient = useQueryClient();
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -268,7 +427,7 @@ function ResumeForm({ onEnrolled }: { onEnrolled: (enrolment: SetupEnrolment) =>
     },
   });
   return (
-    <PublicPage title={copy.claimedTitle} description={copy.claimedDescription}>
+    <PublicPage title={copy.claimedTitle} description={open ? copy.claimedDescriptionOpen : copy.claimedDescription}>
       {formError ? <Alert>{formError}</Alert> : null}
       <form
         noValidate
@@ -282,7 +441,7 @@ function ResumeForm({ onEnrolled }: { onEnrolled: (enrolment: SetupEnrolment) =>
         }}
       >
         <TextField
-          label={copy.tokenLabel}
+          label={open ? copy.resumeTokenLabel : copy.tokenLabel}
           value={token}
           onChange={(e) => {
             setToken(e.target.value);
@@ -336,6 +495,7 @@ function PasskeyStep({
   });
   return (
     <PublicPage title={copy.passkeyTitle} description={copy.passkeyDescription(enrolment.ownerEmail)}>
+      {enrolment.resumeCode ? <ResumeCode code={enrolment.resumeCode} /> : null}
       {onWorkersDev() ? <Alert tone="info">{messages.passkey.workersDevWarning}</Alert> : null}
       {error ? <Alert>{error}</Alert> : null}
       <div>
@@ -351,6 +511,30 @@ function PasskeyStep({
         </Button>
       </div>
     </PublicPage>
+  );
+}
+
+/** The setup resume code, shown once after an open-window claim (Identity §2, M1b-1). */
+function ResumeCode({ code }: { code: string }) {
+  const id = "setup-resume-code";
+  return (
+    <section aria-labelledby={`${id}-title`} className="flex flex-col gap-2 rounded-md border border-border-strong p-3">
+      <h2 id={`${id}-title`} className="text-base font-semibold">
+        {copy.resumeCodeTitle}
+      </h2>
+      <p className="text-sm">{copy.resumeCodeDescription}</p>
+      <label htmlFor={id} className="text-sm font-medium">
+        {copy.resumeCodeLabel}
+      </label>
+      <input
+        id={id}
+        readOnly
+        value={code}
+        spellCheck={false}
+        className="rounded-md border border-border-strong bg-bg px-3 py-2 font-mono text-sm text-fg"
+        onFocus={(event) => event.currentTarget.select()}
+      />
+    </section>
   );
 }
 
