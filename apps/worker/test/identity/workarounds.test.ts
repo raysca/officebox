@@ -377,6 +377,43 @@ describe("workaround 15: rotating BETTER_AUTH_SECRET signs everyone out (documen
   });
 });
 
+describe("workaround 17: no background work outlives the request that builds an instance", () => {
+  // Production bug (M1b-1): the setup claim built the instance; better-auth's runtime schema check
+  // started then and was still running on D1 when the claim answered. The next request awaited that
+  // memoised promise, which the Workers runtime refuses ("This promise was created by a request that
+  // has since ended"), so passkey options straight after an open-window claim answered 500.
+  it("building an instance and awaiting its context issues no D1 query, now or later", async () => {
+    let queries = 0;
+    const real = env.DB;
+    // Counts every statement prepared or run; everything else goes to the real binding.
+    const db: D1Database = {
+      prepare: (sql: string) => {
+        queries++;
+        return real.prepare(sql);
+      },
+      batch: (statements: D1PreparedStatement[]) => {
+        queries++;
+        return real.batch(statements);
+      },
+      exec: (sql: string) => {
+        queries++;
+        return real.exec(sql);
+      },
+      withSession: (constraint?: string) => real.withSession(constraint),
+      dump: () => real.dump(),
+    };
+    const auth = createAuth({ ...env, DB: db }, await secrets(), {
+      ...INSTALLATION,
+      workspaceName: `Background check ${crypto.randomUUID()}`,
+    });
+    const context = await auth.$context;
+    // Long enough for a background check's first query to be issued.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(queries).toBe(0);
+    expect(context.checkSchema).toBeUndefined();
+  });
+});
+
 describe("workaround 16: upgrade checks", () => {
   it("only the reviewed better-auth routes are reachable (a new route needs a review to be added)", () => {
     expect([...AUTH_ALLOWLIST].sort()).toEqual(

@@ -59,6 +59,8 @@ import { completeSetupClaim } from "./setup-state";
  *     `nodejs_compat` in `wrangler.jsonc`
  * 15. secret rotation signs everyone out (documented in Platform §16; tested)
  * 16. upgrade checks: the tests above plus the creation-path scan (`test/identity/creation-paths.test.ts`)
+ * 17. no background work outlives the request that builds an instance: `validateSchema: false`, so
+ *     no schema-check promise started by one request is awaited by a later one (M1b-1 production fix)
  */
 
 export const SESSION_COOKIE = "__Host-officebox.session_token";
@@ -324,7 +326,12 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
       fields: { expiresAt: "expires_at", createdAt: "created_at", updatedAt: "updated_at" },
     },
     advanced: {
-      database: { generateId: () => ulid(), joins: true },
+      // Workaround 17: no runtime schema check. better-auth starts it in the background when an
+      // instance is built and memoises the promise; instances are cached per isolate, so a check
+      // started by one request (the setup claim builds one) was awaited by the next, which the Workers
+      // runtime refuses ("This promise was created by a request that has since ended"): a 500 on the
+      // passkey step straight after an open-window claim. Our migrations own the schema anyway.
+      database: { generateId: () => ulid(), joins: true, validateSchema: false },
       ipAddress: { ipAddressHeaders: ["cf-connecting-ip"], ipv6Subnet: 64 as const },
       // Workaround 8: better-auth prepends "__Secure-" itself when secure cookies are on, which would
       // make "__Secure-__Host-…". So its prefixing is off, the cookies are named __Host-…, and Secure is
