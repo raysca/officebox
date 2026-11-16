@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
@@ -14,6 +16,11 @@ export default defineConfig({
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations("./migrations"),
+          // The operator's setup release, run by test/identity/setup-release.test.ts as wrangler would.
+          SETUP_RELEASE_SQL: readFileSync(
+            fileURLToPath(new URL("../../scripts/setup-release.sql", import.meta.url)),
+            "utf8",
+          ),
           // Test-only identity secrets (Platform §16); never used anywhere else.
           BETTER_AUTH_SECRET: "test-better-auth-secret-0123456789abcdefghijkl",
           TOKEN_HASH_KEY: "test-token-hash-key-0123456789abcdefghijklmnop",

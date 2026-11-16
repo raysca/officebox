@@ -26,6 +26,10 @@ export const HTTP_STATUS: Readonly<Record<ErrorCode, ContentfulStatusCode>> = {
   csrf_failed: 403,
   // Not an auth failure: the workspace has no owner yet. 409 so clients never treat it as a lost session.
   setup_required: 409,
+  // A claim without a token after the open claim window (M1b-1): the setup token is needed.
+  setup_token_required: 403,
+  // A required service is failing (M1b-1): retry once the checklist passes.
+  setup_services_failing: 503,
   not_found: 404,
   method_not_allowed: 405,
   conflict: 409,

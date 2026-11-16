@@ -3,7 +3,7 @@ import { Database, expectOk } from "../../core/db";
 import { pruneCounterEventsStatement } from "./counters";
 import { repairInvitations } from "./invitations";
 import { DEVICE_RETENTION_MS } from "./known-devices";
-import { expireStaleClaim, repairSetup } from "./setup";
+import { expireStaleClaim, observeRelease, repairSetup } from "./setup";
 
 const INVITATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const EMAIL_DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -27,7 +27,11 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
     run: async (ctx) => {
       const completed = await repairSetup(ctx);
       const released = await expireStaleClaim(ctx);
-      if (completed || released) ctx.log.info("identity repair", { completed, released });
+      // A release made with scripts/setup-release.sql is audited by whichever observer comes first (M1b-1).
+      const releasedOutsideApp = await observeRelease(ctx);
+      if (completed || released || releasedOutsideApp) {
+        ctx.log.info("identity repair", { completed, released, releasedOutsideApp });
+      }
       await repairInvitations(ctx);
     },
   }),

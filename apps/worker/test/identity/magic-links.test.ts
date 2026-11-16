@@ -363,7 +363,7 @@ describe("failures after the link is consumed (second review 5; review L7)", () 
     // better-auth's instance is cached per origin and secrets, so the route uses this same object.
     const { authFor } = await import("../../src/features/identity/auth");
     const { identitySecrets } = await import("../../src/features/identity/secrets");
-    const secrets = identitySecrets(env, {
+    const secrets = await identitySecrets(env, {
       error() {},
       warn() {},
       info() {},

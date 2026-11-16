@@ -7,6 +7,7 @@ declare global {
   namespace Cloudflare {
     interface Env extends AppEnv {
       TEST_MIGRATIONS: D1Migration[];
+      SETUP_RELEASE_SQL: string;
       TEST_OBJECT: DurableObjectNamespace<TestObject>;
     }
     interface GlobalProps {

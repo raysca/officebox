@@ -13,6 +13,8 @@ export const ERROR_CODES = [
   "reauth_required", // step-up: a sensitive action needs a passkey assertion within 10 minutes (Identity §4.5)
   "csrf_failed", // a state-changing request without X-Officebox-Request or a canonical Origin (TDD §8.2)
   "setup_required", // first-run setup has not completed: the web app goes to /setup (TDD §6.8)
+  "setup_token_required", // a setup claim without a token outside the open claim window (Identity §4.1, M1b-1)
+  "setup_services_failing", // a setup claim while a required service fails (Identity §4.1, M1b-1)
   "not_found",
   "method_not_allowed", // the path exists but not with this HTTP method
   "conflict", // a concurrent change or a uniqueness rule

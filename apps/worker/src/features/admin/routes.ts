@@ -15,6 +15,7 @@ import { auditStatement } from "../../core/audit";
 import { defineFeature } from "../../core/app";
 import { authOf, coreContext, type AppContext, type AppEnv } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
+import { signInKeySources } from "../../core/keys";
 import { readJson, respond } from "../../core/errors";
 import { authorize } from "../../core/permissions";
 import { refundLimit, takeCounterLimit } from "../../core/rate-limit";
@@ -87,6 +88,8 @@ const adminRoutes = new Hono<AppEnv>()
         canChange: can(actor, { action: "setting.change", changeableBy: entry.changeableBy }, now),
       })),
       email: status,
+      // The source of each sign-in key, never a value (Platform §16, M1b-1).
+      signInKeys: signInKeySources(c.env),
     };
     return respond(c, ok(body));
   })

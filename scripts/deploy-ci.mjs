@@ -27,6 +27,7 @@ import { join, resolve } from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
 import {
   GENERATED_SECRETS,
+  createdSecretWarning,
   generateSecretValue,
   isWorkerNotFound,
   parseSecretList,
@@ -161,5 +162,6 @@ async function ensureSecrets(name) {
       fail(`could not create ${secret}`);
     }
     console.log(`deploy: created ${secret}`);
+    console.warn(createdSecretWarning(secret));
   }
 }

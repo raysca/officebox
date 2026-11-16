@@ -57,7 +57,7 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
   it("GET /api/setup reports the token source and whether a claim is open", async () => {
     const browser = new Browser();
     const status = await browser.json("/api/setup");
-    expect(status.body).toEqual({ setupRequired: true, tokenSource: "generated", claimed: false });
+    expect(status.body).toMatchObject({ setupRequired: true, tokenSource: "generated", claimed: false });
   });
 
   it("refuses a wrong token, and an invalid body, before anything is created", async () => {
@@ -243,7 +243,7 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
     expect((await browser.json("/api/setup", { body, env: { SETUP_TOKEN: secret } })).status).toBe(201);
   });
 
-  it("answers unavailable (/not-configured) without BETTER_AUTH_SECRET or TOKEN_HASH_KEY", async () => {
+  it("a set-but-invalid key secret blocks setup (setup_services_failing) and sign-in answers unavailable (/not-configured)", async () => {
     const owner = ownerDetails();
     const body = {
       token: SETUP_TOKEN,
@@ -252,11 +252,19 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
       ownerHandle: owner.handle,
       ownerEmail: owner.email,
     };
-    for (const missing of [{ BETTER_AUTH_SECRET: "" }, { TOKEN_HASH_KEY: "" }, { BETTER_AUTH_SECRET: "too-short" }]) {
-      const result = await new Browser().json("/api/setup", { body, env: missing });
+    for (const invalid of [
+      { BETTER_AUTH_SECRET: "too-short" },
+      { TOKEN_HASH_KEY: "too-short" },
+      { BETTER_AUTH_SECRETS: "not a list" },
+    ]) {
+      const result = await new Browser().json("/api/setup", { body, env: invalid });
       expect(result.status).toBe(503);
-      expect(result.body).toMatchObject({ error: { code: "unavailable" } });
+      expect(result.body).toMatchObject({ error: { code: "setup_services_failing" } });
+      const signIn = await new Browser().json("/api/auth/passkey/generate-authenticate-options", { env: invalid });
+      expect(signIn.status).toBe(503);
+      expect(signIn.body).toMatchObject({ error: { code: "unavailable" } });
     }
+    expect((await installation())?.setup_claim).toBeNull();
   });
 
   it("setup is limited to 5 attempts per minute per IP, before the token is checked", async () => {
@@ -291,7 +299,7 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
 describe("a claim that never got its owner (review m1)", () => {
   it("a thrown error while creating the owner releases the claim, so setup can be tried again", async () => {
     const owner = ownerDetails();
-    const secrets = identitySecrets(env, silent);
+    const secrets = await identitySecrets(env, silent);
     if (!secrets.ok) throw new Error("secrets");
     const auth = authFor(env, secrets.value, { canonicalOrigin: ORIGIN, workspaceName: owner.workspace });
     const internal = (await auth.$context).internalAdapter;
