@@ -377,6 +377,24 @@ describe("workaround 15: rotating BETTER_AUTH_SECRET signs everyone out (documen
   });
 });
 
+describe("workaround 16: upgrade checks", () => {
+  it("only the reviewed better-auth routes are reachable (a new route needs a review to be added)", () => {
+    expect([...AUTH_ALLOWLIST].sort()).toEqual(
+      [
+        "GET /api/auth/passkey/generate-authenticate-options",
+        "GET /api/auth/passkey/generate-register-options",
+        "POST /api/auth/passkey/verify-authentication",
+        "POST /api/auth/passkey/verify-registration",
+        // M1b, reviewed: behind our availability check and per-IP and per-email limits (Identity §4.4).
+        "POST /api/auth/sign-in/magic-link",
+        "POST /api/auth/sign-out",
+      ].sort(),
+    );
+  });
+  // The static creation-path scan and the pinned-version check run under Node:
+  // test/node/creation-paths.test.ts. The UV and clone end-to-end checks: e2e/tests/passkeys.spec.ts.
+});
+
 describe("workaround 17: no background work outlives the request that builds an instance", () => {
   // Production bug (M1b-1): the setup claim built the instance; better-auth's runtime schema check
   // started then and was still running on D1 when the claim answered. The next request awaited that
@@ -412,22 +430,4 @@ describe("workaround 17: no background work outlives the request that builds an 
     expect(queries).toBe(0);
     expect(context.checkSchema).toBeUndefined();
   });
-});
-
-describe("workaround 16: upgrade checks", () => {
-  it("only the reviewed better-auth routes are reachable (a new route needs a review to be added)", () => {
-    expect([...AUTH_ALLOWLIST].sort()).toEqual(
-      [
-        "GET /api/auth/passkey/generate-authenticate-options",
-        "GET /api/auth/passkey/generate-register-options",
-        "POST /api/auth/passkey/verify-authentication",
-        "POST /api/auth/passkey/verify-registration",
-        // M1b, reviewed: behind our availability check and per-IP and per-email limits (Identity §4.4).
-        "POST /api/auth/sign-in/magic-link",
-        "POST /api/auth/sign-out",
-      ].sort(),
-    );
-  });
-  // The static creation-path scan and the pinned-version check run under Node:
-  // test/node/creation-paths.test.ts. The UV and clone end-to-end checks: e2e/tests/passkeys.spec.ts.
 });

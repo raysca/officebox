@@ -60,7 +60,8 @@ import { completeSetupClaim } from "./setup-state";
  * 15. secret rotation signs everyone out (documented in Platform §16; tested)
  * 16. upgrade checks: the tests above plus the creation-path scan (`test/identity/creation-paths.test.ts`)
  * 17. no background work outlives the request that builds an instance: `validateSchema: false`, so
- *     no schema-check promise started by one request is awaited by a later one (M1b-1 production fix)
+ *     no schema-check promise started by one request is awaited by a later one (M1b-1 production fix, found after the spike;
+ *     not in the spike README)
  */
 
 export const SESSION_COOKIE = "__Host-officebox.session_token";
