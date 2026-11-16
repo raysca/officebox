@@ -24,6 +24,16 @@ export interface Env {
 
   /** 20 requests per 60 s, keyed per IP: passkey sign-in, registration and step-up (Platform §8). */
   PASSKEY_RATE_LIMITER: RateLimit;
+  /** 10 requests per 60 s, keyed per IP: magic-link confirmation POSTs (Platform §8). */
+  MAGIC_LINK_RATE_LIMITER: RateLimit;
+  /** 60 requests per 60 s, keyed per IP: `GET /status/public` (Platform §8). */
+  STATUS_RATE_LIMITER: RateLimit;
+
+  /**
+   * Cloudflare Email Service, the default email driver (TDD §7.6). Optional in the type: a deployment
+   * whose account can't use it still runs, and the driver reports it as missing.
+   */
+  EMAIL?: SendEmail;
 
   // Secrets (Platform §16). Declared optional because a fresh deploy may not have them yet: identity
   // checks them on use (features/identity/secrets.ts) and answers `unavailable` until they are set,
@@ -45,4 +55,21 @@ export interface Env {
   BETTER_AUTH_SECRETS?: string;
   /** Owner recovery secret (Identity §4.6). M1a reads it only for the engine's "set and unconsumed" fact. */
   RECOVERY_TOKEN?: string;
+
+  // Email provider secrets (Platform §16), read only by the driver the owner chose in settings.
+  /** Resend API key. */
+  RESEND_API_KEY?: string;
+  /** Postmark server token. */
+  POSTMARK_SERVER_TOKEN?: string;
+  /** Amazon SES (v2 API) access key ID and secret, for an IAM user allowed only `ses:SendEmail`. */
+  SES_ACCESS_KEY_ID?: string;
+  SES_SECRET_ACCESS_KEY?: string;
+  /** SMTP password (the username is a setting). */
+  SMTP_PASSWORD?: string;
+
+  /**
+   * Local end-to-end runs only: "1" swaps every configured driver for a sink that records each message
+   * in a local D1 table instead of sending it (`features/email/drivers/sink.ts`). Never set in a deploy.
+   */
+  EMAIL_TEST_SINK?: string;
 }

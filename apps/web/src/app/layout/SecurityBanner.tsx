@@ -16,6 +16,10 @@ function describe(notice: SecurityNotice): string {
     return copy.passkey_added(notice.details.passkeyName ?? null, via);
   }
   if (notice.kind === "passkey_clone_detected") return copy.passkey_clone_detected(notice.details.subjectName);
+  if (notice.kind === "magic_link_new_device") {
+    const device = [notice.details.deviceLabel, notice.details.approxLocation].filter(Boolean).join(", ");
+    return copy.magic_link_new_device(device || null);
+  }
   return copy.other;
 }
 

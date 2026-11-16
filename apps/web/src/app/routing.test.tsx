@@ -8,10 +8,19 @@ const AREAS = [
   { path: "/chat", label: "Chat" },
   { path: "/calendar", label: "Calendar" },
   { path: "/documents", label: "Documents" },
-  { path: "/admin", label: "Admin" },
 ] as const;
 
 describe("routing", () => {
+  it("renders the admin area at /admin with links to its pages", async () => {
+    await renderApp("/admin");
+    expect(await screen.findByRole("heading", { level: 1, name: "Admin" })).toBeDefined();
+    const sections = screen.getByRole("navigation", { name: "Admin sections" });
+    expect(within(sections).getByRole("link", { name: "Invitations" }).getAttribute("href")).toBe("/admin/invitations");
+    expect(within(sections).getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/admin/settings");
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(within(nav).getByRole("link", { name: "Admin" }).getAttribute("aria-current")).toBe("page");
+  });
+
   it.each(AREAS)("renders $label at $path with its title and an empty state", async ({ path, label }) => {
     await renderApp(path);
     expect(await screen.findByRole("heading", { level: 1, name: label })).toBeDefined();

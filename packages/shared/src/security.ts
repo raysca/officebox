@@ -15,6 +15,24 @@ export const APP_CONTENT_SECURITY_POLICY =
 /** CSP for API (JSON) responses: nothing may load, and nothing may frame them. */
 export const API_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'";
 
+/**
+ * Pages whose link carries a token in the URL fragment (Identity §2, Platform §10). They're served with
+ * {@link FRAGMENT_PAGE_HEADERS} instead of the usual referrer policy, by `_headers` for Workers Assets
+ * and by the Worker for anything that reaches it.
+ */
+export const FRAGMENT_PAGES: readonly string[] = [
+  "/sign-in/link",
+  "/invitations/accept",
+  "/auth/recover",
+  "/me/email/confirm",
+  "/admin/domain/complete",
+];
+
+export const FRAGMENT_PAGE_HEADERS: Readonly<Record<string, string>> = {
+  "Referrer-Policy": "no-referrer",
+  "Cache-Control": "no-store",
+};
+
 /** Headers on every response, whatever its type. */
 export const COMMON_SECURITY_HEADERS: Readonly<Record<string, string>> = {
   // No includeSubDomains: an installation on a customer's domain mustn't force HTTPS on that

@@ -5,3 +5,26 @@
   Strict-Transport-Security: max-age=31536000
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
+
+# Pages whose links carry a token in the URL fragment (Identity §2, Platform §10; FRAGMENT_PAGES in
+# security.ts): no Referer at all, and never cached. "! Referrer-Policy" drops the value from /* above.
+/sign-in/link
+  ! Referrer-Policy
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store
+/invitations/accept
+  ! Referrer-Policy
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store
+/auth/recover
+  ! Referrer-Policy
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store
+/me/email/confirm
+  ! Referrer-Policy
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store
+/admin/domain/complete
+  ! Referrer-Policy
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store

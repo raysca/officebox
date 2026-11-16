@@ -105,6 +105,7 @@ const WORKSPACE_MATRIX: Record<WorkspaceAction, RoleRow> = {
   "admin.invitations.view": ADMINS,
   "admin.groups.view": ADMINS,
   "admin.settings.view": ADMINS,
+  "admin.email.test": ADMINS,
   "admin.health.view": ADMINS,
   "admin.storage.view": ADMINS,
   "admin.assistant.view": ADMINS,
@@ -134,6 +135,25 @@ const WORKSPACE_MATRIX: Record<WorkspaceAction, RoleRow> = {
 // "Invite with role member / admin" (§4.6, §6): admins invite members; only owners invite admins; owner
 // and guest are never invitable. The owner here meets the invite gate (two passkeys).
 const INVITE_MATRIX: Record<WorkspaceRole, RoleRow> = {
+  member: { owner: "✓", admin: "✓", member: "not_permitted", guest: "not_permitted" },
+  admin: { owner: "✓", admin: "owner_required", member: "not_permitted", guest: "not_permitted" },
+  owner: {
+    owner: "role_not_assignable",
+    admin: "role_not_assignable",
+    member: "not_permitted",
+    guest: "not_permitted",
+  },
+  guest: {
+    owner: "role_not_assignable",
+    admin: "role_not_assignable",
+    member: "not_permitted",
+    guest: "not_permitted",
+  },
+};
+
+// Revoking a pending invitation (Identity §4.2): admins revoke member invitations; admin invitations
+// need an owner (default). No invite gate: revoking takes access away.
+const REVOKE_MATRIX: Record<WorkspaceRole, RoleRow> = {
   member: { owner: "✓", admin: "✓", member: "not_permitted", guest: "not_permitted" },
   admin: { owner: "✓", admin: "owner_required", member: "not_permitted", guest: "not_permitted" },
   owner: {
@@ -398,6 +418,20 @@ describe("permission matrix: invitations (Permissions §4.6, §6; Identity §2)"
     };
     expect(outcome(actor("owner", { session: STALE }), check)).toBe("✓");
     expect(outcome(actor("owner", { session: null }), check)).toBe("✓");
+  });
+
+  for (const inviteRole of ["owner", "admin", "member", "guest"] as const) {
+    for (const role of ACTOR_ROLES) {
+      it(`${role}: revoke an invitation as ${inviteRole} → ${REVOKE_MATRIX[inviteRole][role]}`, () => {
+        expect(outcome(actor(role), { action: "invitation.revoke", role: inviteRole })).toBe(
+          REVOKE_MATRIX[inviteRole][role],
+        );
+      });
+    }
+  }
+
+  it("revoking isn't gated by the owners' invite gate and needs no step-up", () => {
+    expect(outcome(actor("owner", { session: STALE }), { action: "invitation.revoke", role: "admin" })).toBe("✓");
   });
 });
 
@@ -763,6 +797,7 @@ const ONE_OF_EACH = (a: Actor): PermissionCheck[] => [
   { action: "maintenance.manage" },
   { action: "admin.job.view", startedBy: a.userId },
   { action: "invitation.create", role: "member", actorPasskeyCount: 2, recoveryTokenUnconsumed: true },
+  { action: "invitation.revoke", role: "admin" },
   ...MEMBER_ADMIN_ACTIONS.map((action): PermissionCheck => ({ action, target: person("member"), activeOwnerCount: 3 })),
   {
     action: "member.change_role",
@@ -1180,6 +1215,7 @@ const TABLE_FOR: Record<
 > = {
   "admin.job.view": JOB_VIEW_MATRIX,
   "invitation.create": INVITE_MATRIX,
+  "invitation.revoke": REVOKE_MATRIX,
   "member.change_role": CHANGE_ROLE_MATRIX,
   "member.export": MEMBER_EXPORT_MATRIX,
   "workspace.export": WORKSPACE_EXPORT_MATRIX,

@@ -11,6 +11,58 @@ export const E2E_SECRETS = {
   TOKEN_HASH_KEY: "e2e-token-hash-key-0123456789abcdefghijklmn",
 } as const;
 
+/**
+ * Test-only Worker variables. `EMAIL_TEST_SINK=1` (on this loopback origin only) swaps every configured
+ * email driver for the test sink, which records messages in a local D1 table instead of sending them
+ * (apps/worker/src/features/email/drivers/sink.ts).
+ */
+export const E2E_VARS = { EMAIL_TEST_SINK: "1" } as const;
+
+export interface SinkEmail {
+  recipient: string;
+  subject: string;
+  text: string;
+}
+
+/** Emails the test sink recorded for `to` (oldest first); empty before the first email. */
+export function sinkEmails(to: string): SinkEmail[] {
+  const state = process.env.OFFICEBOX_E2E_STATE;
+  if (!state) throw new Error("OFFICEBOX_E2E_STATE isn't set");
+  let output: string;
+  try {
+    output = execFileSync(
+      "npx",
+      [
+        "wrangler",
+        "--config",
+        "../wrangler.jsonc",
+        "d1",
+        "execute",
+        "DB",
+        "--local",
+        "--persist-to",
+        state,
+        "--json",
+        "--command",
+        `SELECT recipient, subject, text FROM email_test_sink WHERE lower(recipient) = lower('${to.replace(/'/g, "''")}') ORDER BY created_at`,
+      ],
+      { stdio: "pipe", env: { ...process.env, WRANGLER_SEND_METRICS: "false" } },
+    ).toString();
+  } catch {
+    // The sink's table doesn't exist until the first email.
+    return [];
+  }
+  const parsed = JSON.parse(output) as { results: SinkEmail[] }[];
+  return parsed[0]?.results ?? [];
+}
+
+/** The link (with its `#t=` fragment) in an email's text. */
+export function linkIn(email: SinkEmail): string {
+  const match = /https?:\/\/\S+#t=[A-Za-z0-9_-]+/.exec(email.text);
+  if (!match) throw new Error(`no link in "${email.subject}"`);
+  return match[0];
+}
+
 /** The owner created by first-run setup (first-run.setup.ts). */
 export const OWNER = {
   workspace: "Acme Studio",

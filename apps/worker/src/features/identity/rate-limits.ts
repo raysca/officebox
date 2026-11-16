@@ -22,6 +22,20 @@ export const IDENTITY_LIMITS = {
   }),
   /** Passkey sign-in and registration (options and verify), and step-up attempts: 20 per minute per IP. */
   passkeyIp: defineLimit({ mechanism: "binding", name: "passkey", binding: "PASSKEY_RATE_LIMITER", periodSeconds: 60 }),
+  /** Invitation lookup and acceptance: 5 per minute per IP (Platform §8). */
+  invitation: defineLimit({
+    mechanism: "binding",
+    name: "invitation",
+    binding: "AUTH_RATE_LIMITER",
+    periodSeconds: 60,
+  }),
+  /** `GET /status/public`: 60 per minute per IP (Platform §8). */
+  publicStatus: defineLimit({
+    mechanism: "binding",
+    name: "public_status",
+    binding: "STATUS_RATE_LIMITER",
+    periodSeconds: 60,
+  }),
   /** `POST /me/reauth`: 5 attempts per 10 minutes per session (default). */
   reauthSession: defineLimit({ mechanism: "d1", name: "reauth", limit: 5, window: { kind: "fixed", seconds: 600 } }),
 };
@@ -40,6 +54,14 @@ export function limitSetupStatus(ctx: CoreContext, request: Request): Promise<Re
 
 export function limitPasskeyIp(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
   return checkLimit(ctx, IDENTITY_LIMITS.passkeyIp, ipKey(request));
+}
+
+export function limitInvitation(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
+  return checkLimit(ctx, IDENTITY_LIMITS.invitation, ipKey(request));
+}
+
+export function limitPublicStatus(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
+  return checkLimit(ctx, IDENTITY_LIMITS.publicStatus, ipKey(request));
 }
 
 export function limitReauth(ctx: CoreContext, sessionId: string): Promise<Result<void, ApiError>> {

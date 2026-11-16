@@ -1,4 +1,14 @@
-import { apiError, err, ok, validationError, type ApiError, type Result } from "@officebox/shared";
+import {
+  allowedInviteDomainsSchema,
+  apiError,
+  emailProviderSchema,
+  err,
+  ok,
+  validationError,
+  type ApiError,
+  type EmailProvider,
+  type Result,
+} from "@officebox/shared";
 import { z } from "zod";
 import { auditStatement, hashPersonal } from "./audit";
 import type { CoreContext } from "./context";
@@ -71,6 +81,33 @@ export const SETTINGS = {
     default: 2 * 1024 ** 3,
     changeableBy: "admin",
     auditAction: "settings.upload_limit",
+  }),
+  // M1b (TDD §7.6, Identity §4.2, §4.11). The email driver and sender address are owner-only and have
+  // no default domain (AGENTS §4.1): until an owner picks a driver, email is off. Provider keys are
+  // Worker secrets, never settings. The sender address is personal data, so it's audited hashed.
+  email_provider: defineSetting<EmailProvider>({
+    key: "email_provider",
+    schema: emailProviderSchema,
+    default: { driver: "none" },
+    changeableBy: "owner",
+    auditAction: "settings.email",
+    personal: true,
+  }),
+  // Default on: magic links then work as soon as email is configured (Platform §7).
+  magic_link_enabled: defineSetting({
+    key: "magic_link_enabled",
+    schema: z.boolean(),
+    default: true,
+    changeableBy: "admin",
+    auditAction: "settings.magic_link",
+  }),
+  // Empty: any domain may be invited (default off; Identity §4.2).
+  allowed_invite_domains: defineSetting<string[]>({
+    key: "allowed_invite_domains",
+    schema: allowedInviteDomainsSchema,
+    default: [],
+    changeableBy: "admin",
+    auditAction: "settings.invite_domains",
   }),
 } satisfies SettingsRegistry;
 

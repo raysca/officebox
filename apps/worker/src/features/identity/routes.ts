@@ -1,7 +1,11 @@
 import {
+  acceptInvitationBodySchema,
   ackSecurityNoticesBodySchema,
   apiError,
   err,
+  invitationLookupBodySchema,
+  magicLinkConfirmBodySchema,
+  magicLinkRequestBodySchema,
   ok,
   reauthBodySchema,
   renamePasskeyBodySchema,
@@ -9,6 +13,7 @@ import {
   setupResumeBodySchema,
   ulidSchema,
   type ApiError,
+  type PublicStatus,
 } from "@officebox/shared";
 import { Hono } from "hono";
 import { defineFeature } from "../../core/app";
@@ -16,7 +21,18 @@ import { authOf, coreContext, type AppContext, type AppEnv } from "../../core/co
 import { csrfError, requireCsrfHeader } from "../../core/csrf";
 import { errorResponse, readBodyText, readJson, respond } from "../../core/errors";
 import { authorize } from "../../core/permissions";
-import { isAllowedAuthRoute, isPasskeyOptionsRoute, isPasskeyRoute, isRegistrationRoute } from "./allowlist";
+import { checkLimit } from "../../core/rate-limit";
+import { magicLinksAvailable } from "../email/config";
+import {
+  isAllowedAuthRoute,
+  isMagicLinkRequestRoute,
+  isPasskeyOptionsRoute,
+  isPasskeyRoute,
+  isRegistrationRoute,
+} from "./allowlist";
+import { acceptInvitation, lookupInvitation } from "./invitations";
+import { recordSignInDevice } from "./known-devices";
+import { confirmMagicLink, lookupMagicLink, MAGIC_LINK_LIMITS, prepareMagicLinkRequest } from "./magic-link";
 import { SESSION_COOKIE } from "./auth";
 import { tokenHash } from "./crypto";
 import { listDevices, signOutDevice, signOutEverywhere, signOutOthers } from "./devices";
@@ -26,7 +42,15 @@ import { getMe } from "./me";
 import { forwardSetCookies, identityServices, loadSession, requireAuth } from "./middleware";
 import { acknowledgeNotices, listNotices } from "./notices";
 import { listPasskeys, removePasskey, renamePasskey } from "./passkeys";
-import { limitPasskeyIp, limitReauth, limitSetup, limitSetupStatus } from "./rate-limits";
+import {
+  ipKey,
+  limitInvitation,
+  limitPasskeyIp,
+  limitPublicStatus,
+  limitReauth,
+  limitSetup,
+  limitSetupStatus,
+} from "./rate-limits";
 import { reauthenticate, reauthOptions } from "./reauth";
 import { currentStore } from "./request-store";
 import { filterAuthResponse } from "./token-filter";
@@ -35,7 +59,7 @@ import { claimSetup, resumeSetup, setupStatus, type SetupEnrolmentResult } from 
 import { isSetupComplete } from "./setup-state";
 
 /**
- * Identity routes for M1a (Identity §6). Paths are relative to `/api`.
+ * Identity routes for M1a and M1b (Identity §6). Paths are relative to `/api`.
  *
  * | Route | Who |
  * |---|---|
@@ -46,6 +70,10 @@ import { isSetupComplete } from "./setup-state";
  * | `GET /me/passkeys` · `PATCH /me/passkeys/:id` · `DELETE /me/passkeys/:id` | Member (own); removal needs step-up |
  * | `POST /me/reauth/options` · `POST /me/reauth` | Member |
  * | `GET /me/security-notices` · `POST /me/security-notices/ack` | Member; ack needs a fresh passkey assertion |
+ * | better-auth `POST /auth/sign-in/magic-link` (M1b) | Public; our availability check and limits first |
+ * | `POST /sign-in/link/lookup` · `POST /sign-in/link` (M1b) | Magic-link token: show the email; consume and sign in |
+ * | `POST /invitations/lookup` · `POST /invitations/accept` (M1b) | Invitation token |
+ * | `GET /status/public` (M1b) | Anyone: whether magic links are offered |
  *
  * Every state change passes the core CSRF check first; every route that touches user content asks
  * the permission engine. No route returns a session token.
@@ -160,7 +188,29 @@ const authRoutes = new Hono<AppEnv>().all("/*", async (c) => {
   }
 
   let request = c.req.raw;
-  if (request.method === "POST" && !isRegistrationRoute(path)) {
+  if (isMagicLinkRequestRoute(path)) {
+    // Our middleware first (Identity §4.4): only the email is accepted (no callback URLs), magic links
+    // must be available, the per-IP limit refuses, and the per-email limit suppresses mail without
+    // changing the answer. better-auth then gets a body we built.
+    const body = await readJson(c, magicLinkRequestBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const prepared = await prepareMagicLinkRequest(
+      ctx,
+      secrets,
+      c.req.raw,
+      body.value.email,
+      await magicLinksAvailable(ctx),
+    );
+    if (!prepared.ok) return respond(c, prepared);
+    const headers = new Headers(request.headers);
+    headers.delete("content-length");
+    headers.set("content-type", "application/json");
+    request = new Request(request.url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: prepared.value.email }),
+    });
+  } else if (request.method === "POST" && !isRegistrationRoute(path)) {
     // Sign-out and verify-authentication: a size bound before better-auth reads the body.
     const bounded = await boundedBody(request);
     if (!(bounded instanceof Request)) return respond(c, err(bounded));
@@ -205,6 +255,18 @@ const authRoutes = new Hono<AppEnv>().all("/*", async (c) => {
 
   const response = await auth.handler(request);
   if (store?.consumedTicket && response.ok) extraCookies.push(CLEAR_TICKET_COOKIE);
+  // The known-device cookie is set on every sign-in, passkey ones included (Identity §4.4), so a later
+  // magic-link sign-in from this browser isn't reported as a new device.
+  if (store?.sessionCreated && response.ok) {
+    const device = await recordSignInDevice(
+      c.env.DB,
+      secrets.tokenHashKey,
+      store.sessionCreated.userId,
+      c.req.raw.headers,
+      c.var.now(),
+    );
+    extraCookies.push(device.setCookie);
+  }
   const ticket = store?.consumedTicket;
   if (ticket && response.status >= 500 && !(await userExists(c, ticket.userId))) {
     // The setup claim expired (and its owner was deleted) between the ticket's consume and the passkey
@@ -332,6 +394,88 @@ const meRoutes = new Hono<AppEnv>()
     return respond(c, ok({ acknowledged: await acknowledgeNotices(c.env.DB, me.userId, body.value.ids) }));
   });
 
+// ---- /api/invitations: the invitee's side (Identity §4.3) ---------------------------------------
+
+const invitationRoutes = new Hono<AppEnv>()
+  .post("/lookup", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await limitInvitation(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, invitationLookupBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, installation } = services.value;
+    return respond(c, await lookupInvitation(ctx, secrets, installation, body.value.token));
+  })
+  .post("/accept", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await limitInvitation(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, acceptInvitationBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, installation } = services.value;
+    const result = await acceptInvitation(ctx, secrets, installation, body.value);
+    if (!result.ok) return respond(c, result);
+    const now = c.var.now();
+    c.header("Set-Cookie", ticketCookie(result.value.ticket, now), { append: true });
+    return respond(
+      c,
+      ok({
+        email: result.value.email,
+        enrolmentExpiresInSeconds: Math.max(1, Math.floor((result.value.ticket.expiresAt - now) / 1000)),
+        resumed: result.value.resumed,
+      }),
+      201,
+    );
+  });
+
+// ---- /api/sign-in: the magic-link confirmation page's POST (Identity §4.4) -----------------------
+
+const signInRoutes = new Hono<AppEnv>()
+  .post("/link/lookup", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await checkLimit(ctx, MAGIC_LINK_LIMITS.confirmIp, ipKey(c.req.raw));
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, magicLinkConfirmBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, installation } = services.value;
+    return respond(c, await lookupMagicLink(ctx, secrets, installation, body.value.token));
+  })
+  .post("/link", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await checkLimit(ctx, MAGIC_LINK_LIMITS.confirmIp, ipKey(c.req.raw));
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, magicLinkConfirmBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, auth } = services.value;
+    const result = await confirmMagicLink(ctx, secrets, auth, c.req.raw, body.value.token);
+    if (!result.ok) return respond(c, result);
+    for (const cookie of result.value.setCookies) c.header("Set-Cookie", cookie, { append: true });
+    // better-auth's verify body holds the session token: never passed through (workaround 7).
+    return respond(c, ok({ signedIn: true as const }));
+  });
+
+// ---- /api/status: what signed-out pages may know (Platform §15, Admin §8.2) -----------------------
+
+const statusRoutes = new Hono<AppEnv>().get("/public", async (c) => {
+  const ctx = coreContext(c);
+  const limited = await limitPublicStatus(ctx, c.req.raw);
+  if (!limited.ok) return respond(c, limited);
+  const status: PublicStatus = { magicLinks: await magicLinksAvailable(ctx) };
+  // Cacheable for 30 seconds by the browser only (TDD §8.2 keeps API responses out of shared caches).
+  return c.json(status, 200, { "Cache-Control": "private, max-age=30" });
+});
+
+export const invitationsFeature = defineFeature("invitations", invitationRoutes);
+export const signInFeature = defineFeature("sign-in", signInRoutes);
+export const statusFeature = defineFeature("status", statusRoutes);
 export const setupFeature = defineFeature("setup", setupRoutes);
 export const authFeature = defineFeature("auth", authRoutes);
 export const meFeature = defineFeature("me", meRoutes);

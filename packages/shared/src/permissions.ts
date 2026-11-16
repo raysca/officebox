@@ -223,6 +223,8 @@ export const WORKSPACE_ACTION_AUDIENCE = {
   "admin.invitations.view": "admin", // pending invitations (Admin §3)
   "admin.groups.view": "admin",
   "admin.settings.view": "admin", // owner-only keys shown aria-disabled (Admin §6)
+  // Send test email (TDD §7.6): to the actor's own address only, so it can't be used to mail anyone else.
+  "admin.email.test": "admin",
   "admin.health.view": "admin", // detailed health (Admin §8)
   "admin.storage.view": "admin", // budgets are owner-only settings (Admin §9)
   "admin.assistant.view": "admin", // usage aggregates and metadata log (Assistant §10-§11)
@@ -296,6 +298,12 @@ export type PermissionCheck =
       /** `RECOVERY_TOKEN` set and not yet consumed (Identity §4.6). */
       recoveryTokenUnconsumed: boolean;
     }
+  /**
+   * Revoking a pending invitation (Identity §4.2). Admins revoke member invitations; an admin
+   * invitation, which only an owner could send, needs an owner to revoke too **(default)**. Not gated
+   * by the owners' invite gate: revoking takes access away.
+   */
+  | { action: "invitation.revoke"; role: WorkspaceRole }
   | {
       action: MemberAdminAction;
       target: PersonRef;
@@ -469,6 +477,13 @@ function invitationRule(actor: Actor, check: Extract<PermissionCheck, { action: 
   return ALLOW;
 }
 
+function invitationRevokeRule(actor: Actor, role: WorkspaceRole): Decision {
+  if (!isManager(actor.role)) return deny("not_permitted");
+  if (!(INVITABLE_WORKSPACE_ROLES as readonly string[]).includes(role)) return deny("role_not_assignable");
+  if (role === "admin" && actor.role !== "owner") return deny("owner_required");
+  return ALLOW;
+}
+
 function memberAdminRule(actor: Actor, check: Extract<PermissionCheck, { action: MemberAdminAction }>): Decision {
   const { action, target, activeOwnerCount } = check;
   if (!isManager(actor.role)) return deny("not_permitted");
@@ -565,6 +580,8 @@ function rule(actor: Actor, check: PermissionCheck): Decision {
       return jobViewRule(actor, check.startedBy);
     case "invitation.create":
       return invitationRule(actor, check);
+    case "invitation.revoke":
+      return invitationRevokeRule(actor, check.role);
     case "member.change_email":
     case "member.issue_recovery_link":
     case "member.disable":
@@ -644,6 +661,7 @@ export function decideWithoutFacts(actor: Actor, action: string): Decision {
   switch (action) {
     case "admin.job.view":
     case "invitation.create":
+    case "invitation.revoke":
     case "member.change_email":
     case "member.issue_recovery_link":
     case "member.disable":

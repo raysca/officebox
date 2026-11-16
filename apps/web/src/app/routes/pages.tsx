@@ -1,6 +1,6 @@
 import type { ComponentType, SVGProps } from "react";
 import { EmptyState } from "../../lib/ui/EmptyState";
-import { AdminIcon, CalendarIcon, ChatIcon, DocumentIcon, HomeIcon } from "../../lib/ui/icons";
+import { CalendarIcon, ChatIcon, DocumentIcon, HomeIcon } from "../../lib/ui/icons";
 import { Link } from "../../lib/ui/Link";
 import { messages } from "../messages";
 import { Page } from "../Page";
@@ -21,8 +21,6 @@ export const HomePage = () => <ComingSoon area="home" icon={HomeIcon} />;
 export const ChatPage = () => <ComingSoon area="chat" icon={ChatIcon} />;
 export const CalendarPage = () => <ComingSoon area="calendar" icon={CalendarIcon} />;
 export const DocumentsPage = () => <ComingSoon area="documents" icon={DocumentIcon} />;
-/** Service status is in the footer on every page; the admin health page (TDD §7.1) comes in M7. */
-export const AdminPage = () => <ComingSoon area="admin" icon={AdminIcon} />;
 
 export function NotFoundPage() {
   return (

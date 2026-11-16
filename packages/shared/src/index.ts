@@ -29,3 +29,5 @@ export * from "./health";
 export * from "./security";
 export * from "./permissions";
 export * from "./identity";
+export * from "./email";
+export * from "./settings";

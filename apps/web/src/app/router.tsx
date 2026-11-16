@@ -13,10 +13,15 @@ import { Toaster } from "../lib/ui/Toaster";
 import { RootErrorPage, RouteErrorPage } from "./ErrorPage";
 import { AppShell } from "./layout/AppShell";
 import { PublicLayout } from "./layout/PublicLayout";
+import { AcceptInvitationPage } from "./routes/accept-invitation";
+import { AdminPage } from "./routes/admin";
 import { DevicesPage } from "./routes/devices";
-import { AdminPage, CalendarPage, ChatPage, DocumentsPage, HomePage, NotFoundPage } from "./routes/pages";
+import { InvitationsPage } from "./routes/invitations";
+import { MagicLinkPage } from "./routes/magic-link";
+import { CalendarPage, ChatPage, DocumentsPage, HomePage, NotFoundPage } from "./routes/pages";
 import { NotConfiguredPage } from "./routes/not-configured";
 import { PasskeysPage } from "./routes/passkeys";
+import { SettingsPage } from "./routes/settings";
 import { SetupPage } from "./routes/setup";
 import { SignInPage, signInSearchSchema } from "./routes/sign-in";
 
@@ -69,6 +74,19 @@ const signInRoute = createRoute({
   },
 });
 
+// Pages whose links carry a token in the fragment (Identity §2): public, served with no-referrer and
+// no-store (`_headers`), and they strip the fragment as soon as they read it.
+const magicLinkRoute = createRoute({
+  getParentRoute: () => publicRoute,
+  path: "/sign-in/link",
+  component: MagicLinkPage,
+});
+const acceptInvitationRoute = createRoute({
+  getParentRoute: () => publicRoute,
+  path: "/invitations/accept",
+  component: AcceptInvitationPage,
+});
+
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "app",
@@ -100,6 +118,16 @@ const chatRoute = createRoute({ getParentRoute: () => appRoute, path: "/chat", c
 const calendarRoute = createRoute({ getParentRoute: () => appRoute, path: "/calendar", component: CalendarPage });
 const documentsRoute = createRoute({ getParentRoute: () => appRoute, path: "/documents", component: DocumentsPage });
 const adminRoute = createRoute({ getParentRoute: () => appRoute, path: "/admin", component: AdminPage });
+const adminInvitationsRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/admin/invitations",
+  component: InvitationsPage,
+});
+const adminSettingsRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/admin/settings",
+  component: SettingsPage,
+});
 const devicesRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings/devices", component: DevicesPage });
 const passkeysRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -111,13 +139,15 @@ const passkeysRoute = createRoute({
 const notFoundRoute = createRoute({ getParentRoute: () => appRoute, path: "$", component: NotFoundPage });
 
 export const routeTree = rootRoute.addChildren([
-  publicRoute.addChildren([setupRoute, signInRoute, notConfiguredRoute]),
+  publicRoute.addChildren([setupRoute, signInRoute, notConfiguredRoute, magicLinkRoute, acceptInvitationRoute]),
   appRoute.addChildren([
     homeRoute,
     chatRoute,
     calendarRoute,
     documentsRoute,
     adminRoute,
+    adminInvitationsRoute,
+    adminSettingsRoute,
     devicesRoute,
     passkeysRoute,
     notFoundRoute,

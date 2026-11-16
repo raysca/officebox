@@ -94,15 +94,18 @@ export async function removePasskey(
   if (!allowed.ok) return allowed;
   const db = new Database(ctx.env.DB);
   // The engine allowed it for the count it read; the DELETE re-checks, so a concurrent removal can't
-  // leave the person with none. (Magic links don't exist before M1b, so nobody may remove their last.)
+  // leave the person with none, unless they're a member for whom magic links work (Identity §2): then
+  // the last may go, and the role is re-checked in the same statement.
+  const lastAllowed = permission.actor.role === "member" && (await permission.facts.magicLinksAvailable());
   const result = expectOk(
     await db.batchRun([
       db.statement(
-        `DELETE FROM passkeys WHERE id = ? AND user_id = ?
-           AND (SELECT count(*) FROM passkeys WHERE user_id = ?) > 1`,
+        `DELETE FROM passkeys WHERE id = ?1 AND user_id = ?2
+           AND ((SELECT count(*) FROM passkeys WHERE user_id = ?2) > 1
+                OR (?3 = 1 AND (SELECT role FROM users WHERE id = ?2) = 'member'))`,
         id,
         row.user_id,
-        row.user_id,
+        lastAllowed ? 1 : 0,
       ),
       await auditStatement(
         ctx,

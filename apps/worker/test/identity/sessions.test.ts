@@ -49,15 +49,19 @@ describe("better-auth sessions (Identity §4.5)", () => {
 
   it("records the device label and fresh-auth facts on the session", async () => {
     const browser = await signedIn(ws);
+    // This browser's own session (by its cookie's token), not "the newest", which ties within a millisecond.
+    const token = decodeURIComponent(browser.sessionCookie!).split(".")[0]!;
     const row = await env.DB.prepare(
-      "SELECT device_label, fresh_auth_at, fresh_auth_method, expires_at, created_at FROM sessions ORDER BY created_at DESC LIMIT 1",
-    ).first<{
-      device_label: string;
-      fresh_auth_at: number;
-      fresh_auth_method: string;
-      expires_at: number;
-      created_at: number;
-    }>();
+      "SELECT device_label, fresh_auth_at, fresh_auth_method, expires_at, created_at FROM sessions WHERE token = ?",
+    )
+      .bind(token)
+      .first<{
+        device_label: string;
+        fresh_auth_at: number;
+        fresh_auth_method: string;
+        expires_at: number;
+        created_at: number;
+      }>();
     expect(row?.device_label).toBe("Chrome on macOS");
     expect(row?.fresh_auth_method).toBe("passkey");
     expect(typeof row?.expires_at).toBe("number"); // epoch ms, not ISO text

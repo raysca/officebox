@@ -14,7 +14,7 @@ import type { Logger } from "../../core/log";
  * Needs `nodejs_compat` (AsyncLocalStorage), which `wrangler.jsonc` sets explicitly.
  */
 
-/** Set by our setup (and, from M1b, invitation accept) route around better-auth's `createUser`. */
+/** Set by our setup and invitation-accept routes around better-auth's `createUser`. */
 export interface CreateMarker {
   kind: "setup" | "accept";
   /** The setup claim nonce or accept attempt ID, recorded as `users.created_attempt_id`. */
@@ -55,6 +55,15 @@ export interface RequestStore {
   passkeyBefore?: { id: string; count: number };
   /** Set when a refused assertion turned out to be a genuine one with a regressed counter. */
   cloneDetected?: { passkeyId: string; userId: string };
+  /**
+   * Set by our middleware on a magic-link request: `suppressed` when the per-email limit was reached,
+   * so `sendMagicLink` does the same work and sends nothing (Identity §4.4).
+   */
+  magicLink?: { suppressed: boolean };
+  /** Set by our confirm route around better-auth's magic-link verify: the user our row named. */
+  magicLinkConfirm?: { userId: string };
+  /** Set by the session-create after hook: a session was created in this request (device cookie). */
+  sessionCreated?: { userId: string; sessionId: string };
 }
 
 const storage = new AsyncLocalStorage<RequestStore>();
