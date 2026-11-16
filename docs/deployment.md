@@ -24,8 +24,6 @@ You don't need to set any secrets: the Worker generates its own sign-in keys.
 
 > **Until setup is done, anyone who opens the address in that first hour can claim the workspace.** Do it straight away. If you'd rather not take that chance, set a `SETUP_TOKEN` secret before opening the address: then there's no open hour at all ([step 6](#6-first-time-setup)).
 
-> Quick start arrives with milestone M1b-1. Until your deployment includes it, use the setup token ([step 6](#6-first-time-setup)) and set the two secrets in [step 4](#4-secrets).
-
 For a workspace your team will rely on, follow the full guide: a custom domain first, sign-in keys as Worker secrets, and a second passkey.
 
 Throughout, `<your-domain>` stands for the address your workspace will use, for example `office.example.com`, and `<your-worker>` for your `workers.dev` subdomain. Officebox never assumes a domain: everything deployment-specific comes from your Cloudflare account, your Worker secrets and the admin settings.
