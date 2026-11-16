@@ -55,7 +55,8 @@ import { reauthenticate, reauthOptions } from "./reauth";
 import { currentStore } from "./request-store";
 import { filterAuthResponse } from "./token-filter";
 import { identitySecrets } from "./secrets";
-import { claimSetup, resumeSetup, setupStatus, type SetupEnrolmentResult } from "./setup";
+import { checkSetupServices } from "./services";
+import { claimSetup, resumeSetup, SETUP_SERVICES_FAILING, setupStatus, type SetupEnrolmentResult } from "./setup";
 import { isSetupComplete } from "./setup-state";
 
 /**
@@ -96,25 +97,42 @@ function enrolmentResponse(c: AppContext, result: SetupEnrolmentResult) {
     ok({
       ownerEmail: result.ownerEmail,
       enrolmentExpiresInSeconds: Math.max(1, Math.floor((result.ticket.expiresAt - now) / 1000)),
+      // Shown once on the page (M1b-1); only an open-window claim has one.
+      ...(result.resumeCode ? { resumeCode: result.resumeCode } : {}),
     }),
     201,
   );
 }
 
+/** Whether setup is complete; false when D1 can't say (the required-services check reports why). */
+async function setupDone(c: AppContext): Promise<boolean> {
+  try {
+    return await isSetupComplete(coreContext(c));
+  } catch {
+    return false;
+  }
+}
+
 const setupRoutes = new Hono<AppEnv>()
   .get("/", async (c) => {
     const ctx = coreContext(c);
+    if (await setupDone(c)) return respond(c, err(NOT_FOUND));
     const limited = await limitSetupStatus(ctx, c.req.raw);
     if (!limited.ok) return respond(c, limited);
-    return respond(c, await setupStatus(ctx));
+    // The required services first (M1b-1): the window starts only once they all pass.
+    const report = await checkSetupServices(c.env, c.var.log);
+    return respond(c, await setupStatus(ctx, report));
   })
   .post("/", async (c) => {
     const ctx = coreContext(c);
-    if (await isSetupComplete(ctx)) return respond(c, err(NOT_FOUND));
-    const secrets = identitySecrets(c.env, c.var.log);
-    if (!secrets.ok) return respond(c, secrets);
+    if (await setupDone(c)) return respond(c, err(NOT_FOUND));
     const limited = await limitSetup(ctx, c.req.raw);
     if (!limited.ok) return respond(c, limited);
+    // While any required service fails, no claim (M1b-1).
+    const report = await checkSetupServices(c.env, c.var.log);
+    if (!report.allOk) return respond(c, err(SETUP_SERVICES_FAILING));
+    const secrets = await identitySecrets(c.env, c.var.log);
+    if (!secrets.ok) return respond(c, secrets);
     const body = await readJson(c, setupBodySchema, SMALL_BODY);
     if (!body.ok) return respond(c, body);
     // The origin setup runs on becomes the canonical origin (Identity §4.1).
@@ -124,7 +142,7 @@ const setupRoutes = new Hono<AppEnv>()
   .post("/resume", async (c) => {
     const ctx = coreContext(c);
     if (await isSetupComplete(ctx)) return respond(c, err(NOT_FOUND));
-    const secrets = identitySecrets(c.env, c.var.log);
+    const secrets = await identitySecrets(c.env, c.var.log);
     if (!secrets.ok) return respond(c, secrets);
     const limited = await limitSetup(ctx, c.req.raw);
     if (!limited.ok) return respond(c, limited);

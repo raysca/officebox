@@ -59,3 +59,20 @@ export function isWorkerNotFound(body) {
     body.errors.some((e) => WORKER_NOT_FOUND_CODES.has(e?.code)),
   );
 }
+
+/**
+ * The warning logged when the step creates a secret (Platform §16, M1b-1). On a fresh deploy nobody has
+ * signed in yet, so nothing changes; on a workspace that has been running on keys the Worker generated
+ * (a Deploy-button copy moved to GitHub Actions, say), the new Worker secret takes precedence: creating
+ * `BETTER_AUTH_SECRET` signs everyone out, and creating `TOKEN_HASH_KEY` invalidates outstanding links.
+ */
+export function createdSecretWarning(name) {
+  const effect =
+    name === "BETTER_AUTH_SECRET"
+      ? "everyone will be signed out once and must sign in again"
+      : "outstanding invitation, sign-in and recovery links and enrolment tickets stop working";
+  return (
+    `deploy: warning: ${name} was created as a Worker secret and now takes precedence. If this workspace was ` +
+    `already running on a key the Worker generated, ${effect}. On a fresh deploy nothing changes.`
+  );
+}

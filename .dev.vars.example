@@ -5,14 +5,21 @@
 # Generate each random value with:  openssl rand -base64 32
 # Values must be at least 32 bytes. Use different values for every secret and every installation.
 
-# First-run setup token (TDD §6.8). Optional, at least 32 characters. Empty or unset: a one-time token
-# is generated on the first visit and written to Workers Logs instead. Ignored after setup; delete it.
+# All three are optional: leave them empty to try Officebox quickly. An empty value counts as unset.
+
+# First-run setup token (TDD §6.8). Optional, at least 32 characters. Empty or unset: setup needs no
+# token for the first 60 minutes after the workspace is first opened (anyone who opens the address in
+# that hour can claim it), then a one-time token is generated into Workers Logs. Set it to have no
+# open window at all. Ignored after setup; delete it.
 SETUP_TOKEN=
 
-# better-auth's secret: signs the session cookie. Required. Changing it signs everyone out.
+# better-auth's secret: signs the session cookie. Optional: empty or unset, the Worker generates a key
+# and keeps it in its own Durable Object storage. Production workspaces should set it. Setting or
+# changing it later signs everyone out.
 BETTER_AUTH_SECRET=
 
-# HMAC key for our stored token hashes (enrolment tickets, invitation and sign-in links). Required.
+# HMAC key for our stored token hashes (enrolment tickets, invitation and sign-in links). Optional, as
+# above. Setting or changing it later invalidates outstanding links.
 TOKEN_HASH_KEY=
 
 # Email provider keys (TDD §7.6), only for the service an owner picks in Admin → Settings → Email. The

@@ -1,13 +1,25 @@
-import { apiError, err, ok, type ApiError, type Result, type SetupBody, type SetupStatus } from "@officebox/shared";
+import {
+  apiError,
+  err,
+  ok,
+  SETUP_OPEN_WINDOW_MS,
+  type ApiError,
+  type Result,
+  type SetupBody,
+  type SetupMode,
+  type SetupStatus,
+} from "@officebox/shared";
 import { audit, auditStatement } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
 import { ulid } from "../../core/ids";
 import { authFor } from "./auth";
+import { randomToken, tokenHash } from "./crypto";
 import { issueTicket, type IssuedTicket } from "./enrolment";
 import { loadInstallation } from "./installation";
 import { runWithStore, currentStore } from "./request-store";
 import type { IdentitySecrets } from "./secrets";
+import type { ServicesReport } from "./services";
 import { completeSetupClaim, isSetupComplete } from "./setup-state";
 import { checkSetupToken, ensureGeneratedToken, setupTokenSource } from "./setup-token";
 
@@ -35,16 +47,108 @@ import { checkSetupToken, ensureGeneratedToken, setupTokenSource } from "./setup
  *
  * Setup creates **identity objects only**: the installation row, the owner and their handle. Settings
  * are the registry defaults until changed.
+ *
+ * **Quick start (M1b-1; Identity §4.1, TDD §6.8):**
+ * - **Open claim window.** With no `SETUP_TOKEN` secret, setup needs no token for 60 minutes from
+ *   `installation.setup_opened_at`, which the first setup status request or claim whose
+ *   required-services check passes records once (`… WHERE setup_opened_at IS NULL`). A claim without a
+ *   token adds `AND setup_opened_at > :now - 60 min` to its own atomic `UPDATE`, so the server decides
+ *   at the claim; a late one answers `setup_token_required`. The window never restarts. With
+ *   `SETUP_TOKEN` set there is no window. An open-window claim returns a **setup resume code** once
+ *   (`auth_tokens.kind = 'setup_resume'`, hashed, bound to the owner and the claim, expiring with it),
+ *   which `POST /setup/resume` accepts in place of the token.
+ * - **Release outside the app.** `scripts/setup-release.sql` releases an unfinished claim and sets
+ *   `setup_opened_at = 0`. The next setup request (or the hourly repair job) turns 0 into -1 by
+ *   compare-and-set and, only if that matched, writes `setup.released_outside_app` in the same batch,
+ *   so one release gives exactly one entry. 0 and -1 both mean the window is over.
  */
 
 export const SETUP_CLAIM_TTL_MS = 24 * 60 * 60 * 1000;
 
 const NOT_FOUND: ApiError = apiError("not_found", "No such endpoint.");
 const INVALID_TOKEN: ApiError = apiError("forbidden", "The setup token is not valid.");
+export const SETUP_TOKEN_REQUIRED: ApiError = apiError(
+  "setup_token_required",
+  "The open setup period is over. Enter the setup token to continue.",
+);
+export const SETUP_SERVICES_FAILING: ApiError = apiError(
+  "setup_services_failing",
+  "A required service isn't working yet. Fix the items on the setup checklist, then try again.",
+);
 
 export interface SetupEnrolmentResult {
   ownerEmail: string;
   ticket: IssuedTicket;
+  /** The setup resume code, returned once by an open-window claim. */
+  resumeCode?: string;
+}
+
+// ---- The open claim window (M1b-1) ------------------------------------------------------------
+
+/** `installation.setup_opened_at`: null before the window starts, 0 or -1 once a release ended it. */
+export async function readSetupOpenedAt(ctx: CoreContext): Promise<number | null> {
+  const row = expectOk(
+    await new Database(ctx.env.DB).first<{ setup_opened_at: number | null }>(
+      "SELECT setup_opened_at FROM installation WHERE id = 1",
+    ),
+  );
+  return row?.setup_opened_at ?? null;
+}
+
+/**
+ * Starts the open claim window, once: only in generated-token mode (no `SETUP_TOKEN`), only while it
+ * hasn't started and nothing has been claimed or completed. The row may not exist yet. Concurrent
+ * first requests agree on one time; a later request never moves it.
+ */
+export async function startOpenWindow(ctx: CoreContext): Promise<void> {
+  if (setupTokenSource(ctx.env) !== "generated") return;
+  expectOk(
+    await new Database(ctx.env.DB).run(
+      `INSERT INTO installation (id, installation_id, name, setup_opened_at) VALUES (1, ?, '', ?)
+       ON CONFLICT (id) DO UPDATE SET setup_opened_at = excluded.setup_opened_at
+        WHERE installation.setup_opened_at IS NULL AND installation.setup_claim IS NULL
+          AND installation.setup_completed_at IS NULL`,
+      ulid(),
+      ctx.now(),
+    ),
+  );
+}
+
+/** The mode a setup request is in, from the recorded window start (never from the request). */
+export function windowState(ctx: CoreContext, openedAt: number | null): { mode: SetupMode; openUntil?: number } {
+  if (setupTokenSource(ctx.env) !== "generated" || openedAt === null || openedAt <= 0) return { mode: "token" };
+  const openUntil = openedAt + SETUP_OPEN_WINDOW_MS;
+  return ctx.now() < openUntil ? { mode: "open", openUntil } : { mode: "token" };
+}
+
+/**
+ * Audits a release made outside the app (`scripts/setup-release.sql`): turns the marker 0 into -1 by
+ * compare-and-set and writes `setup.released_outside_app` in the same batch only if that matched, so
+ * concurrent observers write one entry. Returns whether this call wrote it.
+ */
+export async function observeRelease(ctx: CoreContext): Promise<boolean> {
+  const db = new Database(ctx.env.DB);
+  const result = expectOk(
+    await db.batchRun([
+      db.statement("UPDATE installation SET setup_opened_at = -1 WHERE id = 1 AND setup_opened_at = 0"),
+      await auditStatement(
+        ctx,
+        { action: "setup.released_outside_app", actor: null, metadata: { observedAt: ctx.now() } },
+        { onlyIfPreviousChanged: true },
+      ),
+    ]),
+  );
+  const observed = (result[0]?.changes ?? 0) === 1;
+  if (observed) ctx.log.warn("a setup release made outside the app was observed and audited");
+  return observed;
+}
+
+/**
+ * Observes a release only when the marker says there is one (a read first, so most requests and the
+ * hourly job don't write). Returns whether this call wrote the audit entry.
+ */
+export async function observeReleaseIfMarked(ctx: CoreContext): Promise<boolean> {
+  return (await readSetupOpenedAt(ctx)) === 0 ? observeRelease(ctx) : false;
 }
 
 /**
@@ -101,6 +205,39 @@ export async function expireIfStale(ctx: CoreContext): Promise<boolean> {
 }
 
 /**
+ * Undoes a claim whose owner was created but whose later steps failed: deletes that owner (only while
+ * it has no passkey and never signed in; its tickets and resume code go with it) and their handle,
+ * then releases the claim, which now has no owner row. The window and the setup token are kept.
+ */
+export async function undoClaim(ctx: CoreContext, claim: string, ownerId: string): Promise<void> {
+  try {
+    const db = new Database(ctx.env.DB);
+    expectOk(
+      await db.batchRun([
+        db.statement(
+          `DELETE FROM users WHERE id = ? AND created_attempt_id = ? AND role = 'owner'
+              AND NOT EXISTS (SELECT 1 FROM passkeys WHERE user_id = users.id) AND first_signed_in_at IS NULL`,
+          ownerId,
+          claim,
+        ),
+        db.statement(
+          "DELETE FROM handles WHERE created_attempt_id = ? AND NOT EXISTS (SELECT 1 FROM users WHERE created_attempt_id = ?)",
+          claim,
+          claim,
+        ),
+      ]),
+    );
+    await releaseOrphanedClaim(ctx, claim);
+  } catch (error) {
+    // The 24-hour expiry (or the release script) still releases it. A fixed message and the error's
+    // name only: raw D1 error text can carry SQL or values.
+    ctx.log.error("setup: couldn't undo a failed claim", {
+      errorName: error instanceof Error ? error.name : "unknown",
+    });
+  }
+}
+
+/**
  * Releases a claim that has no owner row (only while it's still the current, incomplete claim). The
  * setup token is kept, so the same token works again. Returns whether it released one.
  */
@@ -118,12 +255,37 @@ export async function releaseOrphanedClaim(ctx: CoreContext, claim: string): Pro
   return meta.changes === 1;
 }
 
-export async function setupStatus(ctx: CoreContext): Promise<Result<SetupStatus, ApiError>> {
+/**
+ * `GET /setup`: the status, after the required-services check (`report`). When every service passes,
+ * the open claim window starts (once). While D1 itself fails, only the checklist is returned.
+ */
+export async function setupStatus(ctx: CoreContext, report: ServicesReport): Promise<Result<SetupStatus, ApiError>> {
+  const tokenSource = setupTokenSource(ctx.env);
+  if (!report.d1Ok) {
+    return ok({
+      setupRequired: true,
+      tokenSource,
+      claimed: false,
+      services: report.services,
+      mode: "token",
+      now: ctx.now(),
+    });
+  }
   if (await isSetupComplete(ctx)) return err(NOT_FOUND);
+  await observeReleaseIfMarked(ctx);
   await expireIfStale(ctx);
   await ensureGeneratedToken(ctx);
+  if (report.allOk) await startOpenWindow(ctx);
   const installation = await loadInstallation(ctx.env.DB);
-  return ok({ setupRequired: true, tokenSource: setupTokenSource(ctx.env), claimed: installation?.setupClaim != null });
+  const window = windowState(ctx, await readSetupOpenedAt(ctx));
+  return ok({
+    setupRequired: true,
+    tokenSource,
+    claimed: installation?.setupClaim != null,
+    services: report.services,
+    ...window,
+    now: ctx.now(),
+  });
 }
 
 interface ClaimedOwner {
@@ -158,17 +320,37 @@ export async function claimSetup(
   retried = false,
 ): Promise<Result<SetupEnrolmentResult, ApiError>> {
   if (await isSetupComplete(ctx)) return err(NOT_FOUND);
+  await observeReleaseIfMarked(ctx);
   await expireIfStale(ctx);
   await ensureGeneratedToken(ctx);
-  const token = await checkSetupToken(ctx, body.token);
-  if (!token.ok) return token;
 
   const now = ctx.now();
+  const presented = body.token ?? "";
+  // A claim with a token is a token-mode claim, inside the window or not; without one, it's an
+  // open-mode claim, which the atomic UPDATE below allows only while the window lasts.
+  let mode: SetupMode = "token";
+  let claimGuard = "";
+  let claimParams: (string | number)[] = [];
+  let setupVia: string | null = null;
+  if (presented !== "") {
+    const token = await checkSetupToken(ctx, presented);
+    if (!token.ok) return token;
+    setupVia = token.value.source;
+    if (token.value.storedHash !== null) {
+      claimGuard = " AND setup_token_hash = ?";
+      claimParams = [token.value.storedHash];
+    }
+  } else {
+    if (setupTokenSource(ctx.env) !== "generated") return err(SETUP_TOKEN_REQUIRED);
+    await startOpenWindow(ctx); // a claim may be the first setup request
+    mode = "open";
+    claimGuard = " AND setup_opened_at > ?";
+    claimParams = [now - SETUP_OPEN_WINDOW_MS];
+  }
+
   const nonce = ulid();
   const host = new URL(origin).host;
   const db = new Database(ctx.env.DB);
-  const claimGuard = token.value.storedHash === null ? "" : " AND setup_token_hash = ?";
-  const claimParams = token.value.storedHash === null ? [] : [token.value.storedHash];
   const claimed = expectOk(
     await db.batchRun([
       // Secret mode may reach here before any row exists.
@@ -190,7 +372,7 @@ export async function claimSetup(
       await auditStatement(
         ctx,
         // "setupVia", not a token-named key: the audit writer redacts those.
-        { action: "setup.claim", actor: null, metadata: { setupVia: token.value.source } },
+        { action: "setup.claim", actor: null, metadata: setupVia ? { mode, setupVia } : { mode } },
         { onlyIfPreviousChanged: true },
       ),
     ]),
@@ -205,7 +387,8 @@ export async function claimSetup(
     if (installation?.setupClaim) {
       return err(apiError("conflict", "Setup has already been claimed. Resume it with the same setup token."));
     }
-    return err(INVALID_TOKEN); // the generated token was replaced since it was checked
+    // Open mode: the window ended (or was never open). Token mode: the generated token was replaced.
+    return err(mode === "open" ? SETUP_TOKEN_REQUIRED : INVALID_TOKEN);
   }
 
   let owner: Result<string, ApiError>;
@@ -220,9 +403,70 @@ export async function claimSetup(
     await releaseOrphanedClaim(ctx, nonce);
     return owner;
   }
-  const ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, owner.value, "setup", nonce, now);
-  ctx.log.info("setup claimed", { ownerId: owner.value });
-  return ok({ ownerEmail: body.ownerEmail, ticket });
+  let ticket: IssuedTicket;
+  let resumeCode: string | undefined;
+  try {
+    ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, owner.value, "setup", nonce, now);
+    resumeCode = mode === "open" ? await issueResumeCode(ctx, secrets, owner.value, nonce, now) : undefined;
+  } catch (error) {
+    // Without its ticket or resume code an open-window claimer couldn't resume: undo the claim so
+    // setup can be tried again at once, rather than locking it for 24 hours.
+    await undoClaim(ctx, nonce, owner.value);
+    throw error;
+  }
+  // One line for the operator (Identity §4.1): mode, time, origin and country; never an email or name.
+  const country = currentStore()?.cf?.country;
+  ctx.log.info("officebox setup claimed", {
+    mode,
+    claimedAt: new Date(now).toISOString(),
+    origin,
+    country: typeof country === "string" && country !== "" ? country : null,
+  });
+  return ok(resumeCode ? { ownerEmail: body.ownerEmail, ticket, resumeCode } : { ownerEmail: body.ownerEmail, ticket });
+}
+
+/**
+ * The setup resume code of an open-window claim (Identity §2 "Resuming an open-window claim"): 32
+ * random bytes, stored as HMAC(TOKEN_HASH_KEY) in `auth_tokens` with `kind = 'setup_resume'`, bound
+ * to the owner and the claim nonce, expiring with the claim. It goes away with the owner if the claim
+ * expires or is released (the row cascades with the user).
+ */
+async function issueResumeCode(
+  ctx: CoreContext,
+  secrets: IdentitySecrets,
+  ownerId: string,
+  claim: string,
+  now: number,
+): Promise<string> {
+  const code = randomToken(32);
+  expectOk(
+    await new Database(ctx.env.DB).run(
+      `INSERT INTO auth_tokens (token_hash, user_id, kind, payload, expires_at, created_at)
+       VALUES (?, ?, 'setup_resume', ?, ?, ?)`,
+      await tokenHash(secrets.tokenHashKey, code),
+      ownerId,
+      JSON.stringify({ claim }),
+      now + SETUP_CLAIM_TTL_MS,
+      now,
+    ),
+  );
+  return code;
+}
+
+/** Whether `presented` is a live setup resume code for the current claim's owner. */
+async function isResumeCode(ctx: CoreContext, secrets: IdentitySecrets, presented: string, claim: string) {
+  const row = expectOk(
+    await new Database(ctx.env.DB).first<{ ok: number }>(
+      `SELECT 1 AS ok FROM auth_tokens t JOIN users u ON u.id = t.user_id
+        WHERE t.token_hash = ? AND t.kind = 'setup_resume' AND t.revoked_at IS NULL AND t.expires_at > ?
+          AND json_extract(t.payload, '$.claim') = ? AND u.created_attempt_id = ? AND u.role = 'owner'`,
+      await tokenHash(secrets.tokenHashKey, presented),
+      ctx.now(),
+      claim,
+      claim,
+    ),
+  );
+  return row?.ok === 1;
 }
 
 /** Creates the owner through better-auth inside the setup marker, then claims the handle. */
@@ -267,10 +511,18 @@ export async function resumeSetup(
   presented: string,
 ): Promise<Result<SetupEnrolmentResult, ApiError>> {
   if (await isSetupComplete(ctx)) return err(NOT_FOUND);
+  await observeReleaseIfMarked(ctx);
   await expireIfStale(ctx);
-  const token = await checkSetupToken(ctx, presented);
-  if (!token.ok) return token;
   const installation = await loadInstallation(ctx.env.DB);
+  const token = await checkSetupToken(ctx, presented);
+  if (!token.ok) {
+    // After an open-window claim, the setup resume code takes the token's place (M1b-1).
+    const isCode =
+      token.error.code === "forbidden" &&
+      installation?.setupClaim != null &&
+      (await isResumeCode(ctx, secrets, presented, installation.setupClaim));
+    if (!isCode) return token;
+  }
   const claim = installation?.setupClaim;
   if (!claim) return err(apiError("gone", "There's no setup in progress to resume. Start setup again."));
   const owner = await claimedOwner(ctx, claim);

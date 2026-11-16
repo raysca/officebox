@@ -1,8 +1,10 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { isAllowedAuthRoute, normalisePath } from "../../src/features/identity/allowlist";
 import { consumeRateLimit } from "../../src/features/identity/rate-limits";
 import { stripTokens } from "../../src/features/identity/token-filter";
+import type { SystemObject } from "../../src/system-object";
 import { SoftAuthenticator } from "./authenticator";
 import {
   addMember,
@@ -226,6 +228,14 @@ describe("no response body or log line contains a session token (required test; 
     for (const token of issued) {
       for (const body of bodies) expect(body).not.toContain(token);
       for (const line of lines) expect(line).not.toContain(token);
+    }
+    // Nor any sign-in key (M1b-1): the Worker secrets, or keys the Worker generated earlier in this file.
+    const generated = await runInDurableObject(env.SYSTEM.getByName("system"), (_i: SystemObject, state) =>
+      state.storage.sql.exec<{ value: string }>("SELECT value FROM generated_keys").toArray(),
+    );
+    for (const key of [env.TOKEN_HASH_KEY!, env.BETTER_AUTH_SECRET!, ...generated.map((g) => g.value)]) {
+      for (const body of bodies) expect(body).not.toContain(key);
+      for (const line of lines) expect(line).not.toContain(key);
     }
   });
 

@@ -2,6 +2,8 @@ import type { Env } from "../env";
 import type { CoreContext } from "./context";
 import { Database } from "./db";
 import { ulid } from "./ids";
+import { tokenHashKeyOrNull } from "./keys";
+import { rootLogger } from "./log";
 import { collectEmails, redact, REDACT_DEFAULTS, redactString, type Redacted } from "./redact";
 
 /**
@@ -10,8 +12,8 @@ import { collectEmails, redact, REDACT_DEFAULTS, redactString, type Redacted } f
  * Metadata is sanitised before it is stored (Platform §3.1, §7):
  * - secret-named keys and token-like strings become `[redacted]`
  * - email addresses become `email:<hash>`, an HMAC keyed with `TOKEN_HASH_KEY`, so the same address
- *   always gives the same value without being readable; before that secret exists (M1) they become
- *   `[email]`
+ *   always gives the same value without being readable; the Worker secret when set, otherwise the
+ *   key the Worker generated (M1b-1); `[email]` when neither can be had
  * - metadata over 8 KB once serialised is replaced with `{ "truncated": true }`.
  *
  * Callers must still never pass message or document content, passwords or names.
@@ -58,15 +60,22 @@ async function hmacBase32(secret: string, value: string): Promise<string> {
   return out;
 }
 
-/** Pseudonymises a personal value for storage, or masks it when no hash key is configured yet. */
-export async function hashPersonal(env: Pick<Env, "TOKEN_HASH_KEY">, kind: string, value: string): Promise<string> {
-  if (!env.TOKEN_HASH_KEY) return `[${kind}]`;
-  return `${kind}:${await hmacBase32(env.TOKEN_HASH_KEY, `audit:${kind}:${value.trim().toLowerCase()}`)}`;
+/**
+ * The env audit pseudonyms need: `TOKEN_HASH_KEY`, or, when that secret isn't set, the SystemObject
+ * that holds the key the Worker generated (M1b-1, Platform §16).
+ */
+export type AuditKeyEnv = Pick<Env, "TOKEN_HASH_KEY"> & Partial<Pick<Env, "SYSTEM">>;
+
+/** Pseudonymises a personal value for storage, or masks it when no hash key can be had. */
+export async function hashPersonal(env: AuditKeyEnv, kind: string, value: string): Promise<string> {
+  const key = await tokenHashKeyOrNull(env, rootLogger);
+  if (!key) return `[${kind}]`;
+  return `${kind}:${await hmacBase32(key, `audit:${kind}:${value.trim().toLowerCase()}`)}`;
 }
 
 /** Returns sanitised metadata as JSON text, or null when there is none. */
 export async function sanitiseMetadata(
-  env: Pick<Env, "TOKEN_HASH_KEY">,
+  env: AuditKeyEnv,
   metadata: Record<string, unknown> | undefined,
 ): Promise<string | null> {
   if (!metadata || Object.keys(metadata).length === 0) return null;
@@ -92,7 +101,7 @@ export interface AuditStatementOptions {
 }
 
 /** Target type and ID are IDs by convention; they are still redacted in case one carries an email. */
-async function sanitiseTarget(env: Pick<Env, "TOKEN_HASH_KEY">, value: string | undefined): Promise<string | null> {
+async function sanitiseTarget(env: AuditKeyEnv, value: string | undefined): Promise<string | null> {
   if (value === undefined) return null;
   const hashes = new Map<string, string>();
   for (const email of collectEmails(value)) hashes.set(email, await hashPersonal(env, "email", email));

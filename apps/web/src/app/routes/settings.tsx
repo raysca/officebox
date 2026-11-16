@@ -5,6 +5,8 @@ import {
   type EmailDriverKind,
   type EmailProvider,
   type SettingEntryView,
+  type SettingsList,
+  type SignInKeySource,
 } from "@officebox/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useState, type FormEvent } from "react";
@@ -48,6 +50,7 @@ export function SettingsPage() {
             magicLinks={entry(settings.data.settings, "magic_link_enabled")}
             domains={entry(settings.data.settings, "allowed_invite_domains")}
           />
+          <SignInKeysSection keys={settings.data.signInKeys} />
         </>
       ) : null}
     </Page>
@@ -427,6 +430,33 @@ function SignInSection({
           </Button>
         </div>
       </form>
+    </section>
+  );
+}
+
+/**
+ * Where each sign-in key comes from (Platform §16, M1b-1): read-only, never a value. Production
+ * workspaces should use Worker secrets; setting one later signs everyone out or invalidates links.
+ */
+function SignInKeysSection({ keys }: { keys: SettingsList["signInKeys"] }) {
+  const rows: [string, SignInKeySource][] = [
+    ["BETTER_AUTH_SECRET", keys.betterAuthSecret],
+    ["TOKEN_HASH_KEY", keys.tokenHashKey],
+  ];
+  return (
+    <section aria-labelledby="keys-heading" className="flex flex-col gap-4 rounded-lg border border-border p-4">
+      <h2 id="keys-heading" className="text-lg font-semibold">
+        {copy.keysSection}
+      </h2>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+        {rows.map(([name, source]) => (
+          <div key={name} className="contents">
+            <dt className="font-mono">{name}</dt>
+            <dd>{copy.keySources[source]}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="text-sm text-muted">{copy.keysNote}</p>
     </section>
   );
 }

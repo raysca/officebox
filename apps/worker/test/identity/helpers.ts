@@ -1,7 +1,10 @@
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import type { EmailProvider, EmailSendMessage } from "@officebox/shared";
+import { createApp } from "../../src/core/app";
 import { ulid } from "../../src/core/ids";
+import { features } from "../../src/features";
+import { identityApiMiddleware } from "../../src/features/identity/middleware";
 import { clearSettingsCache } from "../../src/core/settings";
 import { clearSetupCache } from "../../src/features/identity/setup-state";
 import worker from "../../src/index";
@@ -37,10 +40,39 @@ export class FakeQueue {
 }
 export const outbox = new FakeQueue();
 
+/**
+ * A controllable clock and log capture for tests that need them (the open claim window, M1b-1). While
+ * set, every `callWorker` goes through an app built like the real one but with this clock and a sink
+ * that records each log line. `useTestClock(null)` goes back to the real Worker.
+ */
+export interface TestClock {
+  now: number;
+  readonly lines: string[];
+}
+let clocked: { app: ReturnType<typeof createApp>; clock: TestClock } | null = null;
+
+export function useTestClock(start: number | null): TestClock {
+  const clock: TestClock = { now: start ?? Date.now(), lines: [] };
+  clocked =
+    start === null
+      ? null
+      : {
+          clock,
+          app: createApp({
+            features,
+            apiMiddleware: [identityApiMiddleware],
+            now: () => clock.now,
+            logSink: (_level, line) => clock.lines.push(line),
+          }),
+        };
+  return clock;
+}
+
 /** Calls the real Worker (with optional env overrides) and waits for its `waitUntil` work. */
 export async function callWorker(request: Request, overrides: Partial<Env> = {}): Promise<Response> {
   const ctx = createExecutionContext();
-  const response = await worker.fetch(request, { ...env, EMAIL_QUEUE: outbox as unknown as Queue, ...overrides }, ctx);
+  const target = clocked ? clocked.app : worker;
+  const response = await target.fetch(request, { ...env, EMAIL_QUEUE: outbox as unknown as Queue, ...overrides }, ctx);
   await waitOnExecutionContext(ctx);
   return response;
 }

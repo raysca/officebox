@@ -88,18 +88,78 @@ export function isWorkersDevHost(host: string): boolean {
 export const setupTokenSourceSchema = z.enum(["secret", "generated"]);
 export type SetupTokenSource = z.infer<typeof setupTokenSourceSchema>;
 
+/**
+ * Where a sign-in key comes from (Platform §16, M1b-1): a Worker secret, or a key the Worker generated
+ * and keeps in the SystemObject's storage. Admins see this, never a value.
+ */
+export const signInKeySourceSchema = z.enum(["worker_secret", "generated"]);
+export type SignInKeySource = z.infer<typeof signInKeySourceSchema>;
+
+/** The required services checked before setup can proceed (Identity §4.1, TDD §6.8; M1b-1). */
+export const SETUP_SERVICE_IDS = [
+  "d1",
+  "durable_objects",
+  "queues",
+  "r2",
+  "better_auth_secret",
+  "token_hash_key",
+] as const;
+export const setupServiceIdSchema = z.enum(SETUP_SERVICE_IDS);
+export type SetupServiceId = z.infer<typeof setupServiceIdSchema>;
+
+/**
+ * The fixed problem codes a failing service reports. Never a value, length, account or resource ID, or
+ * raw error: those go to the Worker log only.
+ */
+export const SETUP_SERVICE_PROBLEMS = ["missing", "unreachable", "migrations_pending", "invalid_secret"] as const;
+export const setupServiceProblemSchema = z.enum(SETUP_SERVICE_PROBLEMS);
+export type SetupServiceProblem = z.infer<typeof setupServiceProblemSchema>;
+
+export const setupServiceSchema = z.object({
+  id: setupServiceIdSchema,
+  ok: z.boolean(),
+  /** Set only when `ok` is false. */
+  problem: setupServiceProblemSchema.optional(),
+});
+export type SetupService = z.infer<typeof setupServiceSchema>;
+
+/** Length of the open claim window: 60 minutes from `installation.setup_opened_at` (Identity §4.1). */
+export const SETUP_OPEN_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * How setup is protected right now: `open` (no token needed until `openUntil`) or `token` (the
+ * `SETUP_TOKEN` secret, or the generated token in Workers Logs).
+ */
+export const setupModeSchema = z.enum(["open", "token"]);
+export type SetupMode = z.infer<typeof setupModeSchema>;
+
 /** `GET /api/setup` before setup completes. Afterwards the endpoint is 404. */
 export const setupStatusSchema = z.object({
   setupRequired: z.literal(true),
   tokenSource: setupTokenSourceSchema,
   /** Setup was claimed and the owner hasn't registered a passkey yet: resume with the same token. */
   claimed: z.boolean(),
+  /** Each required service, in a fixed order (M1b-1). Setup is blocked while any fails. */
+  services: z.array(setupServiceSchema),
+  /** `open` while the open claim window lasts (M1b-1), otherwise `token`. */
+  mode: setupModeSchema,
+  /** End of the open claim window (epoch ms); present only while `mode` is `open`. */
+  openUntil: z.number().int().optional(),
+  /**
+   * The server's clock when it answered (epoch ms), so the page counts the time left against the
+   * server, not a skewed browser clock (M1b-1). Optional so an older Worker's answer still parses.
+   */
+  now: z.number().int().optional(),
 });
 export type SetupStatus = z.infer<typeof setupStatusSchema>;
 
-/** `POST /api/setup`. There is no password: the owner registers a passkey next. */
+/**
+ * `POST /api/setup`. There is no password: the owner registers a passkey next. `token` may be left out
+ * (or empty) only while the open claim window lasts (M1b-1); afterwards the claim answers
+ * `setup_token_required`.
+ */
 export const setupBodySchema = z.strictObject({
-  token: z.string().min(1).max(512),
+  token: z.string().max(512).optional(),
   workspaceName: workspaceNameSchema,
   ownerName: displayNameSchema,
   ownerHandle: handleSchema,
@@ -107,7 +167,7 @@ export const setupBodySchema = z.strictObject({
 });
 export type SetupBody = z.infer<typeof setupBodySchema>;
 
-/** `POST /api/setup/resume`. */
+/** `POST /api/setup/resume`: the setup token, or the setup resume code an open-window claim returned. */
 export const setupResumeBodySchema = z.strictObject({ token: z.string().min(1).max(512) });
 export type SetupResumeBody = z.infer<typeof setupResumeBodySchema>;
 
@@ -116,6 +176,11 @@ export const setupEnrolmentSchema = z.object({
   ownerEmail: z.string(),
   /** Seconds the enrolment ticket stays valid. */
   enrolmentExpiresInSeconds: z.number().int().positive(),
+  /**
+   * The setup resume code, returned once by an open-window claim (M1b-1): it resumes registration on
+   * another device in place of a setup token. Absent for token-mode claims and resumes.
+   */
+  resumeCode: z.string().optional(),
 });
 export type SetupEnrolment = z.infer<typeof setupEnrolmentSchema>;
 

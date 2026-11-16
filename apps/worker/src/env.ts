@@ -35,18 +35,26 @@ export interface Env {
    */
   EMAIL?: SendEmail;
 
-  // Secrets (Platform §16). Declared optional because a fresh deploy may not have them yet: identity
-  // checks them on use (features/identity/secrets.ts) and answers `unavailable` until they are set,
-  // rather than failing at startup.
+  // Secrets (Platform §16). Declared optional because a fresh deploy may not have them. Identity checks
+  // them on use (features/identity/secrets.ts): from M1b-1, an unset or empty BETTER_AUTH_SECRET or
+  // TOKEN_HASH_KEY falls back to a key the Worker generates into the SystemObject (core/keys.ts); one
+  // that is set but invalid makes sign-in answer `unavailable` (/not-configured).
 
-  /** Optional first-run setup token (TDD §6.8), at least 32 characters. Unset: generated into Workers Logs. */
+  /**
+   * Optional first-run setup token (TDD §6.8), at least 32 characters. Unset: no token for the first
+   * 60 minutes (the open claim window, M1b-1), then one generated into Workers Logs. Set: no window.
+   */
   SETUP_TOKEN?: string;
   /**
    * HMAC key for our stored token hashes (enrolment tickets now; recovery links, invitations and RSVP
-   * tokens later) and audit email hashes (Platform §16). Required from M1; at least 32 bytes.
+   * tokens later) and audit email hashes (Platform §16). Optional from M1b-1 (the Worker generates one);
+   * at least 32 bytes when set.
    */
   TOKEN_HASH_KEY?: string;
-  /** better-auth's secret: signs the session cookie (Platform §16). Required from M1; at least 32 bytes. */
+  /**
+   * better-auth's secret: signs the session cookie (Platform §16). Optional from M1b-1 (the Worker
+   * generates one); at least 32 bytes when set.
+   */
   BETTER_AUTH_SECRET?: string;
   /**
    * better-auth's rotation list, `<version>:<secret>,…` newest first (Platform §16). Rotating signs

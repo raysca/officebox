@@ -1,5 +1,5 @@
 import { Outlet } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { messages } from "../messages";
 import { useDocumentTitle } from "../Page";
 import { ThemeSelect } from "./ThemeSelect";
@@ -9,16 +9,19 @@ export function PublicPage({
   title,
   description,
   children,
+  headingRef,
 }: {
   title: string;
   description?: ReactNode;
   children: ReactNode;
+  /** The page heading, for pages that move focus to it. */
+  headingRef?: Ref<HTMLHeadingElement>;
 }) {
   useDocumentTitle(title);
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-1">
-        <h1 data-page-heading tabIndex={-1} className="text-2xl font-semibold">
+        <h1 ref={headingRef} data-page-heading tabIndex={-1} className="text-2xl font-semibold">
           {title}
         </h1>
         {description ? <p className="text-muted">{description}</p> : null}

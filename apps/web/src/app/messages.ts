@@ -14,6 +14,8 @@ const errorByCode: Record<ErrorCode, string> = {
   reauth_required: "Confirm it's you with your passkey to continue.",
   csrf_failed: "Your browser sent the request in a way we can't accept. Reload the page and try again.",
   setup_required: "This workspace hasn't been set up yet.",
+  setup_token_required: "The open setup period has ended. Enter the setup token to continue.",
+  setup_services_failing: "Setup can't continue until every required service works. Check the list above.",
   not_found: "We couldn't find that. It may have been moved or deleted.",
   method_not_allowed: "That action isn't supported here.",
   conflict: "Someone else changed this at the same time. Refresh and try again.",
@@ -45,6 +47,10 @@ const errorByDenial: Record<DenialReason, string> = {
   last_passkey: "You can't remove your last passkey, or you'd have no way to sign in.",
   reauth_required: "Confirm it's you with your passkey to continue.",
 };
+
+function minutesText(minutes: number): string {
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
 
 export const messages = {
   appName: "Officebox",
@@ -129,6 +135,59 @@ export const messages = {
     checklistTitle: "Before you invite people",
     workersDevNoEmail:
       "This workspace runs on a workers.dev address, which usually means no email. Without email there are no sign-in links, so a second passkey or a RECOVERY_TOKEN is your only way back in.",
+    // Quick start (M1b-1): the open claim window.
+    openNotice: (until: string, minutes: number) =>
+      `No setup token is needed until ${until} (${minutesText(minutes)} left). Until then, anyone who opens this address can claim this workspace. Finish setup now, or set a SETUP_TOKEN secret.`,
+    openAnnouncement: (minutes: number) => `${minutesText(minutes)} left to set up without a setup token.`,
+    tokenLabelOptional: "Setup token (optional)",
+    tokenHintOpen:
+      "Not needed right now. If you set a SETUP_TOKEN secret or have the token from the logs, you can enter it.",
+    windowClosed: "The open setup period has ended. Enter the setup token to continue; what you typed is kept.",
+    resumeCodeTitle: "Save your setup resume code",
+    resumeCodeDescription:
+      "If you need to finish setup on another device, enter this code there instead of a setup token. It's shown only once and works until setup is finished or 24 hours pass.",
+    resumeCodeLabel: "Setup resume code",
+    resumeTokenLabel: "Setup token or resume code",
+    claimedDescriptionOpen:
+      "Someone started setting up this workspace but hasn't added a passkey yet. If that was you, enter the setup token or the setup resume code you were shown, on this device or another one.",
+    // Quick start (M1b-1): the required-services checklist.
+    servicesTitle: "Officebox isn't ready to set up yet",
+    servicesDescription:
+      "Setup checks the Cloudflare services Officebox needs. Fix each item marked below, then check again.",
+    servicesListLabel: "Required services",
+    servicesRecheck: "Check again",
+    servicesRechecking: "Checking…",
+    servicesOk: "Working",
+    servicesNeedsAttention: "Needs attention:",
+    servicesSummary: (failing: number) =>
+      failing === 1 ? "1 required service needs attention." : `${failing} required services need attention.`,
+    serviceNames: {
+      d1: "Database (D1)",
+      durable_objects: "Durable Objects",
+      queues: "Email queue (Queues)",
+      r2: "File storage (R2)",
+      better_auth_secret: "Sign-in key (BETTER_AUTH_SECRET)",
+      token_hash_key: "Link key (TOKEN_HASH_KEY)",
+    },
+    serviceFixes: {
+      d1: {
+        missing: "The database binding is missing: redeploy with the Deploy button or `npm run deploy`.",
+        unreachable: "The database isn't reachable. Check the Worker's D1 binding, then redeploy.",
+        migrations_pending: "Migrations haven't run: redeploy (`npm run deploy` applies them).",
+        invalid_secret: "The database isn't reachable. Check the Worker's D1 binding, then redeploy.",
+      },
+      durable_objects: "Durable Objects aren't available: check the Worker's bindings, then redeploy.",
+      queues: "The email queue is missing: redeploy with the Deploy button or `npm run deploy`.",
+      r2: "R2 isn't enabled on this Cloudflare account: dashboard → R2, then redeploy.",
+      better_auth_secret: {
+        invalid_secret: "BETTER_AUTH_SECRET is set but too short: fix or delete it.",
+        unreachable: "The sign-in key can't be read until Durable Objects work. Fix that item first.",
+      },
+      token_hash_key: {
+        invalid_secret: "TOKEN_HASH_KEY is set but too short: fix or delete it.",
+        unreachable: "The link key can't be read until Durable Objects work. Fix that item first.",
+      },
+    },
   },
   signIn: {
     title: "Sign in",
@@ -367,6 +426,10 @@ export const messages = {
     description: "Workspace settings. Some can only be changed by an owner.",
     loading: "Loading settings…",
     ownerOnly: "Only owners can change this.",
+    keysSection: "Sign-in keys",
+    keySources: { worker_secret: "Worker secret", generated: "Generated by the Worker" },
+    keysNote:
+      "Production workspaces should set both as Worker secrets. Setting BETTER_AUTH_SECRET later signs everyone out once; setting TOKEN_HASH_KEY later makes outstanding invitation, sign-in and recovery links stop working.",
     emailSection: "Email",
     emailDescription:
       "Email delivers invitations, sign-in links and security notices. Copy-link invitations always work without it.",

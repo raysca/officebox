@@ -37,6 +37,10 @@ import { isSetupComplete } from "./setup-state";
 
 const installations = new WeakMap<RequestStore, Installation | null>();
 
+function isSetupPath(path: string): boolean {
+  return path === "/api/setup";
+}
+
 export const identityApiMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
   let waitUntil: ((p: Promise<unknown>) => void) | undefined;
   try {
@@ -51,13 +55,23 @@ export const identityApiMiddleware: MiddlewareHandler<AppEnv> = async (c, next) 
     cf: c.req.raw.cf as RequestStore["cf"],
   };
   return runWithStore(store, async () => {
-    const installation = await loadInstallation(c.env.DB);
+    let installation: Installation | null;
+    try {
+      installation = await loadInstallation(c.env.DB);
+    } catch (error) {
+      // Setup must still answer while D1 is down or unmigrated, so its required-services checklist
+      // can say so (M1b-1). Setup's own routes refuse every claim until D1 passes. Everything else
+      // fails as before.
+      if (!isSetupPath(new URL(c.req.url).pathname)) throw error;
+      c.var.log.error("installation unreadable; setup will report it", { error });
+      installation = null;
+    }
     installations.set(store, installation);
     const canonical = installation?.canonicalOrigin;
     if (canonical) {
       const url = new URL(c.req.url);
       if (url.origin !== canonical) {
-        if (installation.allowedHosts.includes(url.host)) {
+        if (installation?.allowedHosts.includes(url.host)) {
           const target = new URL(url.pathname + url.search, canonical).toString();
           const status = c.req.method === "GET" || c.req.method === "HEAD" ? 302 : 307;
           return new Response(null, { status, headers: { Location: target, "Cache-Control": "no-store" } });
@@ -86,7 +100,7 @@ export interface IdentityServices {
 
 /** Secrets, the claimed installation and its better-auth instance; or the error to return. */
 export async function identityServices(c: AppContext): Promise<Result<IdentityServices, ApiError>> {
-  const secrets = identitySecrets(c.env, c.var.log);
+  const secrets = await identitySecrets(c.env, c.var.log);
   if (!secrets.ok) return secrets;
   const installation = claimed(await requestInstallation(c));
   if (!installation) return err(apiError("setup_required", "This workspace hasn't been set up yet."));

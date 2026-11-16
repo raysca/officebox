@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   GENERATED_SECRETS,
+  createdSecretWarning,
   generateSecretValue,
   isWorkerNotFound,
   parseSecretList,
@@ -56,4 +57,15 @@ test("recognises a missing Worker by API error code only", () => {
   assert.equal(isWorkerNotFound({ success: false, errors: [{ code: 10000, message: "Authentication error" }] }), false);
   assert.equal(isWorkerNotFound({ success: true, result: [] }), false);
   assert.equal(isWorkerNotFound(null), false);
+});
+
+test("warns that creating a secret signs people out or invalidates links, naming only the secret", () => {
+  const auth = createdSecretWarning("BETTER_AUTH_SECRET");
+  assert.match(auth, /BETTER_AUTH_SECRET/);
+  assert.match(auth, /signed out/);
+  const hash = createdSecretWarning("TOKEN_HASH_KEY");
+  assert.match(hash, /TOKEN_HASH_KEY/);
+  assert.match(hash, /links/);
+  // Never a value: the message is the same whatever was generated.
+  assert.equal(createdSecretWarning("TOKEN_HASH_KEY"), hash);
 });

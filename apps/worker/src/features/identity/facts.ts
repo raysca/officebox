@@ -3,6 +3,7 @@ import type { AppContext, AuthContext } from "../../core/context";
 import { coreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
 import type { PermissionContext, PermissionFacts } from "../../core/permissions";
+import { tokenHashKeyOrNull } from "../../core/keys";
 import { rootLogger } from "../../core/log";
 import type { Env } from "../../env";
 import { magicLinksAvailable } from "../email/config";
@@ -55,8 +56,10 @@ export function d1Facts(env: Env): PermissionFacts {
 /** `RECOVERY_TOKEN` is set (at least 32 characters) and its hash isn't in `recovery_token_uses` (Identity §4.6). */
 export async function recoveryTokenUnconsumed(env: Env): Promise<boolean> {
   const secret = env.RECOVERY_TOKEN;
-  const key = env.TOKEN_HASH_KEY;
-  if (!secret || [...secret].length < MIN_SECRET_BYTES || !key) return false;
+  if (!secret || [...secret].length < MIN_SECRET_BYTES) return false;
+  // The Worker secret, or the key the Worker generated (M1b-1).
+  const key = await tokenHashKeyOrNull(env, rootLogger);
+  if (!key) return false;
   const hash = await tokenHash(key, secret);
   const rows = expectOk(
     await new Database(env.DB).all<{ token_hash: string }>("SELECT token_hash FROM recovery_token_uses"),

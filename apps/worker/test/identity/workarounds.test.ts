@@ -29,8 +29,8 @@ import {
 
 const silent = createLogger({}, () => {});
 const INSTALLATION = { canonicalOrigin: ORIGIN, workspaceName: "Acme Studio" };
-function secrets() {
-  const result = identitySecrets(env, silent);
+async function secrets() {
+  const result = await identitySecrets(env, silent);
   if (!result.ok) throw new Error("test secrets missing");
   return result.value;
 }
@@ -118,7 +118,7 @@ describe("workaround 2: user verification enforced by our hooks", () => {
 
 describe("workaround 3: the passkey origin and rpID are set from the installation record", () => {
   it("a request's Origin header doesn't become the expected origin", async () => {
-    const auth = createAuth(env, secrets(), INSTALLATION);
+    const auth = createAuth(env, await secrets(), INSTALLATION);
     const store = { log: silent };
     await runWithStore(store, async () => {
       const options = await auth.api.generatePasskeyAuthenticationOptions({
@@ -158,7 +158,7 @@ describe("workaround 3: the passkey origin and rpID are set from the installatio
         .catch(() => "refused");
       expect(accepted).toBe("signed in");
     });
-    const options = buildAuthOptions(env, secrets(), INSTALLATION);
+    const options = buildAuthOptions(env, await secrets(), INSTALLATION);
     expect(options.baseURL).toBe(ORIGIN);
     expect(options.trustedOrigins).toEqual([ORIGIN]);
   });
@@ -211,7 +211,7 @@ describe("workaround 6: the enrolment ticket is read at options and consumed at 
 
 describe("workaround 7: the token filter on the better-auth mount", () => {
   it("better-auth's own verify body carries the session token; ours never does", async () => {
-    const auth = createAuth(env, secrets(), INSTALLATION);
+    const auth = createAuth(env, await secrets(), INSTALLATION);
     const browser = new Browser();
     const options = await browser.json<{ challenge: string }>("/api/auth/passkey/generate-authenticate-options");
     const response = await ws.authenticator.authenticate(options.body, ORIGIN);
@@ -258,7 +258,7 @@ describe("workaround 9: the CSRF header on the two GET options routes", () => {
 
 describe("workaround 10: the server-set marker through AsyncLocalStorage", () => {
   it("internalAdapter.createUser without the marker is refused; with it the user is created and tagged", async () => {
-    const internal = (await createAuth(env, secrets(), INSTALLATION).$context).internalAdapter;
+    const internal = (await createAuth(env, await secrets(), INSTALLATION).$context).internalAdapter;
     const refusedEmail = uniqueEmail("nomarker");
     const refused = await runWithStore({ log: silent }, () =>
       internal.createUser({ email: refusedEmail, name: "x", emailVerified: true }, { method: "test" }),
@@ -283,7 +283,7 @@ describe("workaround 10: the server-set marker through AsyncLocalStorage", () =>
   });
 
   it("createOAuthUser and signUpEmail are refused without the marker, even with a pending invitation", async () => {
-    const auth = createAuth(env, secrets(), INSTALLATION);
+    const auth = createAuth(env, await secrets(), INSTALLATION);
     const internal = (await auth.$context).internalAdapter;
     const email = uniqueEmail("oauth");
     await runWithStore({ log: silent }, () =>
@@ -344,7 +344,7 @@ describe("workaround 13: users are created with emailVerified true", () => {
 
 describe("workaround 14: explicit options", () => {
   it("rate limiting is on with D1 storage, telemetry off, joins on, the cookie cache off", async () => {
-    const options = buildAuthOptions(env, secrets(), INSTALLATION);
+    const options = buildAuthOptions(env, await secrets(), INSTALLATION);
     expect(options.rateLimit.enabled).toBe(true);
     expect(typeof options.rateLimit.customStorage.consume).toBe("function");
     expect(options.telemetry.enabled).toBe(false);

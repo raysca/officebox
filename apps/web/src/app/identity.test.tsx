@@ -43,13 +43,19 @@ const on =
 
 const options = () => jsonResponse({ challenge: "abc" });
 
+const SERVICE_IDS = ["d1", "durable_objects", "queues", "r2", "better_auth_secret", "token_hash_key"] as const;
+const allServices = () => SERVICE_IDS.map((id) => ({ id, ok: true }));
+/** A setup status in token mode with every service passing (M1b-1 fields included). */
+const tokenStatus = (claimed: boolean) =>
+  jsonResponse({ setupRequired: true, tokenSource: "generated", claimed, services: allServices(), mode: "token" });
+
 describe("setup (Identity §4.1)", () => {
   const notSetUp = (extra: Route[] = [], claimed = false) =>
     healthyFetch({
       me: null,
       routes: [
         on("GET", "/api/me", () => apiError("setup_required", 409)),
-        on("GET", "/api/setup", () => jsonResponse({ setupRequired: true, tokenSource: "generated", claimed })),
+        on("GET", "/api/setup", () => tokenStatus(claimed)),
         ...extra,
       ],
     });
@@ -134,7 +140,7 @@ describe("setup (Identity §4.1)", () => {
       me: null,
       routes: [
         on("GET", "/api/me", () => apiError("setup_required", 409)),
-        on("GET", "/api/setup", () => jsonResponse({ setupRequired: true, tokenSource: "generated", claimed })),
+        on("GET", "/api/setup", () => tokenStatus(claimed)),
         on("POST", "/api/setup/resume", () => {
           claimed = false;
           return apiError("conflict", 409, { reason: "setup_released" });
@@ -145,6 +151,220 @@ describe("setup (Identity §4.1)", () => {
     await user.type(await screen.findByLabelText("Setup token"), "token-0123456789abcdefghijklmnopqrstuv");
     await user.click(screen.getByRole("button", { name: "Continue setup" }));
     expect(await screen.findByRole("button", { name: "Create workspace" })).toBeDefined();
+  });
+
+  it("while a required service fails, only the checklist is shown, with a plain fix (M1b-1)", async () => {
+    const user = userEvent.setup();
+    let failing = true;
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () =>
+          jsonResponse({
+            setupRequired: true,
+            tokenSource: "generated",
+            claimed: false,
+            services: allServices().map((s) =>
+              s.id === "r2" && failing ? { id: "r2", ok: false, problem: "missing" } : s,
+            ),
+            mode: failing ? "token" : "open",
+            ...(failing ? {} : { openUntil: Date.now() + 42 * 60_000 }),
+          }),
+        ),
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    expect(await screen.findByRole("heading", { level: 1, name: "Officebox isn't ready to set up yet" })).toBeDefined();
+    const list = screen.getByRole("list", { name: "Required services" });
+    expect(
+      within(list).getByText("R2 isn't enabled on this Cloudflare account: dashboard → R2, then redeploy."),
+    ).toBeDefined();
+    expect(within(list).getAllByText("Working")).toHaveLength(5);
+    expect(within(list).getByText("Needs attention:")).toBeDefined();
+    expect(screen.getByText("1 required service needs attention.")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Create workspace" })).toBeNull();
+    await expectNoViolations();
+    failing = false;
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByRole("button", { name: "Create workspace" })).toBeDefined();
+    // Focus moves to the new page's heading.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1, name: "Set up your workspace" })),
+    );
+  });
+
+  it("inside the open window: the notice with the time left, no token needed, and the resume code shown once", async () => {
+    const user = userEvent.setup();
+    const openUntil = Date.now() + 42 * 60_000 - 1000;
+    let posted: unknown = null;
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () =>
+          jsonResponse({
+            setupRequired: true,
+            tokenSource: "generated",
+            claimed: false,
+            services: allServices(),
+            mode: "open",
+            openUntil,
+          }),
+        ),
+        (url, init) => {
+          if (url !== "/api/setup" || init?.method !== "POST") return undefined;
+          posted = JSON.parse(init.body as string);
+          return jsonResponse(
+            {
+              ownerEmail: "sam@example.com",
+              enrolmentExpiresInSeconds: 900,
+              resumeCode: "resume-code-0123456789abcdefghijklmnopqrstu",
+            },
+            201,
+          );
+        },
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    expect(await screen.findByText(/No setup token is needed until .* \(42 minutes left\)/)).toBeDefined();
+    expect(screen.getByText(/anyone who opens this address can claim this workspace/)).toBeDefined();
+    await expectNoViolations();
+    await user.type(screen.getByLabelText("Workspace name"), "Acme Studio");
+    await user.type(screen.getByLabelText("Your name"), "Sam Lee");
+    await user.type(screen.getByLabelText("Email"), "sam@example.com");
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Add your passkey" })).toBeDefined();
+    expect(posted).not.toHaveProperty("token");
+    expect(screen.getByLabelText<HTMLInputElement>("Setup resume code").value).toBe(
+      "resume-code-0123456789abcdefghijklmnopqrstu",
+    );
+    await expectNoViolations();
+  });
+
+  it("counts the time left against the server's clock, not a skewed browser clock", async () => {
+    // The browser runs 20 minutes fast: the server says it's 20 minutes earlier than the browser thinks.
+    const serverNow = Date.now() - 20 * 60_000;
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () =>
+          jsonResponse({
+            setupRequired: true,
+            tokenSource: "generated",
+            claimed: false,
+            services: allServices(),
+            mode: "open",
+            openUntil: serverNow + 30 * 60_000 - 1000,
+            now: serverNow,
+          }),
+        ),
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    expect(await screen.findByText(/\(30 minutes left\)/)).toBeDefined();
+  });
+
+  it("counts against the server's clock when the browser clock is behind, too", async () => {
+    // The browser runs 20 minutes slow: the server is 20 minutes ahead of it.
+    const serverNow = Date.now() + 20 * 60_000;
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () =>
+          jsonResponse({
+            setupRequired: true,
+            tokenSource: "generated",
+            claimed: false,
+            services: allServices(),
+            mode: "open",
+            openUntil: serverNow + 30 * 60_000 - 1000,
+            now: serverNow,
+          }),
+        ),
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    // A naive browser-clock count would say 50 minutes.
+    expect(await screen.findByText(/\(30 minutes left\)/)).toBeDefined();
+  });
+
+  it("a claim refused with setup_token_required keeps what was typed and asks for the token", async () => {
+    const user = userEvent.setup();
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () =>
+          jsonResponse({
+            setupRequired: true,
+            tokenSource: "generated",
+            claimed: false,
+            services: allServices(),
+            mode: "open",
+            openUntil: Date.now() + 5 * 60_000,
+          }),
+        ),
+        on("POST", "/api/setup", () => apiError("setup_token_required", 403)),
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    await user.type(await screen.findByLabelText("Workspace name"), "Acme Studio");
+    await user.type(screen.getByLabelText("Your name"), "Sam Lee");
+    await user.type(screen.getByLabelText("Email"), "sam@example.com");
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
+    const token = await screen.findByLabelText("Setup token");
+    await waitFor(() => expect(token.getAttribute("aria-invalid")).toBe("true"));
+    expect(screen.getByLabelText<HTMLInputElement>("Workspace name").value).toBe("Acme Studio");
+    expect(screen.queryByText(/No setup token is needed/)).toBeNull();
+    await expectNoViolations();
+  });
+
+  it("announces the time left politely only at 10 minutes and at 1 minute", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const openUntil = Date.now() + 11 * 60_000 - 500;
+      const fetch = healthyFetch({
+        me: null,
+        routes: [
+          on("GET", "/api/me", () => apiError("setup_required", 409)),
+          on("GET", "/api/setup", () =>
+            jsonResponse({
+              setupRequired: true,
+              tokenSource: "generated",
+              claimed: false,
+              services: allServices(),
+              mode: "open",
+              openUntil,
+            }),
+          ),
+        ],
+      });
+      await renderApp("/setup", { fetch });
+      expect(await screen.findByText(/\(11 minutes left\)/)).toBeDefined();
+      const live = document.querySelector('[aria-live="polite"]');
+      expect(live?.textContent).toBe("");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await screen.findByText(/\(10 minutes left\)/)).toBeDefined();
+      expect(live?.textContent).toBe("10 minutes left to set up without a setup token.");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await screen.findByText(/\(9 minutes left\)/)).toBeDefined();
+      expect(live?.textContent).toBe("10 minutes left to set up without a setup token.");
+      for (let minute = 9; minute > 1; minute--) {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(await screen.findByText(new RegExp(`\\((${minute - 1}) minutes? left\\)`))).toBeDefined();
+      }
+      expect(await screen.findByText(/\(1 minute left\)/)).toBeDefined();
+      expect(live?.textContent).toBe("1 minute left to set up without a setup token.");
+      // When the window ends, the page asks for the token.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await screen.findByLabelText("Setup token")).toBeDefined();
+      expect(screen.queryByText(/No setup token is needed/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("after setup, /setup says so and links to sign-in", async () => {

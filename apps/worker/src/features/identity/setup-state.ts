@@ -56,6 +56,16 @@ export async function completeSetupClaim(ctx: CoreContext, claim: string, ownerI
         { action: "setup.complete", actor: ownerId, target: { type: "user", id: ownerId } },
         { onlyIfPreviousChanged: true },
       ),
+      // The setup resume code (M1b-1) has no use once setup is complete: revoked only if this call
+      // completed it (the same claim, completed at this call's time).
+      db.statement(
+        `UPDATE auth_tokens SET revoked_at = ?1
+          WHERE user_id = ?2 AND kind = 'setup_resume' AND revoked_at IS NULL
+            AND EXISTS (SELECT 1 FROM installation WHERE id = 1 AND setup_claim = ?3 AND setup_completed_at = ?1)`,
+        now,
+        ownerId,
+        claim,
+      ),
     ]),
   );
   const done = (result[0]?.changes ?? 0) === 1;
