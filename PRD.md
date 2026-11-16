@@ -1,8 +1,9 @@
 # Officebox — Product Requirements Document (PRD)
 
 **Status:** Working baseline  
-**Version:** 1.8  
-**Date:** 15 November 2026  
+**Version:** 1.9  
+**Date:** 16 November 2026  
+**Changes in 1.9:** **quick start** (product-owner decisions, 16 Nov 2026): for the first hour after a new workspace is first opened, setup needs no setup token unless the operator set one; the Worker generates its own sign-in keys when the operator hasn't set them as secrets; and R2 is no longer needed at deploy time (§6, §13, §16, Appendix A; detail in [specs/identity.md](specs/identity.md) §2 and [specs/platform.md](specs/platform.md) §13.1, §16).  
 **Changes in 1.8:** sign-in is **passwordless**: passkeys for everyone and magic links for members, with no passwords, password resets or password policy, built on the **better-auth** library (MIT). Owners are asked for two passkeys and keep the recovery secret as a fallback (product-owner decisions, 15 Nov 2026; §6, §7, §10.1, §10.2, §13, §15, §16, Appendix A; detail in [specs/identity.md](specs/identity.md)).  
 **Changes in 1.7:** the [admin spec](specs/admin.md) is adopted. Owners **and admins** export the workspace, including private content, and this is disclosed in the privacy statement. Admins run per-member data exports for data-protection requests; members can't export data themselves, so "Download my assistant data" is removed. New or changed: export retention, step-up re-authentication for downloads, in-app alerts, scheduled maintenance mode, and the command-line export tool going through the Worker (§10.1, §10.2, §13, §15, Appendix A).  
 **Changes in 1.6:** the [assistant spec](specs/assistant.md) is adopted. Personal memory moves from deferred into the first AI release. New or changed: the assistant's display name, audience-safe mentions, voice, call notes and captions, AI Gateway logging off, indexing only while the assistant is enabled, the privacy scope, personal reminders, and assistant retention and export rules. Tasks and issues stay with projects. Phase 3 maps to PLAN M9 (§2, §4, §5.3, §5.8, §5.9, §10.2, §11, §13, §14, §15, §18, Appendix A).  
@@ -437,7 +438,7 @@ Initial product direction:
 
 - Built-in local user accounts in D1.
 - Invitation-based membership; no public registration.
-- First-run setup creates the initial owner. **Setup is protected by a one-time setup token** that only the person who deployed can obtain, either set as a secret during deployment or read from the Worker's logs in their Cloudflare dashboard. Without the token, a freshly deployed URL cannot be claimed by anyone who finds it. Once setup completes, the setup flow is permanently disabled.
+- First-run setup creates the initial owner. **For the first hour after the workspace is first opened, setup needs no token**, so trying Officebox takes a deploy and a passkey; the setup page says plainly that anyone with the address can claim it until then. **After that hour, or from the start if the operator set a setup token secret, setup is protected by a one-time setup token** that only the person who deployed can obtain, either set as a secret during deployment or read from the Worker's logs in their Cloudflare dashboard. The operator can release an unfinished claim, and a claim taken by someone else is undone by deploying again. Once setup completes, the setup flow is permanently disabled. (Changed 16 Nov 2026, product owner: the open hour is an accepted risk.)
 - **Owners and admins invite members.** Only owners can invite or promote admins.
 - Invitation links are single-use, bound to the invitee's email, and expire after 7 days. When email is unavailable, admins copy and share links manually.
 - **Onboarding:** account creation, a profile step, joining default (public) channels, a welcome post and a short tour.
@@ -707,9 +708,9 @@ Officebox avoids components that create competing sources of truth or force user
 
 ### One-click deployment
 
-The primary deployment mechanism is the Deploy to Cloudflare button. It copies the repository into the customer's GitHub account, configures the project, provisions the supported Cloudflare resources (Durable Objects, D1, R2, Vectorize, Queues) and deploys the application. D1 migrations run as part of the deploy script. GitHub is the supported host in the first release, because upgrades rely on GitHub Actions; GitLab support is a later consideration.
+The primary deployment mechanism is the Deploy to Cloudflare button. It copies the repository into the customer's GitHub account, configures the project, provisions the supported Cloudflare resources (Durable Objects, D1, Vectorize, Queues) and deploys the application. R2 isn't needed to deploy; an owner enables it when the workspace should store files. D1 migrations run as part of the deploy script. GitHub is the supported host in the first release, because upgrades rely on GitHub Actions; GitLab support is a later consideration.
 
-During deployment the customer can set a setup token secret. If they skip it, the application generates a one-time token and writes it to the Worker's logs, which only the Cloudflare account can see. The first visit to the workspace asks for this token before the owner account can be created.
+During deployment the customer can set a setup token secret. If they skip it, the first hour after the workspace is first opened needs no token; after that, the application generates a one-time token and writes it to the Worker's logs, which only the Cloudflare account can see, and setup asks for it. Sign-in keys need no setup either: the Worker generates them when they aren't set as secrets, and production deployments are advised to set them.
 
 **Custom domain.** Using a custom domain is recommended before inviting the team. Sign-in, installed PWAs, push subscriptions and **passkeys** are tied to the domain. Changing it later is an explicit owner action: it signs everyone out, push must be re-enabled, and passkeys stop working; members sign in again with a magic link (when email is configured) or a recovery link, admins and owners with a recovery link, and everyone registers a new passkey. Officebox warns when a passkey is registered on a `workers.dev` address.
 
@@ -928,7 +929,7 @@ Before Phase 1 exit, validate at minimum:
 - A document can be created from a conversation and retains a navigable relationship.
 - Manual invitation-link onboarding works without SMTP.
 - An upgrade from stable to beta and rollback works on a representative installation. The release-sync workflow opens a correct pull request, merging it deploys the new version, and rolling back one version works without a database restore.
-- A freshly deployed installation cannot be claimed without the setup token. The setup flow is disabled once setup completes.
+- A freshly deployed installation cannot be claimed without the setup token once the open hour has passed, or at all when a setup token secret is set. The setup flow is disabled once setup completes.
 - No acknowledged message is lost when the D1 copy is delayed or fails. Edits and deletions reach every connected client, the D1 copy and search.
 - Deleting a message, document, file or user removes the content as described in §10.2, including from search indexes.
 - A member without access cannot read a private channel, DM or restricted document through any route: the API, WebSocket, search, previews or links.
@@ -1017,7 +1018,7 @@ Feature-level open questions now live in each spec's "Open questions" section. N
 | AI | Workers AI by default; BYOK via AI Gateway optional, per model role | Agreed ([assistant](specs/assistant.md)) |
 | Authentication | Built-in local accounts, **passwordless**: passkeys for everyone (user verification required), magic links for members only, no passwords; owners need a second passkey or the recovery secret before inviting; exports include passkey public keys; TOTP after launch | Agreed (revised 15 Nov 2026) |
 | Authentication library | **better-auth** (MIT) for sessions, magic links and passkeys; exact version pins and an advisory review on every upgrade | Agreed (15 Nov 2026) |
-| First-run setup | Protected by a one-time setup token; disabled after use | Agreed |
+| First-run setup | Open without a token for the first hour after the workspace is first opened (none when a setup token secret is set), then protected by a one-time setup token; disabled after use. Sign-in keys generated by the Worker when not set as secrets; R2 optional at deploy | Agreed (revised 16 Nov 2026) |
 | Role model | Owner/admin/member workspace roles; channel, drive and calendar roles; union inheritance; admins cannot read or join private content in the app (they can export it, disclosed); only owners act on admins and owners | Agreed ([permissions](specs/permissions.md)) |
 | Retention and deletion | Kept until deleted; 30-day Trash; immediate message deletion; documented 30-day platform recovery window | Baseline |
 | Message storage | Channel Durable Object is the source of truth; guaranteed asynchronous copy to D1 for search, inbox and export | Agreed |
