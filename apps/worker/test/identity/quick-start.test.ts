@@ -2,7 +2,9 @@ import { env } from "cloudflare:workers";
 import { SETUP_OPEN_WINDOW_MS, type SetupStatus } from "@officebox/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLogger } from "../../src/core/log";
-import { SETUP_CLAIM_TTL_MS, startOpenWindow } from "../../src/features/identity/setup";
+import { IDENTITY_JOBS } from "../../src/features/identity/jobs";
+import { SETUP_CLAIM_TTL_MS, startOpenWindow, undoClaim } from "../../src/features/identity/setup";
+import { completeSetupClaim } from "../../src/features/identity/setup-state";
 import type { Env } from "../../src/env";
 import { SoftAuthenticator } from "./authenticator";
 import {
@@ -27,7 +29,9 @@ import {
  * passes one, so the window applies.
  */
 
-const T0 = Date.UTC(2026, 10, 16, 9, 0, 0);
+// Near the real time: better-auth checks enrolment tickets against the real clock, so the injected
+// clock must start close to it (it only ever moves forward from here).
+const T0 = Math.floor(Date.now() / 1000) * 1000;
 const silent = createLogger({}, () => {});
 let clock: TestClock;
 
@@ -40,6 +44,18 @@ const openedAt = async () =>
 const claimRow = async () =>
   (await env.DB.prepare("SELECT setup_claim FROM installation WHERE id = 1").first<{ setup_claim: string | null }>())
     ?.setup_claim ?? null;
+const tokenHashRow = async () =>
+  (
+    await env.DB.prepare("SELECT setup_token_hash FROM installation WHERE id = 1").first<{
+      setup_token_hash: string | null;
+    }>()
+  )?.setup_token_hash ?? null;
+const countOf = async (sql: string, ...params: unknown[]) =>
+  (
+    await env.DB.prepare(sql)
+      .bind(...params)
+      .first<{ n: number }>()
+  )?.n ?? 0;
 const status = (browser = new Browser(), overrides: Partial<Env> = {}) =>
   browser.json<SetupStatus & { error?: { code: string } }>("/api/setup", { env: overrides });
 
@@ -253,6 +269,9 @@ describe("a claim whose later steps fail is undone (review finding)", () => {
 
   it("the same holds when the enrolment ticket can't be issued (token mode)", async () => {
     await seedSetupToken(SETUP_TOKEN, T0 + SETUP_CLAIM_TTL_MS);
+    await status(); // the window starts too
+    const tokenBefore = await tokenHashRow();
+    expect(tokenBefore).toBeTruthy();
     const broken = failingDb((sql) => sql.includes("'passkey_enrol'") && sql.startsWith("INSERT"));
     const failed = await new Browser().json("/api/setup", {
       body: { token: SETUP_TOKEN, ...bodyOf(ownerDetails()) },
@@ -260,7 +279,80 @@ describe("a claim whose later steps fail is undone (review finding)", () => {
     });
     expect(failed.status).toBe(500);
     expect(await claimRow()).toBeNull();
+    // The window and the setup token are kept, so the same token claims again at once.
+    expect(await openedAt()).toBe(T0);
+    expect(await tokenHashRow()).toBe(tokenBefore);
     expect((await claim(new Browser(), ownerDetails(), SETUP_TOKEN)).status).toBe(201);
+  });
+
+  it("undo never removes an owner who has a passkey or has signed in: user, handle and claim all kept", async () => {
+    const ctx = { env, log: silent, now: () => clock.now };
+    // Signed in, no passkey.
+    await status();
+    const owner = ownerDetails();
+    expect((await openClaim(new Browser(), owner)).status).toBe(201);
+    const nonce = (await claimRow())!;
+    const user = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(owner.email).first<{ id: string }>();
+    await env.DB.prepare("UPDATE users SET first_signed_in_at = ? WHERE id = ?").bind(T0, user!.id).run();
+    await undoClaim(ctx, nonce, user!.id);
+    expect(await claimRow()).toBe(nonce);
+    expect(await countOf("SELECT count(*) AS n FROM users WHERE id = ?", user!.id)).toBe(1);
+    expect(await countOf("SELECT count(*) AS n FROM handles WHERE handle = ?", owner.handle)).toBe(1);
+
+    // A passkey.
+    await resetInstallation();
+    await status();
+    const second = ownerDetails();
+    const browser = new Browser();
+    expect((await openClaim(browser, second)).status).toBe(201);
+    const claimNonce = (await claimRow())!;
+    expect((await registerPasskey(browser, new SoftAuthenticator())).verify?.status).toBe(200);
+    const owner2 = await env.DB.prepare("SELECT id FROM users WHERE email = ?")
+      .bind(second.email)
+      .first<{ id: string }>();
+    await undoClaim(ctx, claimNonce, owner2!.id);
+    expect(await claimRow()).toBe(claimNonce);
+    expect(await countOf("SELECT count(*) AS n FROM users WHERE id = ?", owner2!.id)).toBe(1);
+    expect(await countOf("SELECT count(*) AS n FROM handles WHERE handle = ?", second.handle)).toBe(1);
+  });
+});
+
+describe("rate limits and resume-code housekeeping (review findings)", () => {
+  it("claims refused because a service fails still count against the claim rate limit", async () => {
+    const browser = new Browser();
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      statuses.push((await openClaim(browser, ownerDetails(), { FILES: undefined as unknown as R2Bucket })).status);
+    }
+    expect(statuses.slice(0, 5)).toEqual([503, 503, 503, 503, 503]);
+    expect(statuses[5]).toBe(429);
+  });
+
+  it("a completion whose compare-and-set fails leaves the resume code live", async () => {
+    await status();
+    const claimed = await openClaim(new Browser());
+    const owner = await env.DB.prepare("SELECT id FROM users WHERE role = 'owner'").first<{ id: string }>();
+    const ctx = { env, log: silent, now: () => clock.now };
+    // A stale nonce: the CAS matches nothing, so nothing is completed or revoked.
+    expect(await completeSetupClaim(ctx, "01STALECLAIMNONCE000000000", owner!.id)).toBe(false);
+    const code = await env.DB.prepare("SELECT revoked_at FROM auth_tokens WHERE kind = 'setup_resume'").first<{
+      revoked_at: number | null;
+    }>();
+    expect(code?.revoked_at).toBeNull();
+    const resumed = await new Browser().json("/api/setup/resume", { body: { token: claimed.body.resumeCode } });
+    expect(resumed.status).toBe(201);
+  });
+
+  it("the daily prune deletes setup_resume rows a day after they expire, and keeps live ones", async () => {
+    await status();
+    await openClaim(new Browser());
+    const prune = IDENTITY_JOBS.find((j) => j.name === "identity.prune")!;
+    const run = (at: number) => prune.run({ env, log: silent, now: () => at, scheduledTime: at });
+    const codes = () => countOf("SELECT count(*) AS n FROM auth_tokens WHERE kind = 'setup_resume'");
+    await run(T0 + SETUP_CLAIM_TTL_MS + 60_000); // expired, but not yet a day past it
+    expect(await codes()).toBe(1);
+    await run(T0 + 2 * SETUP_CLAIM_TTL_MS + 1);
+    expect(await codes()).toBe(0);
   });
 });
 

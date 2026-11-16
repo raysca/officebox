@@ -8,7 +8,7 @@ import {
 } from "@officebox/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type Ref } from "react";
 import { ApiRequestError, describeApiError, errorCodeOf } from "../../lib/api/client";
 import {
   claimSetup,
@@ -73,16 +73,11 @@ export function SetupPage() {
   const [done, setDone] = useState(false);
   const failing = status.data?.services.some((service) => !service.ok) ?? false;
   const wasFailing = useRef(false);
+  const formHeading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     // The checklist gave way to the setup form: move focus to its heading, so keyboard and screen
     // reader users land on the new page rather than on a button that's gone.
-    if (wasFailing.current && !failing) {
-      const heading = document.querySelector<HTMLElement>("main h1");
-      if (heading) {
-        heading.tabIndex = -1;
-        heading.focus();
-      }
-    }
+    if (wasFailing.current && !failing) formHeading.current?.focus();
     wasFailing.current = failing;
   }, [failing]);
 
@@ -138,9 +133,11 @@ export function SetupPage() {
       />
     );
   }
-  if (data?.claimed) return <ResumeForm open={data.mode === "open"} onEnrolled={setEnrolment} />;
+  if (data?.claimed)
+    return <ResumeForm open={data.mode === "open"} onEnrolled={setEnrolment} headingRef={formHeading} />;
   return (
     <ClaimForm
+      headingRef={formHeading}
       tokenSource={data?.tokenSource ?? "generated"}
       openUntil={data?.mode === "open" ? (data.openUntil ?? null) : null}
       // The server's clock minus the browser's when the status arrived: the countdown follows the
@@ -178,10 +175,21 @@ function ServicesChecklist({
   onRecheck: () => void;
 }) {
   const failingCount = services.filter((service) => !service.ok).length;
+  // The live region mounts empty and gets its text afterwards, so screen readers announce it (a
+  // region that arrives with its text already in it often isn't read).
+  const [announcement, setAnnouncement] = useState("");
+  useEffect(() => {
+    // In a task after the commit, so the empty region is in the page before its text arrives.
+    const timer = setTimeout(
+      () => setAnnouncement(checking ? copy.servicesRechecking : copy.servicesSummary(failingCount)),
+      0,
+    );
+    return () => clearTimeout(timer);
+  }, [checking, failingCount]);
   return (
     <PublicPage title={copy.servicesTitle} description={copy.servicesDescription}>
       <VisuallyHidden role="status" aria-live="polite">
-        {checking ? copy.servicesRechecking : copy.servicesSummary(failingCount)}
+        {announcement}
       </VisuallyHidden>
       <ul aria-label={copy.servicesListLabel} className="flex flex-col gap-3">
         {services.map((service: SetupService) => (
@@ -278,6 +286,7 @@ function ClaimForm({
   skewMs,
   onEnrolled,
   onServicesFailing,
+  headingRef,
 }: {
   tokenSource: "secret" | "generated";
   /** End of the open claim window, or null outside it. */
@@ -285,6 +294,7 @@ function ClaimForm({
   skewMs: number;
   onEnrolled: (enrolment: SetupEnrolment) => void;
   onServicesFailing: () => void;
+  headingRef: Ref<HTMLHeadingElement>;
 }) {
   const navigate = useNavigate();
   const formRef = useRef<HTMLFormElement>(null);
@@ -372,7 +382,7 @@ function ClaimForm({
   }
 
   return (
-    <PublicPage title={copy.title} description={copy.description}>
+    <PublicPage title={copy.title} description={copy.description} headingRef={headingRef}>
       {open && openUntil !== null ? (
         <OpenWindowNotice openUntil={openUntil} skewMs={skewMs} onClosed={closeWindow} />
       ) : null}
@@ -442,7 +452,15 @@ function ClaimForm({
   );
 }
 
-function ResumeForm({ open, onEnrolled }: { open: boolean; onEnrolled: (enrolment: SetupEnrolment) => void }) {
+function ResumeForm({
+  open,
+  onEnrolled,
+  headingRef,
+}: {
+  open: boolean;
+  onEnrolled: (enrolment: SetupEnrolment) => void;
+  headingRef: Ref<HTMLHeadingElement>;
+}) {
   const queryClient = useQueryClient();
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -466,7 +484,11 @@ function ResumeForm({ open, onEnrolled }: { open: boolean; onEnrolled: (enrolmen
     },
   });
   return (
-    <PublicPage title={copy.claimedTitle} description={open ? copy.claimedDescriptionOpen : copy.claimedDescription}>
+    <PublicPage
+      title={copy.claimedTitle}
+      description={open ? copy.claimedDescriptionOpen : copy.claimedDescription}
+      headingRef={headingRef}
+    >
       {formError ? <Alert>{formError}</Alert> : null}
       <form
         noValidate

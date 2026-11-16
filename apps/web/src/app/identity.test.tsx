@@ -266,6 +266,31 @@ describe("setup (Identity §4.1)", () => {
     expect(await screen.findByText(/\(30 minutes left\)/)).toBeDefined();
   });
 
+  it("counts against the server's clock when the browser clock is behind, too", async () => {
+    // The browser runs 20 minutes slow: the server is 20 minutes ahead of it.
+    const serverNow = Date.now() + 20 * 60_000;
+    const fetch = healthyFetch({
+      me: null,
+      routes: [
+        on("GET", "/api/me", () => apiError("setup_required", 409)),
+        on("GET", "/api/setup", () =>
+          jsonResponse({
+            setupRequired: true,
+            tokenSource: "generated",
+            claimed: false,
+            services: allServices(),
+            mode: "open",
+            openUntil: serverNow + 30 * 60_000 - 1000,
+            now: serverNow,
+          }),
+        ),
+      ],
+    });
+    await renderApp("/setup", { fetch });
+    // A naive browser-clock count would say 50 minutes.
+    expect(await screen.findByText(/\(30 minutes left\)/)).toBeDefined();
+  });
+
   it("a claim refused with setup_token_required keeps what was typed and asks for the token", async () => {
     const user = userEvent.setup();
     const fetch = healthyFetch({

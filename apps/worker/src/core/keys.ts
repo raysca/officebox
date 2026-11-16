@@ -94,7 +94,8 @@ export async function tokenHashKeyOrNull(env: Pick<Env, "TOKEN_HASH_KEY"> & Part
   return key.ok ? key.value : null;
 }
 
-let noted = new WeakMap<object, Set<string>>();
+// Per SYSTEM binding, the source each key last resolved from in this isolate.
+let noted = new WeakMap<object, Map<GeneratedKeyName, SignInKeySource>>();
 
 /** Forgets which key sources this isolate has already recorded (tests). */
 export function clearKeySourceNotes(): void {
@@ -106,6 +107,10 @@ export function clearKeySourceNotes(): void {
  * differs from what the SystemObject recorded before: a Worker secret set (or deleted) on a running
  * workspace signs everyone out or invalidates outstanding links (Platform §16). Never logs a value.
  * Best effort: a failure here never fails the request.
+ *
+ * Deduplicated by the last source seen per key, so a switch there and back (A→B→A) is recorded each
+ * time. Deployments from before M1b-1 have no record yet, so the first source seen after the upgrade
+ * is recorded silently: a switch made at the same time as the upgrade isn't warned about.
  */
 export async function noteKeySource(
   env: Partial<Pick<Env, "SYSTEM">>,
@@ -115,11 +120,11 @@ export async function noteKeySource(
 ): Promise<void> {
   const binding = env.SYSTEM as object | undefined;
   if (!env.SYSTEM || !binding) return;
-  const seen = noted.get(binding) ?? new Set<string>();
+  const seen = noted.get(binding) ?? new Map<GeneratedKeyName, SignInKeySource>();
   noted.set(binding, seen);
-  const tag = `${name}:${source}`;
-  if (seen.has(tag)) return;
-  seen.add(tag);
+  const last = seen.get(name);
+  if (last === source) return;
+  seen.set(name, source);
   try {
     const result = await env.SYSTEM.getByName("system").recordKeySource(name, source);
     if (result.ok && result.value.previous) {
@@ -131,6 +136,8 @@ export async function noteKeySource(
       });
     }
   } catch {
-    seen.delete(tag); // try again on a later request
+    // Try again on a later request.
+    if (last === undefined) seen.delete(name);
+    else seen.set(name, last);
   }
 }

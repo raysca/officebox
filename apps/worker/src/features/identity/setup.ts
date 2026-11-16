@@ -209,7 +209,7 @@ export async function expireIfStale(ctx: CoreContext): Promise<boolean> {
  * it has no passkey and never signed in; its tickets and resume code go with it) and their handle,
  * then releases the claim, which now has no owner row. The window and the setup token are kept.
  */
-async function undoClaim(ctx: CoreContext, claim: string, ownerId: string): Promise<void> {
+export async function undoClaim(ctx: CoreContext, claim: string, ownerId: string): Promise<void> {
   try {
     const db = new Database(ctx.env.DB);
     expectOk(
@@ -229,8 +229,11 @@ async function undoClaim(ctx: CoreContext, claim: string, ownerId: string): Prom
     );
     await releaseOrphanedClaim(ctx, claim);
   } catch (error) {
-    // The 24-hour expiry (or the release script) still releases it.
-    ctx.log.error("setup: couldn't undo a failed claim", { error });
+    // The 24-hour expiry (or the release script) still releases it. A fixed message and the error's
+    // name only: raw D1 error text can carry SQL or values.
+    ctx.log.error("setup: couldn't undo a failed claim", {
+      errorName: error instanceof Error ? error.name : "unknown",
+    });
   }
 }
 

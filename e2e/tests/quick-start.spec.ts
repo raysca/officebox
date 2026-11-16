@@ -120,8 +120,8 @@ async function startServer(slot: number, options: { state?: string; config?: str
     state,
     config,
     async stop() {
-      // The whole process group (npx, wrangler, workerd): SIGTERM, then SIGKILL after 10 s, then wait
-      // until the port is free, so a retry or the next test can reuse it.
+      // The whole process group (npx, wrangler, workerd): SIGTERM, SIGKILL only after 10 s without
+      // exiting, then wait until the port is free, so a retry or the next test can reuse it.
       const pid = child.pid;
       if (pid !== undefined) {
         const exited = child.exitCode !== null ? Promise.resolve() : new Promise((r) => child.once("exit", r));
@@ -137,10 +137,14 @@ async function startServer(slot: number, options: { state?: string; config?: str
           exited.then(() => false),
           new Promise<boolean>((r) => setTimeout(() => r(true), 10_000)),
         ]);
-        // Children of the group can outlive npx: always finish with SIGKILL.
-        signal("SIGKILL");
-        if (timedOut) await Promise.race([exited, new Promise((r) => setTimeout(r, 5_000))]);
+        // SIGKILL only if it didn't stop: a clean shutdown lets workerd flush the persisted D1 and
+        // Durable Object state that the restart in the R2 test reuses.
+        if (timedOut) {
+          signal("SIGKILL");
+          await Promise.race([exited, new Promise((r) => setTimeout(r, 5_000))]);
+        }
       }
+      // workerd (a child of npx) may still be closing after npx exits: wait until the port is free.
       await waitForPortFree(port);
     },
   };
