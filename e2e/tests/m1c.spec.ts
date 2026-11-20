@@ -1,8 +1,8 @@
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { addAuthenticator, E2E_VARS, expectNoAxeViolations, linkIn, type SinkEmail } from "./fixtures";
 
 /**
@@ -48,9 +48,38 @@ async function waitForHealth(url: string, output: () => string): Promise<void> {
   throw new Error(`wrangler dev didn't start:\n${output()}`);
 }
 
+/**
+ * A test-only copy of wrangler.jsonc for this deploy: absolute paths, and every Rate Limiting binding
+ * raised to 1000 a minute, because all of this run's browsers share one IP and the flows here would
+ * otherwise have to wait out the per-IP windows (Platform §8). It lives under the git-ignored
+ * `.wrangler/` and is only ever passed to this local `wrangler dev`, so it can't reach a deployment.
+ * The limits themselves are covered by the Worker integration tests.
+ */
+function testConfig(): string {
+  const source = readFileSync(join(ROOT, "wrangler.jsonc"), "utf8");
+  const raised = source.replace(
+    /"simple": \{ "limit": \d+, "period": (10|60) \}/g,
+    '"simple": { "limit": 1000, "period": $1 }',
+  );
+  if (raised === source) throw new Error("couldn't raise the rate limits in wrangler.jsonc");
+  const absolute = raised
+    .replace('"main": "apps/worker/src/index.ts"', `"main": ${JSON.stringify(join(ROOT, "apps/worker/src/index.ts"))}`)
+    .replace('"directory": "apps/web/dist"', `"directory": ${JSON.stringify(join(ROOT, "apps/web/dist"))}`)
+    .replace(
+      '"migrations_dir": "apps/worker/migrations"',
+      `"migrations_dir": ${JSON.stringify(join(ROOT, "apps/worker/migrations"))}`,
+    );
+  const path = join(ROOT, ".wrangler", "e2e", `m1c-${process.pid}.jsonc`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, absolute);
+  return path;
+}
+
+let config = "";
+
 async function startServer(): Promise<void> {
   state = mkdtempSync(join(tmpdir(), "officebox-e2e-m1c-"));
-  const config = join(ROOT, "wrangler.jsonc");
+  config = testConfig();
   execFileSync(
     "npx",
     ["wrangler", "--config", config, "d1", "migrations", "apply", "DB", "--local", "--persist-to", state],
@@ -115,7 +144,7 @@ function d1(sql: string): Record<string, unknown>[] {
     [
       "wrangler",
       "--config",
-      join(ROOT, "wrangler.jsonc"),
+      config,
       "d1",
       "execute",
       "DB",
@@ -150,16 +179,10 @@ async function newPerson(browser: Browser): Promise<{ context: BrowserContext; p
   return { context, page };
 }
 
-/** Passkey ceremonies share a per-IP limit (Platform §8): wait out the window when one is refused. */
-async function step(page: Page, act: () => Promise<unknown>, done: ReturnType<Page["getByRole"]>) {
-  const limited = page.getByText(/Too many (sign-in )?attempts|happening too often/);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await act();
-    await expect(done.or(limited).first()).toBeVisible({ timeout: 15_000 });
-    if (await done.isVisible()) return;
-    await page.waitForTimeout(61_000);
-  }
-  await expect(done).toBeVisible();
+/** One passkey step. This deploy's limits are raised (`testConfig`), so no step waits out a window. */
+async function step(_page: Page, act: () => Promise<unknown>, done: ReturnType<Page["getByRole"]>) {
+  await act();
+  await expect(done).toBeVisible({ timeout: 15_000 });
 }
 
 test.describe.configure({ mode: "serial", timeout: 300_000 });

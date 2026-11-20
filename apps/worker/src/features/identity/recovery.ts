@@ -1,8 +1,10 @@
 import {
   apiError,
   err,
+  decideAuthority,
   normaliseEmail,
   ok,
+  personRefSchema,
   RECOVERY_LINK_TTL_MS,
   type ApiError,
   type OwnerRecoveryBody,
@@ -12,10 +14,11 @@ import {
 } from "@officebox/shared";
 import { audit, auditStatement } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
+import { d1Facts } from "./facts";
 import { Database, expectOk } from "../../core/db";
 import { isEmailConfigured } from "../email/config";
 import { displayNameOf, revokeLinksStatements, revokeUserSessions } from "./account-security";
-import { randomToken, sha256, timingSafeEqual, tokenHash } from "./crypto";
+import { randomToken, recoveryTokenHashes, sha256, timingSafeEqual, tokenHash } from "./crypto";
 import { issueTicket, type IssuedTicket } from "./enrolment";
 import type { ClaimedInstallation } from "./installation";
 import { readDeviceCookie } from "./known-devices";
@@ -145,19 +148,56 @@ export async function issueRecoveryLink(
 interface LinkRow {
   user_id: string;
   email: string | null;
+  issued_by: string | null;
+}
+
+const ISSUER_CHANGED: ApiError = apiError(
+  "gone",
+  "This recovery link can't be used: whoever issued it can't issue one for this account any more. Ask an admin or an owner for a new one.",
+  { reason: "recovery_link_issuer_changed" },
+);
+
+/**
+ * Whether the person who issued a link may **still** issue one for its target (M1c, review): active,
+ * and allowed by the permission engine's `member.issue_recovery_link` rule as roles stand now (an admin
+ * demoted or disabled since, or a member promoted to admin since, makes the link unusable). Step-up
+ * was checked when the link was issued, by the issuer's own session, so it isn't asked again.
+ */
+async function issuerStillAllowed(ctx: CoreContext, issuerId: string | null, targetId: string): Promise<boolean> {
+  if (!issuerId) return false;
+  const facts = d1Facts(ctx.env);
+  const [issuer, target, activeOwnerCount] = await Promise.all([
+    facts.person(issuerId),
+    facts.person(targetId),
+    facts.activeOwnerCount(),
+  ]);
+  const actor = issuer ? personRefSchema.safeParse(issuer) : null;
+  const subject = target ? personRefSchema.safeParse(target) : null;
+  if (!actor?.success || !subject?.success) return false;
+  const decision = decideAuthority(
+    { userId: actor.data.userId, role: actor.data.role, status: actor.data.status, session: null },
+    { action: "member.issue_recovery_link", target: subject.data, activeOwnerCount },
+  );
+  return decision.ok;
 }
 
 /** A recovery link that is unused, unrevoked and unexpired, for an active account; null otherwise. */
-async function validLink(ctx: CoreContext, hash: string): Promise<LinkRow | null> {
-  return expectOk(
+async function validLink(ctx: CoreContext, hash: string): Promise<Result<LinkRow, ApiError>> {
+  const row = expectOk(
     await new Database(ctx.env.DB).first<LinkRow>(
-      `SELECT t.user_id, u.email FROM auth_tokens t JOIN users u ON u.id = t.user_id
+      `SELECT t.user_id, u.email, t.issued_by FROM auth_tokens t JOIN users u ON u.id = t.user_id
         WHERE t.token_hash = ? AND t.kind = 'recovery' AND t.used_at IS NULL AND t.revoked_at IS NULL
           AND t.expires_at > ? AND u.status = 'active' AND u.email IS NOT NULL`,
       hash,
       ctx.now(),
     ),
   );
+  if (!row?.email) return err(GONE);
+  if (!(await issuerStillAllowed(ctx, row.issued_by, row.user_id))) {
+    ctx.log.info("recovery link refused: its issuer may no longer issue it", { userId: row.user_id });
+    return err(ISSUER_CHANGED);
+  }
+  return ok(row);
 }
 
 /** `POST /auth/recover/lookup`: the account's email for the confirmation page, without using the link. */
@@ -168,8 +208,8 @@ export async function lookupRecoveryLink(
   token: string,
 ): Promise<Result<RecoveryLookup, ApiError>> {
   const row = await validLink(ctx, await tokenHash(secrets.tokenHashKey, token));
-  if (!row?.email) return err(GONE);
-  return ok({ email: row.email, workspaceName: installation.workspaceName });
+  if (!row.ok) return row;
+  return ok({ email: row.value.email ?? "", workspaceName: installation.workspaceName });
 }
 
 export interface RecoveryEnrolmentOutcome {
@@ -187,8 +227,9 @@ export async function useRecoveryLink(
   token: string,
 ): Promise<Result<RecoveryEnrolmentOutcome, ApiError>> {
   const hash = await tokenHash(secrets.tokenHashKey, token);
-  const row = await validLink(ctx, hash);
-  if (!row?.email) return err(GONE);
+  const valid = await validLink(ctx, hash);
+  if (!valid.ok) return valid;
+  const row = { ...valid.value, email: valid.value.email ?? "" };
   const revoked = await revokeUserSessions(ctx, row.user_id);
   // issueTicket revokes the person's other outstanding tickets (Identity §4.4).
   const ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, row.user_id, "recovery_link", null, ctx.now(), {
@@ -204,19 +245,23 @@ export async function useRecoveryLink(
   return ok({ email: row.email, ticket });
 }
 
-/** Marks a recovery link used once its passkey is registered (the registration's after hook batch). */
-export function markRecoveryLinkUsedStatement(
-  database: Database,
-  hash: string,
-  userId: string,
-  now: number,
-): D1PreparedStatement {
-  return database.statement(
-    `UPDATE auth_tokens SET used_at = ? WHERE token_hash = ? AND user_id = ? AND kind = 'recovery' AND used_at IS NULL`,
-    now,
-    hash,
-    userId,
+/**
+ * Consumes a recovery link at registration verify, by compare-and-set, before the passkey is written
+ * (M1c, review): only one registration per link can ever succeed, even if two enrolment tickets for it
+ * were live at once. Returns whether this call consumed it.
+ */
+export async function consumeRecoveryLink(db: D1Database, hash: string, userId: string, now: number): Promise<boolean> {
+  const meta = expectOk(
+    await new Database(db).run(
+      `UPDATE auth_tokens SET used_at = ?1
+        WHERE token_hash = ?2 AND user_id = ?3 AND kind = 'recovery'
+          AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?1`,
+      now,
+      hash,
+      userId,
+    ),
   );
+  return meta.changes === 1;
 }
 
 /**
@@ -291,9 +336,15 @@ export async function recoverOwner(
     return err(RECOVERY_TOKEN_INVALID);
   }
   const database = new Database(ctx.env.DB);
-  const hash = await tokenHash(secrets.tokenHashKey, secret);
+  // Keyed by plain SHA-256 of the value, so a used value stays used whatever happens to TOKEN_HASH_KEY;
+  // rows written before (HMAC-keyed) still count as used (M1c, review).
+  const { hash, legacy } = await recoveryTokenHashes(secrets.tokenHashKey, secret);
   const used = expectOk(
-    await database.first<{ one: number }>("SELECT 1 AS one FROM recovery_token_uses WHERE token_hash = ?", hash),
+    await database.first<{ one: number }>(
+      "SELECT 1 AS one FROM recovery_token_uses WHERE token_hash IN (?, ?)",
+      hash,
+      legacy,
+    ),
   );
   if (used) return err(RECOVERY_TOKEN_USED);
   const owner = expectOk(

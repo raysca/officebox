@@ -148,6 +148,17 @@ describe("with email configured: a confirmation link to the new address (Identit
     expect(await emailOf(member.id)).toBe(newEmail);
     expect(await auditCount("member.email_changed", member.id)).toBe(1);
     expect(await noticeKinds(member.id)).toContain("email_changed");
+    // The audit log keeps the address only as a keyed hash (core/audit.ts), never in plain text.
+    const audits = await env.DB.prepare(
+      "SELECT metadata FROM audit_log WHERE target_id = ? AND action LIKE 'member.email%'",
+    )
+      .bind(member.id)
+      .all<{ metadata: string }>();
+    expect(audits.results.length).toBe(2);
+    for (const row of audits.results) {
+      expect(row.metadata).not.toContain(newEmail);
+      expect(row.metadata).toContain("email:");
+    }
 
     // The old address is told, naming the new address and who changed it.
     const toOld = outbox.to(oldEmail).slice(oldBefore);

@@ -1,12 +1,17 @@
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { rootLogger } from "../../src/core/log";
+import { startDomainMove } from "../../src/features/identity/domain-move";
+import { clearPageInstallationCache, loadInstallationForPages } from "../../src/features/identity/installation";
 import { IDENTITY_JOBS } from "../../src/features/identity/jobs";
+import { canonicalTarget } from "../../src/features/identity/middleware";
 import { onRevocation } from "../../src/features/identity/revocation";
 import { SoftAuthenticator } from "./authenticator";
 import {
+  acceptInvite,
   addMember,
   Browser,
+  callWorker,
   configureEmail,
   fragmentToken,
   giveTicket,
@@ -29,11 +34,13 @@ import { auditCount, count, noticeKinds, registerAt } from "./m1c-helpers";
  */
 
 const NEW = "https://new.officebox.test";
+const OTHER = "https://other-race.officebox.test";
 const OLD_HOST = new URL(ORIGIN).host;
 
 let ws: Workspace;
 beforeEach(async () => {
   ws = await setupWorkspace();
+  clearPageInstallationCache(env.DB);
   await configureEmail();
 });
 afterEach(async () => {
@@ -431,5 +438,90 @@ describe("expiry (Identity §4.4: 24 hours, default)", () => {
     await start(ws.browser, NEW);
     await run();
     expect((await installation()).pending_origin).toBe(NEW);
+  });
+});
+
+describe("review fixes (M1c)", () => {
+  it("the old-host redirect never leaves the canonical origin: //host, /\\host and /%2F%2Fhost", async () => {
+    const token = fragmentToken((await start(ws.browser, NEW)).body.link)!;
+    expect((await commit(token)).reg?.verify?.status).toBe(200);
+    for (const path of [
+      "//evil.example/x?y=1",
+      "/\\evil.example/x",
+      "/%2F%2Fevil.example",
+      "///evil.example",
+      "/api//evil.example",
+    ]) {
+      const response = await callWorker(new Request(`${ORIGIN}${path}`, { redirect: "manual" }));
+      expect(response.status, path).toBe(302);
+      const location = response.headers.get("Location")!;
+      expect(new URL(location).origin, path).toBe(NEW);
+      expect(location, path).not.toMatch(/^https:\/\/new\.officebox\.test\/\//);
+    }
+    expect(canonicalTarget(new URL(`${ORIGIN}//evil.example/x?q=1`), NEW)).toBe(`${NEW}/evil.example/x?q=1`);
+    expect(canonicalTarget(new URL(`${ORIGIN}/%2F%2Fevil.example`), NEW)).toBe(`${NEW}/%2F%2Fevil.example`);
+    expect(canonicalTarget(new URL(`${ORIGIN}/chat`), NEW)).toBe(`${NEW}/chat`);
+  });
+
+  it("an invitation accepted without a passkey yet can't be reopened after the move (a recovery link is needed)", async () => {
+    await meetInviteGate(ws);
+    const created = await invite(ws.browser, uniqueEmail("halfway"));
+    const inviteToken = fragmentToken(created.body.link)!;
+    const { accept } = await acceptInvite(inviteToken);
+    expect(accept.status).toBe(201);
+    // Before the move it reopens (no passkey, no session yet).
+    expect((await new Browser().json("/api/invitations/accept", { body: { token: inviteToken } })).status).toBe(201);
+    const token = fragmentToken((await start(ws.browser, NEW)).body.link)!;
+    expect((await commit(token)).reg?.verify?.status).toBe(200);
+    for (const path of ["/api/invitations/lookup", "/api/invitations/accept"]) {
+      const res = await new Browser().json(path, { body: { token: inviteToken }, baseUrl: NEW, origin: NEW });
+      expect(res.status, path).toBe(410);
+    }
+  });
+
+  it("pages use a per-isolate cache of the installation that a commit clears", async () => {
+    const db = env.DB;
+    clearPageInstallationCache(db);
+    const first = await loadInstallationForPages(db, Date.now());
+    expect(first?.canonicalOrigin).toBe(ORIGIN);
+    await db.prepare("UPDATE installation SET canonical_origin = ? WHERE id = 1").bind(NEW).run();
+    expect((await loadInstallationForPages(db, Date.now()))?.canonicalOrigin).toBe(ORIGIN);
+    expect((await loadInstallationForPages(db, Date.now() + 31_000))?.canonicalOrigin).toBe(NEW);
+    await db.prepare("UPDATE installation SET canonical_origin = ? WHERE id = 1").bind(ORIGIN).run();
+    clearPageInstallationCache(db);
+    expect((await loadInstallationForPages(db, Date.now()))?.canonicalOrigin).toBe(ORIGIN);
+  });
+
+  it("starting a move that loses a race with an address change revokes nothing and issues no link", async () => {
+    const first = fragmentToken((await start(ws.browser, NEW)).body.link)!;
+    // A DB whose batch is preceded by a concurrent change of the canonical origin.
+    const racing = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            await target.prepare("UPDATE installation SET canonical_origin = ? WHERE id = 1").bind(OTHER).run();
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const { identitySecrets } = await import("../../src/features/identity/secrets");
+    const secrets = await identitySecrets(env, rootLogger);
+    if (!secrets.ok) throw new Error("secrets");
+    const ctx = { env: { ...env, DB: racing }, log: rootLogger, now: Date.now };
+    const result = await startDomainMove(ctx, secrets.value, ws.ownerId, "https://third.officebox.test");
+    expect(result.ok).toBe(false);
+    await env.DB.prepare("UPDATE installation SET canonical_origin = ? WHERE id = 1").bind(ORIGIN).run();
+    expect((await installation()).pending_origin).toBe(NEW);
+    // The earlier move's link is still live.
+    const opened = await new Browser().json("/api/admin/domain/complete", {
+      body: { token: first },
+      baseUrl: NEW,
+      origin: NEW,
+    });
+    expect(opened.status).toBe(201);
+    expect(await count("SELECT count(*) AS n FROM auth_tokens WHERE kind = 'domain_move'")).toBe(1);
   });
 });

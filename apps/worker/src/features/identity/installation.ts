@@ -84,6 +84,30 @@ export async function loadInstallation(db: D1Database): Promise<Installation | n
   };
 }
 
+/**
+ * How long a page request may use an isolate's cached installation row (M1c). Only the page middleware
+ * uses it (the old-host redirect after a domain move); every API request still reads the row. A commit
+ * clears this isolate's copy at once; other isolates catch up within the TTL, serving pages (not the API)
+ * on the old host for at most that long **(default)**.
+ */
+export const PAGE_INSTALLATION_TTL_MS = 30_000;
+
+const pageCache = new WeakMap<D1Database, { expiresAt: number; value: Installation | null }>();
+
+/** The installation row for a page request, from this isolate's cache when it's fresh. */
+export async function loadInstallationForPages(db: D1Database, now: number): Promise<Installation | null> {
+  const hit = pageCache.get(db);
+  if (hit && hit.expiresAt > now) return hit.value;
+  const value = await loadInstallation(db);
+  pageCache.set(db, { expiresAt: now + PAGE_INSTALLATION_TTL_MS, value });
+  return value;
+}
+
+/** Forgets this isolate's cached row (a committed domain move; tests). */
+export function clearPageInstallationCache(db: D1Database): void {
+  pageCache.delete(db);
+}
+
 /** The pending domain move, if one is waiting and hasn't expired at `now`. */
 export function activePendingMove(installation: Installation | null, now: number): PendingMove | null {
   const pending = installation?.pendingMove ?? null;

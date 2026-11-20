@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  decide,
+  decideAuthority,
   domainOriginSchema,
   emailChangeConfirmBodySchema,
   isLoopbackHost,
@@ -91,5 +93,26 @@ describe("token bodies and member changes", () => {
     expect(securityNoticeDetailsSchema.parse({})).toEqual({});
     expect(publicStatusSchema.parse({ magicLinks: false })).toEqual({ magicLinks: false });
     expect(publicStatusSchema.parse({ magicLinks: true, recoveryNotice: { at: 1 } }).recoveryNotice).toEqual({ at: 1 });
+  });
+});
+
+describe("decideAuthority (re-checking an earlier authorization without step-up)", () => {
+  const target = (role: "owner" | "admin" | "member") => ({ userId: "t", role, status: "active" as const });
+  const actor = (role: "owner" | "admin" | "member", status: "active" | "disabled" = "active") => ({
+    userId: "a",
+    role,
+    status,
+    session: null,
+  });
+  it("follows the rule but never asks for step-up", () => {
+    const check = (role: "owner" | "admin" | "member") =>
+      ({ action: "member.issue_recovery_link", target: target(role), activeOwnerCount: 2 }) as const;
+    expect(decideAuthority(actor("admin"), check("member")).ok).toBe(true);
+    expect(decideAuthority(actor("admin"), check("admin"))).toEqual({ ok: false, error: "owner_required" });
+    expect(decideAuthority(actor("member"), check("member"))).toEqual({ ok: false, error: "not_permitted" });
+    expect(decideAuthority(actor("admin", "disabled"), check("member"))).toEqual({ ok: false, error: "inactive" });
+    expect(decideAuthority(actor("owner"), check("owner")).ok).toBe(true);
+    // decide, with no session, would refuse for step-up.
+    expect(decide(actor("owner"), check("owner"), Date.now())).toEqual({ ok: false, error: "reauth_required" });
   });
 });

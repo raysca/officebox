@@ -17,6 +17,7 @@ import {
   activePendingMove,
   claimed,
   loadInstallation,
+  loadInstallationForPages,
   type ClaimedInstallation,
   type Installation,
 } from "./installation";
@@ -114,10 +115,24 @@ const PENDING_ORIGIN_ROUTES: ReadonlySet<string> = new Set([
  * otherwise 307, to the same path and query on the canonical origin built from the installation record,
  * never from the request's host; `no-store`, never a cacheable 301. Browsers keep the fragment.
  */
-function canonicalRedirect(method: string, url: URL, canonical: string): Response {
-  const target = new URL(url.pathname + url.search, canonical).toString();
-  const status = method === "GET" || method === "HEAD" ? 302 : 307;
-  return new Response(null, { status, headers: { Location: target, "Cache-Control": "no-store" } });
+export function canonicalRedirect(method: string, url: URL, canonical: string): Response {
+  return new Response(null, {
+    status: method === "GET" || method === "HEAD" ? 302 : 307,
+    headers: { Location: canonicalTarget(url, canonical), "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * The redirect target: the canonical origin with only the request's path and query copied in. The path
+ * is assigned to a URL parsed from the canonical origin (never resolved as a relative reference, which
+ * would turn `//evil.example/x` or `/\evil.example` into another host), with any run of leading slashes
+ * or backslashes collapsed to one `/`. So the target's origin is always the canonical origin.
+ */
+export function canonicalTarget(url: URL, canonical: string): string {
+  const target = new URL(canonical);
+  target.pathname = `/${url.pathname.replace(/^[/\\]+/, "")}`;
+  target.search = url.search;
+  return target.toString();
 }
 
 /**
@@ -130,8 +145,11 @@ function canonicalRedirect(method: string, url: URL, canonical: string): Respons
 export const identityPageMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
   let installation: Installation | null;
   try {
-    installation = await loadInstallation(c.env.DB);
-  } catch {
+    // Cached per isolate for 30 s (pages only; a commit clears it): page loads don't each cost a D1 read.
+    installation = await loadInstallationForPages(c.env.DB, c.var.now());
+  } catch (error) {
+    // Fail open for pages (the API reports the problem), but say so.
+    c.var.log.warn("installation unreadable for a page request; serving the page", { error });
     await next();
     return;
   }

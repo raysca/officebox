@@ -714,6 +714,18 @@ export function decide(actor: Actor, check: PermissionCheck, now: number): Decis
   return stepUp(actor, check, now);
 }
 
+/**
+ * Steps 1 and 2 only, with no step-up: whether the actor **still has the authority** for an action
+ * that was authorized (step-up included) earlier, by a session that isn't the one asking now. Used to
+ * re-check, when a recovery link is used, that the person who issued it may still issue one for that
+ * target (Identity §4.6; M1c). Never a substitute for `decide` on a request the actor makes.
+ */
+export function decideAuthority(actor: Actor, check: PermissionCheck): Decision {
+  const pre = decideWithoutFacts(actor, check.action);
+  if (!pre.ok) return pre;
+  return rule(actor, check);
+}
+
 /** Convenience for UI affordances: whether `decide` allows the check. Never an enforcement point. */
 export function can(actor: Actor, check: PermissionCheck, now: number): boolean {
   return decide(actor, check, now).ok;

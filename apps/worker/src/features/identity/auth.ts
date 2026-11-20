@@ -18,7 +18,7 @@ import { bindChallenge, consumeTicket, findValidTicket, readTicketCookie } from 
 import type { ClaimedInstallation } from "./installation";
 import { commitDomainMove } from "./domain-move";
 import { issueMagicLink } from "./magic-link";
-import { markRecoveryLinkUsedStatement } from "./recovery";
+import { consumeRecoveryLink } from "./recovery";
 import { emailSecurityNotices, type RaisedNotice } from "./notice-email";
 import { noticeStatement } from "./notices";
 import { consumeRateLimit } from "./rate-limits";
@@ -261,9 +261,9 @@ async function afterRegistration(env: Env, passkeyId: string, userId: string, na
   // Every addition raises a notice, except the first passkey at setup or acceptance (Identity §4.4).
   const raised: RaisedNotice[] = [];
   if (ticket?.via === "recovery_link" && ticket.recovery) {
-    // The link is used now: opening it again answers 410 (Identity §4.6). The notice names the passkey.
+    // The link was consumed at verify (opening it again answers 410, Identity §4.6). The notice names
+    // the passkey.
     statements.push(
-      markRecoveryLinkUsedStatement(database, ticket.recovery, userId, now),
       await auditStatement(ctx, {
         action: "auth.recovery_link_used",
         actor: userId,
@@ -443,6 +443,10 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
               : null;
             if (!payload || !ticketFitsOrigin(payload.via))
               throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "The enrolment ticket isn't valid.");
+            // A recovery link registers one passkey, ever: consumed here, before the passkey is written.
+            if (payload.recovery && !(await consumeRecoveryLink(env.DB, payload.recovery, user.id, Date.now()))) {
+              throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "This recovery link has been used.");
+            }
             store.consumedTicket = {
               userId: user.id,
               via: payload.via,

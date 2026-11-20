@@ -16,7 +16,7 @@ import { Database, expectOk } from "../../core/db";
 import { displayNameOf, revokeAllSessions } from "./account-security";
 import { randomToken, tokenHash } from "./crypto";
 import { issueTicket, type IssuedTicket } from "./enrolment";
-import { activePendingMove, loadInstallation } from "./installation";
+import { activePendingMove, clearPageInstallationCache, loadInstallation } from "./installation";
 import { emailSecurityNotices, type RaisedNotice } from "./notice-email";
 import { noticeStatement } from "./notices";
 import type { IdentitySecrets } from "./secrets";
@@ -94,13 +94,11 @@ export async function startDomainMove(
   const expiresAt = now + DOMAIN_MOVE_TTL_MS;
   const token = randomToken(32);
   const database = new Database(ctx.env.DB);
+  // Each statement after the update applies only if the update did: the row now holds this move.
+  const started = `EXISTS (SELECT 1 FROM installation WHERE id = 1 AND pending_origin = ?2
+    AND pending_origin_started_by = ?3 AND pending_origin_expires_at = ?4)`;
   const result = expectOk(
     await database.batchRun([
-      // Starting again replaces any pending move: its link stops working.
-      database.statement(
-        `UPDATE auth_tokens SET revoked_at = ? WHERE kind = 'domain_move' AND used_at IS NULL AND revoked_at IS NULL`,
-        now,
-      ),
       database.statement(
         `UPDATE installation
             SET pending_origin = ?, pending_origin_started_by = ?, pending_origin_expires_at = ?
@@ -110,15 +108,24 @@ export async function startDomainMove(
         expiresAt,
         canonical,
       ),
+      // Starting again replaces any pending move: its link stops working.
+      database.statement(
+        `UPDATE auth_tokens SET revoked_at = ?1
+          WHERE kind = 'domain_move' AND used_at IS NULL AND revoked_at IS NULL AND ${started}`,
+        now,
+        origin,
+        actorId,
+        expiresAt,
+      ),
       database.statement(
         `INSERT INTO auth_tokens (token_hash, user_id, kind, issued_by, payload, expires_at, created_at)
-         SELECT ?, ?, 'domain_move', ?, ?, ?, ? WHERE changes() > 0`,
-        await tokenHash(secrets.tokenHashKey, token),
-        actorId,
-        actorId,
-        JSON.stringify({ origin }),
-        expiresAt,
+         SELECT ?5, ?3, 'domain_move', ?3, ?6, ?4, ?1 WHERE ${started}`,
         now,
+        origin,
+        actorId,
+        expiresAt,
+        await tokenHash(secrets.tokenHashKey, token),
+        JSON.stringify({ origin }),
       ),
       await auditStatement(
         ctx,
@@ -320,10 +327,15 @@ export async function commitDomainMove(ctx: CoreContext, input: CommitInput): Pr
         input.origin,
         input.moveHash,
       ),
-      // Unfinished invitations lose their link; "Copy again" or "Resend" makes a new one (flagged).
+      // Every invitation link made for the old origin stops working (Identity §4.4), including one
+      // accepted whose account has no passkey yet (it could otherwise be reopened through the redirect;
+      // that person now needs a recovery link). Pending ones are flagged: "Copy again" or "Resend" makes
+      // a new link.
       database.statement(
-        `UPDATE invitations SET token_hash = 'moved:' || id, origin_moved_at = ?1
-          WHERE accepted_at IS NULL AND revoked_at IS NULL AND ${committed}`,
+        `UPDATE invitations
+            SET token_hash = 'moved:' || id,
+                origin_moved_at = CASE WHEN accepted_at IS NULL AND accepted_attempt_id IS NULL THEN ?1 END
+          WHERE revoked_at IS NULL AND token_hash NOT LIKE 'moved:%' AND ${committed}`,
         now,
         input.origin,
         input.moveHash,
@@ -331,6 +343,8 @@ export async function commitDomainMove(ctx: CoreContext, input: CommitInput): Pr
     ]),
   );
   if ((result[1]?.changes ?? 0) !== 1) return false;
+  // This isolate's pages redirect from now on; other isolates within the page cache's 30 s.
+  clearPageInstallationCache(ctx.env.DB);
 
   const ctxLog = ctx.log;
   const revoked = await revokeAllSessions(ctx, input.keepSessionId ?? undefined);

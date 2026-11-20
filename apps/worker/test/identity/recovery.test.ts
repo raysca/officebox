@@ -473,3 +473,87 @@ describe("owner recovery with RECOVERY_TOKEN (Identity §4.6, §9)", () => {
     expect(again.verify.status).toBe(200);
   });
 });
+
+describe("review fixes (M1c)", () => {
+  it("a link stops working when its issuer may no longer issue it: demoted, disabled, or the target promoted", async () => {
+    const tryLink = async (token: string) => new Browser().json<ErrorBody>("/api/auth/recover", { body: { token } });
+
+    const demoted = await addMember("admin");
+    const a = await addMember();
+    const tokenA = await issuedToken(demoted.browser, a.id);
+    await env.DB.prepare("UPDATE users SET role = 'member' WHERE id = ?").bind(demoted.id).run();
+    const refusedA = await tryLink(tokenA);
+    expect(refusedA.status).toBe(410);
+    expect(refusedA.body.error.reason).toBe("recovery_link_issuer_changed");
+    const lookup = await new Browser().json<ErrorBody>("/api/auth/recover/lookup", { body: { token: tokenA } });
+    expect(lookup.body.error.reason).toBe("recovery_link_issuer_changed");
+    // Nothing happened to the target: their session still works.
+    expect((await a.browser.call("/api/me")).status).toBe(200);
+
+    const disabled = await addMember("admin");
+    const b = await addMember();
+    const tokenB = await issuedToken(disabled.browser, b.id);
+    await env.DB.prepare("UPDATE users SET status = 'disabled' WHERE id = ?").bind(disabled.id).run();
+    expect((await tryLink(tokenB)).body.error.reason).toBe("recovery_link_issuer_changed");
+
+    const admin = await addMember("admin");
+    const c = await addMember();
+    const tokenC = await issuedToken(admin.browser, c.id);
+    await env.DB.prepare("UPDATE users SET role = 'admin' WHERE id = ?").bind(c.id).run();
+    expect((await tryLink(tokenC)).body.error.reason).toBe("recovery_link_issuer_changed");
+
+    // An owner's link for an admin still works.
+    const target = await addMember("admin");
+    expect((await tryLink(await issuedToken(ws.browser, target.id))).status).toBe(201);
+  });
+
+  it("one link registers one passkey, even with two live tickets for it at once", async () => {
+    const member = await addMember();
+    const token = await issuedToken(ws.browser, member.id);
+    const first = new Browser();
+    const second = new Browser();
+    expect((await first.json("/api/auth/recover", { body: { token } })).status).toBe(201);
+    expect((await second.json("/api/auth/recover", { body: { token } })).status).toBe(201);
+    // Undo the second opening's revocation of the first ticket: both are live.
+    await env.DB.prepare(
+      "UPDATE auth_tokens SET revoked_at = NULL WHERE user_id = ? AND kind = 'passkey_enrol' AND used_at IS NULL",
+    )
+      .bind(member.id)
+      .run();
+    type Options = { challenge: string; rp: { id: string; name: string }; user: { id: string; name: string } };
+    const o1 = await first.json<Options>("/api/auth/passkey/generate-register-options");
+    const o2 = await second.json<Options>("/api/auth/passkey/generate-register-options");
+    expect([o1.status, o2.status]).toEqual([200, 200]);
+    const r1 = await new SoftAuthenticator().register(o1.body, ORIGIN);
+    const r2 = await new SoftAuthenticator().register(o2.body, ORIGIN);
+    const results = await Promise.all([
+      first.json("/api/auth/passkey/verify-registration", { body: { response: r1.response } }),
+      second.json("/api/auth/passkey/verify-registration", { body: { response: r2.response } }),
+    ]);
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(
+      await count("SELECT count(*) AS n FROM passkeys WHERE user_id = ? AND created_via = 'recovery_link'", member.id),
+    ).toBe(1);
+  });
+
+  it("RECOVERY_TOKEN uses are keyed by plain SHA-256; a row keyed the older way still counts as used", async () => {
+    const owner = await addMember("owner");
+    const secret = freshSecret();
+    expect((await recover(new Browser(), secret, { token: secret, email: owner.email })).status).toBe(201);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret)));
+    const { base64url, tokenHash } = await import("../../src/features/identity/crypto");
+    expect(
+      await count("SELECT count(*) AS n FROM recovery_token_uses WHERE token_hash = ?", `sha256:${base64url(digest)}`),
+    ).toBe(1);
+
+    // A value recorded before the change (HMAC-keyed) is still used up.
+    const older = freshSecret();
+    await env.DB.prepare("INSERT INTO recovery_token_uses (token_hash, owner_id, used_at) VALUES (?, ?, ?)")
+      .bind(await tokenHash(env.TOKEN_HASH_KEY!, older), owner.id, Date.now())
+      .run();
+    const refused = await recover(new Browser(), older, { token: older, email: owner.email });
+    expect(refused.status).toBe(410);
+    const me = await ws.browser.json<{ ownerRecoveryUsed?: boolean }>("/api/me", { env: { RECOVERY_TOKEN: older } });
+    expect(me.body.ownerRecoveryUsed).toBe(true);
+  });
+});
