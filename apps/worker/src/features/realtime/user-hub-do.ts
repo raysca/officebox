@@ -397,10 +397,12 @@ export class UserHub extends CoreDurableObject {
   }
 
   /**
-   * Reads the member's status from D1 (hidden once expired), remembers its one-line form and schedules
-   * the `status_expiry` timer for its expiry. Returns the line, or null.
+   * Reads the member's status from D1 (hidden once expired) and schedules the `status_expiry` timer for
+   * its expiry. Returns the one-line form, or null. With `remember` (the default, used when the member
+   * comes online and the line goes to presence with `setOnline`) it also stores the line in
+   * `meta('status_text')`; `syncStatus` stores it only once presence has it.
    */
-  private async loadStatusText(userId: string, now = this.now()): Promise<string | null> {
+  private async loadStatusText(userId: string, now = this.now(), remember = true): Promise<string | null> {
     const row = expectOk(
       await new Database(this.env.DB).first<{
         status_emoji: string | null;
@@ -414,14 +416,22 @@ export class UserHub extends CoreDurableObject {
     if (status?.expiresAt) this.setTimer("status_expiry:window", status.expiresAt);
     else this.cancelTimer("status_expiry:window");
     const line = statusLine(status);
-    this.setMeta("status_text", line ?? "");
+    if (remember) this.setMeta("status_text", line ?? "");
     return line;
   }
 
-  /** Re-reads the status and publishes it to `WorkspacePresence` (which updates online members). */
+  /**
+   * Re-reads the status and, only if its line differs from the one last published, tells
+   * `WorkspacePresence` (which updates online members). The new line is remembered only after presence
+   * has it, so a failed call is retried by the next sync (the heartbeat or `refreshStatus`).
+   */
   private async syncStatus(userId: string): Promise<string | null> {
-    const line = await this.loadStatusText(userId);
-    await this.env.PRESENCE.getByName("presence").setStatusText(userId, line);
+    const published = this.getMeta("status_text") || null;
+    const line = await this.loadStatusText(userId, this.now(), false);
+    if (line !== published) {
+      await this.env.PRESENCE.getByName("presence").setStatusText(userId, line);
+      this.setMeta("status_text", line ?? "");
+    }
     return line;
   }
 
@@ -510,7 +520,8 @@ export class UserHub extends CoreDurableObject {
     }
     this.setTimer("heartbeat:tick", now + HUB_HEARTBEAT_MS);
     // Reconcile the status with D1 (M1d): catches up on a `refreshStatus` the Worker couldn't deliver
-    // and re-arms the expiry timer. Presence is told only if the text changed.
+    // and re-arms the expiry timer. `syncStatus` tells presence only when the line differs from the one
+    // it last published.
     try {
       await this.syncStatus(uid);
     } catch (error) {

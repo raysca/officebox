@@ -155,6 +155,37 @@ export function webpWithExif(payload: string): Uint8Array {
   return concat(Uint8Array.from([...ascii("RIFF"), ...u32le(4 + chunks.length), ...ascii("WEBP")]), chunks);
 }
 
+/** A 4 × 4 PNG with an extra chunk inserted just before IEND. */
+export function pngWithChunk(type: string, data: number[] = []): Uint8Array {
+  const base = png(4, 4);
+  const chunk = [...u32be(data.length), ...ascii(type), ...data, 0, 0, 0, 0];
+  return concat(base.slice(0, base.length - 12), Uint8Array.from(chunk), base.slice(base.length - 12));
+}
+
+/** A 4 × 4 PNG with a second IHDR after the first. */
+export function pngWithTwoHeaders(): Uint8Array {
+  const base = png(4, 4);
+  return concat(base.slice(0, 33), base.slice(8, 33), base.slice(33));
+}
+
+/** An extended WebP: a VP8X header of `headerSize` bytes, then the given chunks. */
+export function webpExtended(headerSize: number, withImage: boolean): Uint8Array {
+  const header = [3, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0].slice(0, Math.max(0, headerSize - 4));
+  const vp8x = [...ascii("VP8X"), ...u32le(headerSize), 0, 0, 0, 0, ...header];
+  const padded = vp8x.length % 2 ? [...vp8x, 0] : vp8x;
+  const image = withImage ? webp(4, 4).slice(12) : Uint8Array.from([...ascii("ICCP"), ...u32le(2), 1, 2]);
+  const chunks = concat(Uint8Array.from(padded), image);
+  return concat(Uint8Array.from([...ascii("RIFF"), ...u32le(4 + chunks.length), ...ascii("WEBP")]), chunks);
+}
+
+/** A 4 × 4 JPEG with an APP2 segment whose body starts with `signature`, then `payload`. */
+export function jpegWithApp2(signature: string, payload: string): Uint8Array {
+  const base = jpeg(4, 4);
+  const body = [...ascii(signature), 0, ...ascii(payload)];
+  const segment = [0xff, 0xe2, ((body.length + 2) >> 8) & 0xff, (body.length + 2) & 0xff, ...body];
+  return concat(base.slice(0, 20), Uint8Array.from(segment), base.slice(20));
+}
+
 /** Whether `needle` occurs in `bytes`. */
 export function contains(bytes: Uint8Array, needle: string): boolean {
   return new TextDecoder("latin1").decode(bytes).includes(needle);

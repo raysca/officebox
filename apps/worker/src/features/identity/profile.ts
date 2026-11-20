@@ -152,21 +152,21 @@ export async function updateProfile(
     sets.push("onboarded_at = COALESCE(onboarded_at, ?)");
     params.push(now);
   }
-  const db = new Database(ctx.env.DB);
-  const fields: D1PreparedStatement[] = [];
-  if (sets.length > 0) {
-    set("updated_at", now);
-    fields.push(
-      db.statement(`UPDATE users SET ${sets.join(", ")} WHERE id = ? AND status = 'active'`, ...params, userId),
-    );
-  }
-  // A handle change and the other fields are one batch: either all apply, or (a lost handle race, a
-  // concurrent change) none do, so a failed save never uses up a handle change.
+  // With a handle change, the other fields go in the same UPDATE as the handle copy, conditional on the
+  // change applying: either all apply, or (a lost handle race, a concurrent change) none do, so a failed
+  // save never writes fields or uses up a handle change.
   if (plan.value) {
-    const applied = await runHandleBatch(ctx.env.DB, plan.value, fields);
+    const applied = await runHandleBatch(ctx.env.DB, plan.value, { sets, params });
     if (!applied.ok) return applied;
-  } else if (fields.length > 0) {
-    expectOk(await db.batchRun(fields));
+  } else if (sets.length > 0) {
+    set("updated_at", now);
+    expectOk(
+      await new Database(ctx.env.DB).run(
+        `UPDATE users SET ${sets.join(", ")} WHERE id = ? AND status = 'active'`,
+        ...params,
+        userId,
+      ),
+    );
   }
   const handleChanged = plan.value !== null;
   const profile = await getMyProfile(ctx, userId);

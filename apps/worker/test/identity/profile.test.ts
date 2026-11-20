@@ -12,6 +12,7 @@ import {
 } from "@officebox/shared";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ulid } from "../../src/core/ids";
+import { prepareHandleChange, runHandleBatch } from "../../src/features/identity/handles";
 import { openHub } from "./m1c-helpers";
 import {
   acceptInvite,
@@ -478,6 +479,61 @@ describe("@handles (Identity §4.8, Platform §8)", () => {
     const profile = await member.browser.json<MyProfile>("/api/me/profile");
     expect(profile.body.jobTitle).toBeNull();
     expect(profile.body.handleChangesLeft).toBe(3);
+  });
+
+  it("a change that loses a race to another change by the same member writes none of its fields", async () => {
+    const member = await addMember();
+    await setProfile(member, { handle: uniqueHandle("start") });
+    const [loser, winner] = [uniqueHandle("lose"), uniqueHandle("win")];
+    const now = Date.now();
+    // Both changes are checked against the same current handle; the winner's batch runs first.
+    const plan = await prepareHandleChange(env.DB, member.id, loser, now);
+    expect(plan.ok && plan.value).toBeTruthy();
+    expect((await setProfile(member, { handle: winner, displayName: "Winner Name" })).status).toBe(200);
+    if (!plan.ok || !plan.value) return;
+    const lost = await runHandleBatch(env.DB, plan.value, { sets: ["display_name = ?"], params: ["Loser Name"] });
+    expect(lost.ok).toBe(false);
+    if (!lost.ok) expect(lost.error).toMatchObject({ code: "conflict", reason: "handle_changed" });
+    const row = await env.DB.prepare("SELECT handle, display_name FROM users WHERE id = ?")
+      .bind(member.id)
+      .first<{ handle: string; display_name: string }>();
+    expect(row).toEqual({ handle: winner, display_name: "Winner Name" });
+    expect(await env.DB.prepare("SELECT 1 FROM handles WHERE handle = ?").bind(loser).first()).toBeNull();
+  });
+
+  it("concurrent PATCHes with different handles and names leave a matching handle and name", async () => {
+    const member = await addMember();
+    await setProfile(member, { handle: uniqueHandle("from") });
+    const [a, b] = [uniqueHandle("pa"), uniqueHandle("pb")];
+    const results = await Promise.all([
+      setProfile(member, { handle: a, displayName: "Name A" }),
+      setProfile(member, { handle: b, displayName: "Name B" }),
+    ]);
+    for (const res of results) expect([200, 409]).toContain(res.status);
+    const row = await env.DB.prepare("SELECT handle, display_name FROM users WHERE id = ?")
+      .bind(member.id)
+      .first<{ handle: string; display_name: string }>();
+    // Whichever applied last, its name came with its handle; a refused request wrote nothing.
+    expect(row?.display_name).toBe(row?.handle === a ? "Name A" : "Name B");
+  });
+
+  it("a change that loses a race doesn't drop the member's own hold", async () => {
+    const member = await addMember();
+    const held = uniqueHandle("held");
+    await setProfile(member, { handle: held });
+    await setProfile(member, { handle: uniqueHandle("now") });
+    // Plan to take the held handle back, but another change of theirs lands first.
+    const plan = await prepareHandleChange(env.DB, member.id, held, Date.now());
+    expect((await setProfile(member, { handle: uniqueHandle("other") })).status).toBe(200);
+    if (!plan.ok || !plan.value) throw new Error("no plan");
+    expect((await runHandleBatch(env.DB, plan.value)).ok).toBe(false);
+    const row = await env.DB.prepare("SELECT owner_id, released_at FROM handles WHERE handle = ?")
+      .bind(held)
+      .first<{ owner_id: string; released_at: number | null }>();
+    expect(row?.owner_id).toBe(member.id);
+    expect(row?.released_at).toBeTypeOf("number");
+    // Still held against everyone else.
+    expect((await setProfile(await addMember(), { handle: held })).body.error?.reason).toBe("handle_held");
   });
 
   it("a handle change and other fields save together", async () => {

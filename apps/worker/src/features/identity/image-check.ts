@@ -5,14 +5,18 @@ import { MAX_AVATAR_DIMENSION, type AvatarContentType } from "@officebox/shared"
  *
  * - **Type from the bytes:** decided by the file's own bytes, never by its name or the request's
  *   `Content-Type`: PNG, JPEG or WebP only. SVG, GIF, HTML and anything unrecognised are refused.
- * - **Structure:** each format's container is walked to its end, so truncated files, JPEGs with more
- *   than one frame header, and data **appended outside the container** (after PNG's `IEND`, JPEG's
- *   `EOI` or past the RIFF size: the common image + HTML/ZIP polyglot) are refused. Width and height
+ * - **Structure:** each format's container is walked to its end, so truncated files, data **appended
+ *   outside the container** (after PNG's `IEND`, JPEG's `EOI` or past the RIFF size: the common image +
+ *   HTML/ZIP polyglot, and also JPEGs with an appended secondary image such as an MPF gain map), JPEGs
+ *   with more than one frame header, PNGs with a second `IHDR` or an unknown critical chunk, and
+ *   extended WebPs whose `VP8X` header isn't 10 bytes or that carry no image chunk are refused. Width and height
  *   must be readable and between 1 and {@link MAX_AVATAR_DIMENSION}.
  * - **Metadata stripped:** the stored copy drops what can carry text but isn't needed to draw the image:
  *   PNG text, `eXIf`, `tIME` and unknown ancillary chunks; JPEG `COM` and `APPn` segments other than
- *   APP0 (JFIF), APP2 (ICC profile) and APP14 (Adobe colour transform); WebP `EXIF` and `XMP ` chunks.
- *   This removes EXIF/GPS location tags from direct API uploads too (the web app also re-encodes).
+ *   APP0 (JFIF), APP2 carrying an ICC profile (`ICC_PROFILE\0`) and APP14 (Adobe colour transform); WebP
+ *   `EXIF` and `XMP ` chunks. This removes EXIF/GPS location tags from direct API uploads too (the web
+ *   app also re-encodes), and with them the EXIF orientation, so a sideways phone photo uploaded straight
+ *   to the API stays sideways.
  *
  * What this does **not** do: decode pixels, or prove that the bytes inside chunks the image needs (pixel
  * data, an ICC profile) aren't also something else. A file can still be crafted to be a valid image
@@ -99,7 +103,13 @@ const PNG_KEPT = new Set([
   "fdAT",
 ]);
 
-/** PNG: signature, IHDR first, then length-type-data-CRC chunks, ending exactly at IEND. */
+/** The critical PNG chunks (an upper-case first letter) a decoder must understand. */
+const PNG_CRITICAL = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
+
+/**
+ * PNG: signature, IHDR first (and only once), then length-type-data-CRC chunks, ending exactly at IEND.
+ * An unknown critical chunk means the file can't be decoded as we expect, so it's refused.
+ */
 function checkPng(bytes: Uint8Array): ImageCheck {
   if (bytes.length < 8 + 25 + 12) return MALFORMED;
   if (u32be(bytes, 8) !== 13 || ascii(bytes, 12, 4) !== "IHDR") return MALFORMED;
@@ -115,6 +125,8 @@ function checkPng(bytes: Uint8Array): ImageCheck {
     if (!/^[A-Za-z]{4}$/.test(type)) return MALFORMED;
     const end = offset + 12 + length;
     if (end > bytes.length) return MALFORMED;
+    if (type === "IHDR" && offset !== 8) return MALFORMED;
+    if (/^[A-Z]/.test(type) && !PNG_CRITICAL.has(type)) return MALFORMED;
     if (type === "IDAT") sawData = true;
     if (PNG_KEPT.has(type)) kept.push([offset, end]);
     if (type === "IEND") {
@@ -128,9 +140,17 @@ function checkPng(bytes: Uint8Array): ImageCheck {
 
 const SOF_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
 
-/** JPEG segments dropped from the stored copy: COM, and APPn except APP0, APP2 and APP14. */
-const isDroppedJpegSegment = (marker: number) =>
-  marker === 0xfe || (marker >= 0xe1 && marker <= 0xef && marker !== 0xe2 && marker !== 0xee);
+const ICC_SIGNATURE = [..."ICC_PROFILE"].map((ch) => ch.charCodeAt(0)).concat(0);
+
+/**
+ * JPEG segments dropped from the stored copy: COM, APPn except APP0 and APP14, and APP2 unless it's an
+ * ICC profile (APP2 also carries MPF, the multi-picture index).
+ */
+function isDroppedJpegSegment(bytes: Uint8Array, offset: number, marker: number): boolean {
+  if (marker === 0xfe) return true;
+  if (marker === 0xe2) return !startsWith(bytes, ICC_SIGNATURE, offset + 4);
+  return marker >= 0xe1 && marker <= 0xef && marker !== 0xee;
+}
 
 /**
  * JPEG: SOI, then marker segments up to SOS (exactly one of them a frame header, with the dimensions),
@@ -175,7 +195,7 @@ function checkJpeg(bytes: Uint8Array): ImageCheck {
     }
     const segmentEnd = offset + 2 + length;
     if (marker !== 0xda) {
-      if (!isDroppedJpegSegment(marker)) kept.push([offset, segmentEnd]);
+      if (!isDroppedJpegSegment(bytes, offset, marker)) kept.push([offset, segmentEnd]);
       offset = segmentEnd;
       continue;
     }
@@ -206,6 +226,7 @@ function checkWebp(bytes: Uint8Array): ImageCheck {
   if (riffSize + 8 !== bytes.length || riffSize % 2 !== 0) return MALFORMED;
   // Walk the chunks to the end (each padded to an even length), so nothing hides past the last one.
   const kept: [number, number][] = [];
+  const types = new Set<string>();
   let offset = 12;
   while (offset < bytes.length) {
     if (offset + 8 > bytes.length) return MALFORMED;
@@ -213,10 +234,17 @@ function checkWebp(bytes: Uint8Array): ImageCheck {
     const size = u32le(bytes, offset + 4);
     const end = offset + 8 + size + (size % 2);
     if (end > bytes.length) return MALFORMED;
+    types.add(type);
     if (type !== "EXIF" && type !== "XMP ") kept.push([offset, end]);
     offset = end;
   }
   const chunk = ascii(bytes, 12, 4);
+  if (chunk === "VP8X") {
+    // The extended header is exactly 10 bytes, and the file must hold an image: a VP8 or VP8L bitstream,
+    // or animation frames (ANMF), which carry their own.
+    if (u32le(bytes, 16) !== 10) return MALFORMED;
+    if (!types.has("VP8 ") && !types.has("VP8L") && !types.has("ANMF")) return MALFORMED;
+  }
   let width: number;
   let height: number;
   if (chunk === "VP8X") {

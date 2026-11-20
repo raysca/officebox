@@ -11,7 +11,7 @@ import {
   type HandleUnavailableReason,
   type Result,
 } from "@officebox/shared";
-import { Database, expectOk } from "../../core/db";
+import { Database, expectOk, type SqlValue } from "../../core/db";
 import { ulid } from "../../core/ids";
 
 /**
@@ -84,6 +84,22 @@ export function freeHeldHandleStatement(db: Database, handle: string, now: numbe
   );
 }
 
+/**
+ * The same, for a member's handle change: also conditional on their handle still being `current`, so a
+ * change that lost a race to another change of theirs doesn't drop one of their own holds.
+ */
+function freeHeldHandleForChange(db: Database, handle: string, now: number, userId: string, current: string | null) {
+  return db.statement(
+    `DELETE FROM handles WHERE handle = ?1 AND released_at IS NOT NULL
+        AND (released_at <= ?2 OR (owner_type = 'user' AND owner_id = ?3))
+        AND EXISTS (SELECT 1 FROM users WHERE id = ?3 AND handle IS ?4 AND status = 'active')`,
+    handle,
+    now - HANDLE_HOLD_MS,
+    userId,
+    current,
+  );
+}
+
 const MESSAGES: Record<HandleUnavailableReason, string> = {
   invalid: "2–32 lowercase letters, digits, dots, dashes or underscores, starting with a letter or digit.",
   reserved: "That handle is reserved.",
@@ -122,13 +138,23 @@ export async function handleChangeAllowance(
   return { left, nextAt: left === 0 && oldest !== undefined ? oldest + HANDLE_CHANGE_WINDOW_MS : null };
 }
 
-/** The statements of a handle change, to run in one D1 batch (alone, or with a profile update). */
+/** Other `users` columns to write together with a handle change: `column = ?` fragments and their values. */
+export interface UserFieldSets {
+  sets: string[];
+  params: SqlValue[];
+}
+
+/** A prepared handle change, run with {@link runHandleBatch} (alone, or with other profile fields). */
 export interface HandleChangePlan {
   from: string | null;
   to: string;
+  /** Every statement but the last. */
   statements: D1PreparedStatement[];
-  /** The statement whose `changes` must be 1 for the change to have applied (the `users.handle` copy). */
-  appliedIndex: number;
+  /**
+   * The last statement: the `users.handle` copy, with any other profile fields in the **same** UPDATE,
+   * so those fields are written only if the handle change applied.
+   */
+  copy: (fields: UserFieldSets) => D1PreparedStatement;
 }
 
 /**
@@ -172,7 +198,7 @@ export async function prepareHandleChange(
   const claimed =
     "EXISTS (SELECT 1 FROM handles WHERE handle = ?1 AND owner_type = 'user' AND owner_id = ?2 AND released_at IS NULL)";
   const statements = [
-    freeHeldHandleStatement(db, handle, now, userId),
+    freeHeldHandleForChange(db, handle, now, userId, current),
     db.statement(
       `INSERT INTO handles (handle, owner_type, owner_id) SELECT ?1, 'user', ?2 WHERE ${stillCurrent}`,
       handle,
@@ -196,30 +222,41 @@ export async function prepareHandleChange(
       now,
       ulid(),
     ),
-    db.statement(
-      `UPDATE users SET handle = ?1, updated_at = ?4 WHERE id = ?2 AND handle IS ?3 AND status = 'active' AND ${claimed}`,
+  ];
+  const copy = ({ sets, params }: UserFieldSets) => {
+    // ?1–?4 are taken; the extra fields' placeholders are numbered from ?5 in order.
+    let next = 5;
+    const extra = sets.map((set) => set.replace(/\?/g, () => `?${next++}`));
+    if (next - 5 !== params.length) throw new Error("handle change: field placeholders and values don't match");
+    return db.statement(
+      `UPDATE users SET ${["handle = ?1", "updated_at = ?4", ...extra].join(", ")}
+        WHERE id = ?2 AND handle IS ?3 AND status = 'active' AND ${claimed}`,
       handle,
       userId,
       current,
       now,
-    ),
-  ];
-  return ok({ from: current, to: handle, statements, appliedIndex: 4 });
+      ...params,
+    );
+  };
+  return ok({ from: current, to: handle, statements, copy });
 }
 
-/** Runs a prepared batch (a handle change plus any other statements) and maps its outcome. */
+/**
+ * Runs a prepared handle change, with `fields` written in the same UPDATE as the handle copy, and maps
+ * the outcome: either the handle and every field apply, or nothing does.
+ */
 export async function runHandleBatch(
   d1: D1Database,
   plan: HandleChangePlan,
-  extra: D1PreparedStatement[] = [],
+  fields: UserFieldSets = { sets: [], params: [] },
 ): Promise<Result<void, ApiError>> {
-  const result = await new Database(d1).batchRun([...plan.statements, ...extra]);
+  const result = await new Database(d1).batchRun([...plan.statements, plan.copy(fields)]);
   if (!result.ok) {
     // Someone claimed it between the check and the batch (the primary key decided): nothing was written.
     if (result.error.kind === "unique") return err(handleError("taken"));
     throw new Error(`handle change: unexpected ${result.error.kind} constraint failure`);
   }
-  if ((result.value[plan.appliedIndex]?.changes ?? 0) !== 1) {
+  if ((result.value[plan.statements.length]?.changes ?? 0) !== 1) {
     return err(apiError("conflict", "Your handle changed at the same time. Try again.", { reason: "handle_changed" }));
   }
   return ok();

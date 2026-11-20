@@ -6,14 +6,18 @@ import {
   GIF,
   HTML,
   jpeg,
+  jpegWithApp2,
   jpegWithMetadata,
   jpegWithTwoFrames,
   png,
   PNG_1X1,
+  pngWithChunk,
   pngWithText,
+  pngWithTwoHeaders,
   SVG,
   text,
   webp,
+  webpExtended,
   webpWithExif,
 } from "./images";
 
@@ -98,5 +102,30 @@ describe("avatar image checks (Identity §4.7, TDD §8.3)", () => {
     expect(new DataView(checked.bytes.buffer).getUint32(4, true)).toBe(checked.bytes.length - 8);
     expect(checked.bytes[20]! & 0x08).toBe(0);
     expect(checkAvatarImage(checked.bytes)).toMatchObject({ ok: true, width: 4, height: 4 });
+  });
+
+  it.each([
+    ["a PNG with an unknown critical chunk", pngWithChunk("ZZZZ", [1, 2, 3])],
+    ["a PNG with a second IHDR", pngWithTwoHeaders()],
+    ["an extended WebP whose VP8X header isn't 10 bytes", webpExtended(12, true)],
+    ["an extended WebP with no image chunk", webpExtended(10, false)],
+  ])("refuses %s", (_name, bytes) => {
+    expect(checkAvatarImage(bytes)).toEqual({ ok: false, reason: "malformed" });
+  });
+
+  it("accepts a well-formed extended WebP and an unknown ancillary PNG chunk (dropped)", () => {
+    expect(checkAvatarImage(webpExtended(10, true))).toMatchObject({ ok: true, width: 4, height: 4 });
+    const withPrivate = checkAvatarImage(pngWithChunk("prVt", [...new TextEncoder().encode("<script>")]));
+    expect(withPrivate.ok && contains(withPrivate.bytes, "<script>")).toBe(false);
+    expect(withPrivate.ok).toBe(true);
+  });
+
+  it("keeps an APP2 ICC profile and drops any other APP2 (such as MPF)", () => {
+    const icc = checkAvatarImage(jpegWithApp2("ICC_PROFILE", "\u0001\u0001profile-bytes"));
+    expect(icc.ok && contains(icc.bytes, "profile-bytes")).toBe(true);
+    const mpf = checkAvatarImage(jpegWithApp2("MPF", "<script>secondary</script>"));
+    expect(mpf.ok).toBe(true);
+    expect(mpf.ok && contains(mpf.bytes, "secondary")).toBe(false);
+    expect(mpf.ok ? mpf.bytes : null).toEqual(jpeg(4, 4));
   });
 });
