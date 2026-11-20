@@ -58,6 +58,7 @@ import { identitySecrets } from "./secrets";
 import { checkSetupServices } from "./services";
 import { claimSetup, resumeSetup, SETUP_SERVICES_FAILING, setupStatus, type SetupEnrolmentResult } from "./setup";
 import { isSetupComplete } from "./setup-state";
+import { handleIssueWsTicket, handleSetMyDnd, handleUpdateMyPreferences } from "../realtime/routes";
 
 /**
  * Identity routes for M1a and M1b (Identity §6). Paths are relative to `/api`.
@@ -186,126 +187,129 @@ async function withBody(
   return new Request(request.url, { method: request.method, headers, body: JSON.stringify(copy) });
 }
 
-const authRoutes = new Hono<AppEnv>().all("/*", async (c) => {
-  const url = new URL(c.req.url);
-  const path = url.pathname;
-  // Default-deny on the exact normalised method and path (allowlist.ts).
-  if (!isAllowedAuthRoute(c.req.method, path)) return errorResponse(c, NOT_FOUND);
-  // Workaround 9: the options routes are GETs with side effects.
-  if (isPasskeyOptionsRoute(path)) {
-    const failure = requireCsrfHeader(c.req.raw);
-    if (failure) return errorResponse(c, csrfError(failure));
-  }
-  const services = await identityServices(c);
-  if (!services.ok) return respond(c, services);
-  const { auth, secrets } = services.value;
-  const ctx = coreContext(c);
-  if (isPasskeyRoute(path)) {
-    const limited = await limitPasskeyIp(ctx, c.req.raw);
-    if (!limited.ok) return respond(c, limited);
-  }
+const authRoutes = new Hono<AppEnv>()
+  .post("/ws-ticket", requireAuth, (c) => handleIssueWsTicket(c))
+  .all("/*", async (c) => {
+    const url = new URL(c.req.url);
+    const path = url.pathname;
+    // Default-deny on the exact normalised method and path (allowlist.ts).
+    if (!isAllowedAuthRoute(c.req.method, path)) return errorResponse(c, NOT_FOUND);
+    // Workaround 9: the options routes are GETs with side effects.
+    if (isPasskeyOptionsRoute(path)) {
+      const failure = requireCsrfHeader(c.req.raw);
+      if (failure) return errorResponse(c, csrfError(failure));
+    }
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { auth, secrets } = services.value;
+    const ctx = coreContext(c);
+    if (isPasskeyRoute(path)) {
+      const limited = await limitPasskeyIp(ctx, c.req.raw);
+      if (!limited.ok) return respond(c, limited);
+    }
 
-  let request = c.req.raw;
-  if (isMagicLinkRequestRoute(path)) {
-    // Our middleware first (Identity §4.4): only the email is accepted (no callback URLs), magic links
-    // must be available, the per-IP limit refuses, and the per-email limit suppresses mail without
-    // changing the answer. better-auth then gets a body we built.
-    const body = await readJson(c, magicLinkRequestBodySchema, SMALL_BODY);
-    if (!body.ok) return respond(c, body);
-    const prepared = await prepareMagicLinkRequest(
-      ctx,
-      secrets,
-      c.req.raw,
-      body.value.email,
-      await magicLinksAvailable(ctx),
-    );
-    if (!prepared.ok) return respond(c, prepared);
-    const headers = new Headers(request.headers);
-    headers.delete("content-length");
-    headers.set("content-type", "application/json");
-    request = new Request(request.url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ email: prepared.value.email }),
-    });
-  } else if (request.method === "POST" && !isRegistrationRoute(path)) {
-    // Sign-out and verify-authentication: a size bound before better-auth reads the body.
-    const bounded = await boundedBody(request);
-    if (!(bounded instanceof Request)) return respond(c, err(bounded));
-    request = bounded;
-  }
-  const extraCookies: string[] = [];
-  const store = currentStore();
-  if (isRegistrationRoute(path)) {
-    const isVerify = path.endsWith("/verify-registration");
-    const session = await loadSession(c, { forward: false, setCookies: extraCookies });
-    if (session.ok) {
-      // A signed-in member adding a passkey: step-up, through the engine (Identity §4.5).
-      const me = authOf(c);
-      const allowed = await authorize(permissionContext(c, me), { action: "passkey.add", ownerId: me.userId });
-      if (!allowed.ok) return respond(c, allowed);
-      if (store) store.registration = { kind: "signed_in", userId: me.userId, sessionId: me.sessionId };
-      // Workaround 5: never let a signed-in registration create a second session.
-      if (isVerify) {
-        const rebuilt = await withBody(request, (body) => delete body.createSession);
-        if (rebuilt instanceof Request) request = rebuilt;
-        else return respond(c, err(rebuilt));
-      }
-    } else {
-      const raw = readTicketCookie(c.req.raw.headers);
-      if (raw && store) store.registration = { kind: "ticket", ticketHash: await tokenHash(secrets.tokenHashKey, raw) };
-      if (isVerify) {
-        if (!raw) {
-          return respond(
-            c,
-            err(apiError("forbidden", "An enrolment ticket is required.", { reason: "ENROLMENT_TICKET_REQUIRED" })),
-          );
+    let request = c.req.raw;
+    if (isMagicLinkRequestRoute(path)) {
+      // Our middleware first (Identity §4.4): only the email is accepted (no callback URLs), magic links
+      // must be available, the per-IP limit refuses, and the per-email limit suppresses mail without
+      // changing the answer. better-auth then gets a body we built.
+      const body = await readJson(c, magicLinkRequestBodySchema, SMALL_BODY);
+      if (!body.ok) return respond(c, body);
+      const prepared = await prepareMagicLinkRequest(
+        ctx,
+        secrets,
+        c.req.raw,
+        body.value.email,
+        await magicLinksAvailable(ctx),
+      );
+      if (!prepared.ok) return respond(c, prepared);
+      const headers = new Headers(request.headers);
+      headers.delete("content-length");
+      headers.set("content-type", "application/json");
+      request = new Request(request.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ email: prepared.value.email }),
+      });
+    } else if (request.method === "POST" && !isRegistrationRoute(path)) {
+      // Sign-out and verify-authentication: a size bound before better-auth reads the body.
+      const bounded = await boundedBody(request);
+      if (!(bounded instanceof Request)) return respond(c, err(bounded));
+      request = bounded;
+    }
+    const extraCookies: string[] = [];
+    const store = currentStore();
+    if (isRegistrationRoute(path)) {
+      const isVerify = path.endsWith("/verify-registration");
+      const session = await loadSession(c, { forward: false, setCookies: extraCookies });
+      if (session.ok) {
+        // A signed-in member adding a passkey: step-up, through the engine (Identity §4.5).
+        const me = authOf(c);
+        const allowed = await authorize(permissionContext(c, me), { action: "passkey.add", ownerId: me.userId });
+        if (!allowed.ok) return respond(c, allowed);
+        if (store) store.registration = { kind: "signed_in", userId: me.userId, sessionId: me.sessionId };
+        // Workaround 5: never let a signed-in registration create a second session.
+        if (isVerify) {
+          const rebuilt = await withBody(request, (body) => delete body.createSession);
+          if (rebuilt instanceof Request) request = rebuilt;
+          else return respond(c, err(rebuilt));
         }
-        // Workaround 5: a ticket registration always signs the person in.
-        const rebuilt = await withBody(request, (body) => {
-          body.createSession = true;
-        });
-        if (rebuilt instanceof Request) request = rebuilt;
-        else return respond(c, err(rebuilt));
+      } else {
+        const raw = readTicketCookie(c.req.raw.headers);
+        if (raw && store)
+          store.registration = { kind: "ticket", ticketHash: await tokenHash(secrets.tokenHashKey, raw) };
+        if (isVerify) {
+          if (!raw) {
+            return respond(
+              c,
+              err(apiError("forbidden", "An enrolment ticket is required.", { reason: "ENROLMENT_TICKET_REQUIRED" })),
+            );
+          }
+          // Workaround 5: a ticket registration always signs the person in.
+          const rebuilt = await withBody(request, (body) => {
+            body.createSession = true;
+          });
+          if (rebuilt instanceof Request) request = rebuilt;
+          else return respond(c, err(rebuilt));
+        }
       }
     }
-  }
 
-  const response = await auth.handler(request);
-  if (store?.consumedTicket && response.ok) extraCookies.push(CLEAR_TICKET_COOKIE);
-  // The known-device cookie is set on every sign-in, passkey ones included (Identity §4.4), so a later
-  // magic-link sign-in from this browser isn't reported as a new device.
-  if (store?.sessionCreated && response.ok) {
-    const device = await recordSignInDevice(
-      c.env.DB,
-      secrets.tokenHashKey,
-      store.sessionCreated.userId,
-      c.req.raw.headers,
-      c.var.now(),
-    );
-    extraCookies.push(device.setCookie);
-  }
-  const ticket = store?.consumedTicket;
-  if (ticket && response.status >= 500 && !(await userExists(c, ticket.userId))) {
-    // The setup claim expired (and its owner was deleted) between the ticket's consume and the passkey
-    // insert: a typed answer, not a 500.
-    return respond(
-      c,
-      err(
-        apiError("gone", "This setup expired before the passkey was saved. Start setup again.", {
-          reason: "setup_expired",
-        }),
-      ),
-    );
-  }
-  const filtered = await filterAuthResponse(response, c.var.requestId);
-  if (extraCookies.length === 0) return filtered;
-  // This route returns a raw Response, which Hono doesn't merge with c.header(): append here, including
-  // any cookie better-auth set while the session was read (workaround 12).
-  const headers = new Headers(filtered.headers);
-  for (const cookie of extraCookies) headers.append("Set-Cookie", cookie);
-  return new Response(filtered.body, { status: filtered.status, headers });
-});
+    const response = await auth.handler(request);
+    if (store?.consumedTicket && response.ok) extraCookies.push(CLEAR_TICKET_COOKIE);
+    // The known-device cookie is set on every sign-in, passkey ones included (Identity §4.4), so a later
+    // magic-link sign-in from this browser isn't reported as a new device.
+    if (store?.sessionCreated && response.ok) {
+      const device = await recordSignInDevice(
+        c.env.DB,
+        secrets.tokenHashKey,
+        store.sessionCreated.userId,
+        c.req.raw.headers,
+        c.var.now(),
+      );
+      extraCookies.push(device.setCookie);
+    }
+    const ticket = store?.consumedTicket;
+    if (ticket && response.status >= 500 && !(await userExists(c, ticket.userId))) {
+      // The setup claim expired (and its owner was deleted) between the ticket's consume and the passkey
+      // insert: a typed answer, not a 500.
+      return respond(
+        c,
+        err(
+          apiError("gone", "This setup expired before the passkey was saved. Start setup again.", {
+            reason: "setup_expired",
+          }),
+        ),
+      );
+    }
+    const filtered = await filterAuthResponse(response, c.var.requestId);
+    if (extraCookies.length === 0) return filtered;
+    // This route returns a raw Response, which Hono doesn't merge with c.header(): append here, including
+    // any cookie better-auth set while the session was read (workaround 12).
+    const headers = new Headers(filtered.headers);
+    for (const cookie of extraCookies) headers.append("Set-Cookie", cookie);
+    return new Response(filtered.body, { status: filtered.status, headers });
+  });
 
 async function userExists(c: AppContext, userId: string): Promise<boolean> {
   return (await c.env.DB.prepare("SELECT 1 AS one FROM users WHERE id = ?").bind(userId).first()) !== null;
@@ -410,7 +414,9 @@ const meRoutes = new Hono<AppEnv>()
     const allowed = await authorize(permissionContext(c, me), { action: "security_notice.ack", ownerId: me.userId });
     if (!allowed.ok) return respond(c, allowed);
     return respond(c, ok({ acknowledged: await acknowledgeNotices(c.env.DB, me.userId, body.value.ids) }));
-  });
+  })
+  .put("/dnd", (c) => handleSetMyDnd(c))
+  .patch("/preferences", (c) => handleUpdateMyPreferences(c));
 
 // ---- /api/invitations: the invitee's side (Identity §4.3) ---------------------------------------
 

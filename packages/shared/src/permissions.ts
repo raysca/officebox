@@ -216,6 +216,8 @@ export type PersonRef = z.infer<typeof personRefSchema>;
  */
 export const WORKSPACE_ACTION_AUDIENCE = {
   "directory.view": "everyone", // the member directory and profiles (Permissions §4.6)
+  "presence.view": "everyone", // workspace online presence list (Notifications §5.5, Platform §12)
+  "availability.view": "everyone", // member derived availability (Notifications §5.6)
   "admin.open": "admin", // the admin area (Admin §3)
   "admin.overview.view": "admin",
   "admin.alerts.dismiss": "admin", // info and warning alerts (Admin §17)
@@ -275,6 +277,9 @@ export const SELF_ACTIONS = [
   "devices.view", // list own sessions
   "devices.sign_out", // sign out one own session, all other devices, or everywhere
   "passkey.rename",
+  "dnd.edit", // manual Do Not Disturb (Notifications §5.6, §5.7)
+  "preferences.edit", // own notification and DND schedule preferences (Notifications §7)
+  "ws_ticket.create", // short-lived WebSocket upgrade ticket for own session (TDD §3.1, §4.2)
   // Acknowledge the security-notice banner (Identity §4.6a): a step-up action, so a stolen session
   // can't dismiss a notice without a fresh passkey assertion.
   "security_notice.ack",
@@ -602,6 +607,9 @@ function rule(actor: Actor, check: PermissionCheck): Decision {
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":
+    case "dnd.edit":
+    case "preferences.edit":
+    case "ws_ticket.create":
     case "security_notice.ack":
     case "passkey.add":
       return ownRule(actor, check.ownerId);
@@ -681,6 +689,9 @@ export function decideWithoutFacts(actor: Actor, action: string): Decision {
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":
+    case "dnd.edit":
+    case "preferences.edit":
+    case "ws_ticket.create":
     case "security_notice.ack":
     case "passkey.add":
     case "passkey.remove":

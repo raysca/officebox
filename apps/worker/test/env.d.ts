@@ -12,7 +12,7 @@ declare global {
     }
     interface GlobalProps {
       mainModule: typeof MainModule;
-      durableNamespaces: "SystemObject" | "TestObject";
+      durableNamespaces: "SystemObject" | "UserHub" | "WorkspacePresence" | "TestObject";
     }
   }
 }

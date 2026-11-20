@@ -31,3 +31,4 @@ export * from "./permissions";
 export * from "./identity";
 export * from "./email";
 export * from "./settings";
+export * from "./realtime";

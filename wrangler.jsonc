@@ -32,12 +32,12 @@
   },
 
   // The React app (apps/web, built by `npm run build`). Navigations to unknown paths get index.html.
-  // /api/* and /health always run the Worker first, so the SPA fallback never answers them.
+  // /api/*, /ws/* and /health always run the Worker first, so the SPA fallback never answers them.
   "assets": {
     "directory": "apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/health"]
+    "run_worker_first": ["/api/*", "/ws/*", "/health"]
   },
 
   "observability": {
@@ -62,9 +62,16 @@
   ],
 
   "durable_objects": {
-    "bindings": [{ "name": "SYSTEM", "class_name": "SystemObject" }]
+    "bindings": [
+      { "name": "SYSTEM", "class_name": "SystemObject" },
+      { "name": "USER_HUB", "class_name": "UserHub" },
+      { "name": "PRESENCE", "class_name": "WorkspacePresence" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SystemObject"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SystemObject"] },
+    { "tag": "v2", "new_sqlite_classes": ["UserHub", "WorkspacePresence"] }
+  ],
 
   // Cloudflare Email Service, the default email driver (TDD §7.6). No destination restriction and no
   // sender here: the sender address is an admin setting (AGENTS §4.1), and the sending domain must be

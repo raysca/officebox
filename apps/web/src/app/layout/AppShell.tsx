@@ -4,6 +4,7 @@ import { IconButton } from "../../lib/ui/Button";
 import { Dialog } from "../../lib/ui/Dialog";
 import { MenuIcon } from "../../lib/ui/icons";
 import { useMe } from "../../lib/api/identity";
+import { RealtimeProvider } from "../../lib/realtime";
 import { messages } from "../messages";
 import { ReauthPrompt } from "../reauth";
 import { HealthStatus } from "./HealthStatus";
@@ -54,7 +55,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
     return () => query.removeEventListener("change", onChange);
   }, [menuOpen]);
 
-  return (
+  const shell = (
     <div className="flex min-h-dvh flex-col bg-bg text-fg">
       <a
         href={`#${MAIN_ID}`}
@@ -124,4 +125,6 @@ export function AppShell({ children }: { children?: ReactNode }) {
       <ReauthPrompt />
     </div>
   );
+
+  return me?.user.id ? <RealtimeProvider userId={me.user.id}>{shell}</RealtimeProvider> : shell;
 }

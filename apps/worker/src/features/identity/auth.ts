@@ -509,9 +509,9 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
           },
         },
         delete: {
-          // Every deleted session row closes its sockets (TDD §3.5; a stub until M2, revocation.ts).
+          // Every deleted session row closes its sockets (TDD §3.5; revocation.ts).
           after: async (session) => {
-            await closeSessionConnections(logger(), session.userId, session.id);
+            await closeSessionConnections(logger(), session.userId, session.id, env);
           },
         },
       },

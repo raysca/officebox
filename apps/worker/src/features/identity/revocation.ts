@@ -1,66 +1,53 @@
+import type { RevocationReason } from "@officebox/shared";
 import type { Logger } from "../../core/log";
+import type { Env } from "../../env";
+import { executeUserRevocation } from "../realtime/revocation";
 
 /**
- * Socket revocation (Identity §4.5; TDD §3.5).
+ * WebSocket revocation on session deletion or user disable (TDD §3.5; Identity §4.5; Platform §12).
  *
- * Every revocation (sign out, a device signed out from My devices, sign out everywhere, and later an
- * admin sign-out, disabling a member or using a recovery link) must close that session's live sockets
- * within seconds. Sockets don't exist until M2, so this is the **interface and a stub**: better-auth's
- * `databaseHooks.session.delete.after` calls {@link closeSessionConnections} for every deleted session
- * row (sign-out, revoke one, revoke others, revoke all all fire it per row; M1a-0 spike Q4d), and the
- * stub logs and notifies test listeners.
- *
- * TODO(M2): implement `UserHubRevoker` over the UserHub Durable Object: `closeConnections(userId,
- * reason, scope)` closes the hub sockets carrying that session ID (or all of the user's) with close
- * code 4401 and calls `closeConnections` on every room in its registry, with the Worker-side fallback
- * that recomputes rooms from D1 (TDD §3.5, Platform §12).
- *
- * **The recheck plan (sessions that expire on their own).** better-auth fires no hook when a session
- * simply expires: it deletes the row, and fires the hook, only when the expired cookie is next
- * presented. So from M2 the UserHub's alarm (every 5 minutes, with the presence heartbeat) rechecks
- * each connected session's row and closes sockets whose row is gone **or whose `expires_at` is in the
- * past** (TDD §3.5). Revocations that bypass better-auth (raw SQL deletes) would skip the hook, so our
- * code revokes only through better-auth's internal adapter or `auth.api`.
+ * Every session deletion in better-auth (`databaseHooks.session.delete.after`) calls
+ * {@link closeSessionConnections}: sign-out, "My devices" revoke, "Sign out all other devices" and
+ * "Sign out everywhere". Disabling or deleting a user calls {@link closeAllUserConnections} with
+ * `scope: "all"`. Both invoke `UserHub.closeConnections` + the Worker-side D1 room-recomputation
+ * fallback, and notify any registered test listeners ({@link onRevocation}).
  */
 
-export type RevocationReason = "session_revoked";
-
-export type RevocationScope = { sessionId: string } | "all";
-
-export interface UserHubRevoker {
-  closeConnections(userId: string, reason: RevocationReason, scope: RevocationScope): Promise<void>;
-}
-
-export type RevocationListener = (userId: string, reason: RevocationReason, scope: RevocationScope) => void;
+export type RevocationScope = "all" | { sessionId: string };
+export type RevocationListener = (userId: string, reason: string, scope: RevocationScope) => void;
 
 const listeners = new Set<RevocationListener>();
 
-/** Observes revocations (tests). Returns an unsubscribe function. */
+/** Registers a listener (used by tests); returns a function that removes it. */
 export function onRevocation(listener: RevocationListener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
-/** The M1a stub: there are no sockets yet, so it records the call. */
-export function stubRevoker(log: Logger): UserHubRevoker {
-  return {
-    closeConnections(userId, reason, scope) {
-      log.info("revocation: close connections (stub until M2)", {
-        userId,
-        reason,
-        scope: scope === "all" ? "all" : "session",
-      });
-      for (const listener of listeners) listener(userId, reason, scope);
-      return Promise.resolve();
-    },
-  };
+/** Called when a session row is deleted: closes that session's sockets (`4401`) within 5 seconds. */
+export async function closeSessionConnections(
+  log: Logger,
+  userId: string,
+  sessionId: string,
+  env?: Pick<Env, "DB" | "USER_HUB">,
+): Promise<void> {
+  const scope: RevocationScope = { sessionId };
+  log.info("session revoked; closing connections", { userId, sessionId });
+  for (const listener of listeners) listener(userId, "session_revoked", scope);
+  if (env) {
+    await executeUserRevocation(env, log, userId, "session_revoked", scope);
+  }
 }
 
-/** Called for every deleted session row. Failures are logged, never thrown into better-auth. */
-export async function closeSessionConnections(log: Logger, userId: string, sessionId: string): Promise<void> {
-  try {
-    await stubRevoker(log).closeConnections(userId, "session_revoked", { sessionId });
-  } catch (error) {
-    log.error("revocation failed", { error, userId });
-  }
+/** Called when a user is disabled, deleted or signed out across all sessions (`scope: "all"`). */
+export async function closeAllUserConnections(
+  env: Pick<Env, "DB" | "USER_HUB">,
+  log: Logger,
+  userId: string,
+  reason: RevocationReason = "user_disabled",
+): Promise<void> {
+  const scope: RevocationScope = "all";
+  log.info("user revoked; closing all connections", { userId, reason });
+  for (const listener of listeners) listener(userId, reason, scope);
+  await executeUserRevocation(env, log, userId, reason, scope);
 }
