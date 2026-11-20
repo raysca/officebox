@@ -145,7 +145,12 @@ export function InvitationsPage() {
                       <td className="px-3 py-2">{invitation.invitedBy?.displayName ?? copy.formerMember}</td>
                       <td className="px-3 py-2">{format(invitation.lastSentAt ?? invitation.createdAt)}</td>
                       <td className="px-3 py-2">{format(invitation.expiresAt)}</td>
-                      <td className="px-3 py-2">{copy.status[invitation.status]}</td>
+                      <td className="px-3 py-2">
+                        {copy.status[invitation.status]}
+                        {invitation.needsNewLink ? (
+                          <span className="block text-sm text-danger">{copy.needsNewLink}</span>
+                        ) : null}
+                      </td>
                       <td className="px-3 py-2">
                         {invitation.status === "pending" ? (
                           <div className="flex flex-wrap gap-2">
@@ -204,15 +209,24 @@ export function InvitationsPage() {
   );
 }
 
-function LinkField({ link }: { link: string }) {
+/** A read-only link with a Copy button; shared with the recovery-link and domain-move dialogs (M1c). */
+export function LinkField({
+  link,
+  label = copy.linkLabel,
+  hint = copy.linkHint,
+}: {
+  link: string;
+  label?: string;
+  hint?: string;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [failed, setFailed] = useState(false);
   return (
     <div className="flex flex-col gap-2">
       <TextField
         ref={inputRef}
-        label={copy.linkLabel}
-        hint={copy.linkHint}
+        label={label}
+        hint={hint}
         value={link}
         readOnly
         onFocus={(e) => e.target.select()}

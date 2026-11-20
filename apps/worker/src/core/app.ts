@@ -77,6 +77,11 @@ export interface AppOptions {
   now?: () => number;
   /** Middleware for `/api/*`, run before CSRF and the features (identity's host guard). */
   apiMiddleware?: readonly MiddlewareHandler<AppEnv>[];
+  /**
+   * Middleware for page and asset requests that reach the Worker, run before they're handed to Assets
+   * (identity's old-host redirect after a domain move, M1c).
+   */
+  pageMiddleware?: readonly MiddlewareHandler<AppEnv>[];
 }
 
 export function createApp(options: AppOptions): Hono<AppEnv> {
@@ -143,10 +148,12 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
   app.all("/api/*", (c) => errorResponse(c, apiError("not_found", "No such endpoint.")));
   app.all("/ws/*", (c) => errorResponse(c, apiError("not_found", "No such endpoint.")));
 
-  // Static files and SPA navigations are served by Workers Assets before the Worker runs. Requests that
-  // reach the Worker anyway (for example a non-navigation request for a missing file) go back to Assets,
-  // which applies the SPA fallback.
-  // The response is copied so its headers are mutable for the middleware above.
+  // Pages and root files reach the Worker first (`run_worker_first` in wrangler.jsonc, from M1c, so the
+  // old host can redirect after a domain move); hashed build assets under /assets/ are served by Workers
+  // Assets directly. The page middleware runs, then the request goes back to Assets, which applies the
+  // SPA fallback. The response is copied so its headers are mutable for the middleware above.
+  // Registered after every API route and their 404s, so only requests nothing above answered reach it.
+  for (const middleware of options.pageMiddleware ?? []) app.use("*", middleware);
   app.all("*", async (c) => {
     const res = await c.env.ASSETS.fetch(c.req.raw);
     return new Response(res.body, res);

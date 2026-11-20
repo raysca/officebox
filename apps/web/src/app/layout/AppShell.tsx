@@ -9,7 +9,7 @@ import { messages } from "../messages";
 import { ReauthPrompt } from "../reauth";
 import { HealthStatus } from "./HealthStatus";
 import { NavList } from "./NavList";
-import { SecurityBanner } from "./SecurityBanner";
+import { OwnerRecoveryBanner, SecurityBanner } from "./SecurityBanner";
 import { ThemeSelect } from "./ThemeSelect";
 import { UserMenu } from "./UserMenu";
 
@@ -99,6 +99,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
         </nav>
 
         <div className="flex min-w-0 flex-1 flex-col">
+          <OwnerRecoveryBanner />
           <SecurityBanner />
           <main id={MAIN_ID} tabIndex={-1} className="flex-1 focus:outline-none">
             {children ?? <Outlet />}

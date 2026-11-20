@@ -8,12 +8,14 @@ import { publicStatusQuery, requestMagicLink } from "../../lib/api/onboarding";
 import { supportsPasskeys } from "../../lib/api/webauthn";
 import { Alert } from "../../lib/ui/Alert";
 import { Button } from "../../lib/ui/Button";
+import { Link } from "../../lib/ui/Link";
 import { TextField } from "../../lib/ui/TextField";
 import { describePasskeyFailure, emailError } from "../forms";
 import { PublicPage } from "../layout/PublicLayout";
 import { messages } from "../messages";
 
 const copy = messages.signIn;
+const resetDate = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 
 function hasUnsafeCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
@@ -43,7 +45,11 @@ export function safeRedirect(value: string | undefined, origin: string = window.
     url.pathname === "/setup" ||
     url.pathname === "/not-configured" ||
     url.pathname === "/sign-in/link" ||
-    url.pathname === "/invitations/accept"
+    url.pathname === "/invitations/accept" ||
+    url.pathname === "/auth/recover" ||
+    url.pathname === "/recover" ||
+    url.pathname === "/me/email/confirm" ||
+    url.pathname === "/admin/domain/complete"
   ) {
     return "/";
   }
@@ -151,9 +157,12 @@ export function SignInPage({ search }: { search: SignInSearch }) {
   const notice =
     search.reason === "signed-out" ? copy.signedOut : search.reason === "expired" ? copy.sessionEnded : null;
 
+  const recoveryNotice = status.data?.recoveryNotice;
+
   return (
     <PublicPage title={copy.title} description={copy.description}>
       {notice ? <Alert tone="info">{notice}</Alert> : null}
+      {recoveryNotice ? <Alert>{copy.adminReset(resetDate.format(new Date(recoveryNotice.at)))}</Alert> : null}
       {!supported ? <Alert>{messages.passkey.unsupported}</Alert> : null}
       {error ? <Alert>{error}</Alert> : null}
       <div>
@@ -169,6 +178,9 @@ export function SignInPage({ search }: { search: SignInSearch }) {
         </Button>
       </div>
       {status.data?.magicLinks ? <MagicLinkForm /> : null}
+      <p className="border-t border-border pt-6 text-sm text-muted">
+        {copy.lostPasskeys} <Link to="/recover">{copy.ownerRecoveryLink}</Link>.
+      </p>
     </PublicPage>
   );
 }

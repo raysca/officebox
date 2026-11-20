@@ -7,7 +7,7 @@ import { tokenHashKeyOrNull } from "../../core/keys";
 import { rootLogger } from "../../core/log";
 import type { Env } from "../../env";
 import { magicLinksAvailable } from "../email/config";
-import { timingSafeEqual, tokenHash } from "./crypto";
+import { recoveryTokenHashes, timingSafeEqual } from "./crypto";
 import { MIN_SECRET_BYTES } from "./secrets";
 
 /**
@@ -53,22 +53,35 @@ export function d1Facts(env: Env): PermissionFacts {
   };
 }
 
-/** `RECOVERY_TOKEN` is set (at least 32 characters) and its hash isn't in `recovery_token_uses` (Identity §4.6). */
-export async function recoveryTokenUnconsumed(env: Env): Promise<boolean> {
+/**
+ * The state of `RECOVERY_TOKEN` (Identity §4.6): `unset` (absent or shorter than 32 characters),
+ * `unconsumed`, or `consumed` (its hash is in `recovery_token_uses`).
+ */
+export async function recoveryTokenState(env: Env): Promise<"unset" | "unconsumed" | "consumed"> {
   const secret = env.RECOVERY_TOKEN;
-  if (!secret || [...secret].length < MIN_SECRET_BYTES) return false;
+  if (!secret || [...secret].length < MIN_SECRET_BYTES) return "unset";
   // The Worker secret, or the key the Worker generated (M1b-1).
+  // Uses are keyed by plain SHA-256 (M1c); older rows by HMAC(TOKEN_HASH_KEY), checked too when a key can
+  // be had, so nothing already used becomes usable again.
   const key = await tokenHashKeyOrNull(env, rootLogger);
-  if (!key) return false;
-  const hash = await tokenHash(key, secret);
+  const { hash, legacy } = await recoveryTokenHashes(key, secret);
   const rows = expectOk(
     await new Database(env.DB).all<{ token_hash: string }>("SELECT token_hash FROM recovery_token_uses"),
   );
-  const target = new TextEncoder().encode(hash);
+  const encoder = new TextEncoder();
+  const targets = [encoder.encode(hash), encoder.encode(legacy)];
   // Constant-time comparison against every recorded use.
   let used = false;
-  for (const row of rows) used = timingSafeEqual(target, new TextEncoder().encode(row.token_hash)) || used;
-  return !used;
+  for (const row of rows) {
+    const stored = encoder.encode(row.token_hash);
+    for (const target of targets) used = timingSafeEqual(target, stored) || used;
+  }
+  return used ? "consumed" : "unconsumed";
+}
+
+/** `RECOVERY_TOKEN` is set (at least 32 characters) and its hash isn't in `recovery_token_uses` (Identity §4.6). */
+export async function recoveryTokenUnconsumed(env: Env): Promise<boolean> {
+  return (await recoveryTokenState(env)) === "unconsumed";
 }
 
 /** The engine's actor for a signed-in request. */

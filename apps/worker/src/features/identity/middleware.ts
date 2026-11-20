@@ -13,7 +13,15 @@ import type { MiddlewareHandler } from "hono";
 import { coreContext, type AppContext, type AppEnv } from "../../core/context";
 import { errorResponse } from "../../core/errors";
 import { authFor, type Auth } from "./auth";
-import { claimed, loadInstallation, type ClaimedInstallation, type Installation } from "./installation";
+import {
+  activePendingMove,
+  claimed,
+  loadInstallation,
+  clearPageInstallationCache,
+  loadInstallationForPages,
+  type ClaimedInstallation,
+  type Installation,
+} from "./installation";
 import { currentStore, runWithStore, type RequestStore } from "./request-store";
 import { identitySecrets, type IdentitySecrets } from "./secrets";
 import { isSetupComplete } from "./setup-state";
@@ -27,6 +35,9 @@ import { isSetupComplete } from "./setup-state";
  *   host gets a 302 (GET/HEAD) or 307 to the same path and query on the canonical origin, built from
  *   the record (never from the request's host), with `Cache-Control: no-store`, never a 301; any other
  *   host is refused (404). Before setup is claimed there is no canonical origin and every host passes.
+ * - on a **pending domain move's new origin** (M1c), answers only the move-completion routes, marks the
+ *   request's store (`pendingMove`, so `identityServices` builds a better-auth instance for that origin)
+ *   and uses that origin for CSRF;
  * - sets `c.var.canonicalOrigin` for the CSRF check that follows.
  *
  * **`requireAuth`** guards every signed-in route: it reads the session through better-auth
@@ -71,11 +82,19 @@ export const identityApiMiddleware: MiddlewareHandler<AppEnv> = async (c, next) 
     if (canonical) {
       const url = new URL(c.req.url);
       if (url.origin !== canonical) {
-        if (installation?.allowedHosts.includes(url.host)) {
-          const target = new URL(url.pathname + url.search, canonical).toString();
-          const status = c.req.method === "GET" || c.req.method === "HEAD" ? 302 : 307;
-          return new Response(null, { status, headers: { Location: target, "Cache-Control": "no-store" } });
+        // A pending domain move's new origin answers only the move-completion routes (M1c; TDD §8.1),
+        // with that origin as the CSRF origin and a better-auth instance built for it.
+        const pending = activePendingMove(installation, c.var.now());
+        if (pending && url.origin === pending.origin) {
+          if (!PENDING_ORIGIN_ROUTES.has(`${c.req.method} ${url.pathname}`)) {
+            return errorResponse(c, apiError("not_found", "No such endpoint."));
+          }
+          store.pendingMove = { origin: pending.origin };
+          c.set("canonicalOrigin", pending.origin);
+          await next();
+          return;
         }
+        if (installation?.allowedHosts.includes(url.host)) return canonicalRedirect(c.req.method, url, canonical);
         c.var.log.warn("request on an unknown host refused");
         return errorResponse(c, apiError("not_found", "No such endpoint."));
       }
@@ -84,6 +103,83 @@ export const identityApiMiddleware: MiddlewareHandler<AppEnv> = async (c, next) 
     await next();
   });
 };
+
+/** The only routes a pending domain move's new origin answers (exact method and path; Identity §4.4). */
+const PENDING_ORIGIN_ROUTES: ReadonlySet<string> = new Set([
+  "POST /api/admin/domain/complete",
+  "GET /api/auth/passkey/generate-register-options",
+  "POST /api/auth/passkey/verify-registration",
+]);
+
+/**
+ * The old host's redirect after a domain move (and any other allowed host's): 302 for GET and HEAD,
+ * otherwise 307, to the same path and query on the canonical origin built from the installation record,
+ * never from the request's host; `no-store`, never a cacheable 301. Browsers keep the fragment.
+ */
+export function canonicalRedirect(method: string, url: URL, canonical: string): Response {
+  return new Response(null, {
+    status: method === "GET" || method === "HEAD" ? 302 : 307,
+    headers: { Location: canonicalTarget(url, canonical), "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * The redirect target: the canonical origin with only the request's path and query copied in. The path
+ * is assigned to a URL parsed from the canonical origin (never resolved as a relative reference, which
+ * would turn `//evil.example/x` or `/\evil.example` into another host), with any run of leading slashes
+ * or backslashes collapsed to one `/`. So the target's origin is always the canonical origin.
+ */
+export function canonicalTarget(url: URL, canonical: string): string {
+  const target = new URL(canonical);
+  target.pathname = `/${url.pathname.replace(/^[/\\]+/, "")}`;
+  target.search = url.search;
+  return target.toString();
+}
+
+/**
+ * The same redirect for page navigations (M1c): requests outside `/api`, `/ws` and `/health` reach the
+ * Worker first (`run_worker_first` in wrangler.jsonc; hashed build assets excepted), so after a domain
+ * move the old host's pages redirect too. Pages on the canonical host, on a pending move's origin and on
+ * hosts the installation doesn't know are served as before. When the installation can't be read (before
+ * migrations, or D1 is down) the page is served: the API reports the problem.
+ */
+export const identityPageMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
+  let installation: Installation | null;
+  try {
+    // Cached per isolate for 30 s (pages only; a commit clears it): page loads don't each cost a D1 read.
+    installation = await loadInstallationForPages(c.env.DB, c.var.now());
+  } catch (error) {
+    // Fail open for pages (the API reports the problem), but say so.
+    c.var.log.warn("installation unreadable for a page request; serving the page", { error });
+    await next();
+    return;
+  }
+  const url = new URL(c.req.url);
+  let target = pageRedirectTarget(installation, url, c.var.now());
+  if (target) {
+    // Never redirect on a cached row alone: an isolate that cached the row before a move would send the
+    // new origin back to the old one, which redirects forward again (a loop). Re-read, then decide.
+    try {
+      clearPageInstallationCache(c.env.DB);
+      installation = await loadInstallationForPages(c.env.DB, c.var.now());
+    } catch (error) {
+      c.var.log.warn("installation unreadable for a page request; serving the page", { error });
+      await next();
+      return;
+    }
+    target = pageRedirectTarget(installation, url, c.var.now());
+  }
+  if (target) return canonicalRedirect(c.req.method, url, target);
+  await next();
+};
+
+/** The canonical origin a page request should be redirected to, or null to serve it here. */
+function pageRedirectTarget(installation: Installation | null, url: URL, now: number): string | null {
+  const canonical = installation?.canonicalOrigin;
+  if (!canonical || url.origin === canonical) return null;
+  if (url.origin === activePendingMove(installation, now)?.origin) return null;
+  return installation?.allowedHosts.includes(url.host) ? canonical : null;
+}
 
 /** The installation loaded for this request by `identityApiMiddleware`. */
 export async function requestInstallation(c: AppContext): Promise<Installation | null> {
@@ -102,8 +198,11 @@ export interface IdentityServices {
 export async function identityServices(c: AppContext): Promise<Result<IdentityServices, ApiError>> {
   const secrets = await identitySecrets(c.env, c.var.log);
   if (!secrets.ok) return secrets;
-  const installation = claimed(await requestInstallation(c));
-  if (!installation) return err(apiError("setup_required", "This workspace hasn't been set up yet."));
+  const record = claimed(await requestInstallation(c));
+  if (!record) return err(apiError("setup_required", "This workspace hasn't been set up yet."));
+  // On a pending domain move's new origin: a second better-auth instance, for that origin (TDD §8.1).
+  const pending = currentStore()?.pendingMove;
+  const installation = pending ? { ...record, canonicalOrigin: pending.origin } : record;
   return ok({ secrets: secrets.value, installation, auth: authFor(c.env, secrets.value, installation) });
 }
 

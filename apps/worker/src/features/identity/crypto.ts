@@ -71,3 +71,15 @@ export function byteLength(value: string): number {
 export async function tokenHash(key: string, token: string): Promise<string> {
   return base64url(await hmacSha256(key, token));
 }
+
+/**
+ * How a used `RECOVERY_TOKEN` value is recorded: `hash` = base64url(SHA-256(value)), what new rows use;
+ * `legacy` = HMAC(TOKEN_HASH_KEY, value), what rows written before M1c's review fix would hold.
+ */
+export async function recoveryTokenHashes(
+  key: string | null,
+  secret: string,
+): Promise<{ hash: string; legacy: string }> {
+  const hash = `sha256:${base64url(await sha256(secret))}`;
+  return { hash, legacy: key ? await tokenHash(key, secret) : hash };
+}

@@ -6,7 +6,7 @@ import type { Env } from "./env";
 import { features } from "./features";
 import { emailQueueHandler } from "./features/email/delivery";
 import { IDENTITY_JOBS } from "./features/identity/jobs";
-import { identityApiMiddleware } from "./features/identity/middleware";
+import { identityApiMiddleware, identityPageMiddleware } from "./features/identity/middleware";
 import { REALTIME_JOBS } from "./features/realtime/jobs";
 
 export { WorkspacePresence } from "./features/realtime/presence-do";
@@ -21,7 +21,7 @@ const QUEUES: QueueRegistry = {
   queues: [{ queue: "officebox-email", deadLetter: (env) => env.EMAIL_DLQ, handlers: [emailQueueHandler()] }],
 };
 
-const app = createApp({ features, apiMiddleware: [identityApiMiddleware] });
+const app = createApp({ features, apiMiddleware: [identityApiMiddleware], pageMiddleware: [identityPageMiddleware] });
 const dispatchCron = createCronDispatcher(JOBS);
 const consumeQueue = createQueueConsumer(QUEUES);
 

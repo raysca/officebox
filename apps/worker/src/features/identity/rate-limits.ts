@@ -29,6 +29,29 @@ export const IDENTITY_LIMITS = {
     binding: "AUTH_RATE_LIMITER",
     periodSeconds: 60,
   }),
+  /** Recovery-link lookup and use: 5 per minute per IP (Platform §8; M1c). */
+  recovery: defineLimit({ mechanism: "binding", name: "recovery", binding: "AUTH_RATE_LIMITER", periodSeconds: 60 }),
+  /** Owner recovery with `RECOVERY_TOKEN` (`POST /recover`): 5 per minute per IP (Platform §8; M1c). */
+  ownerRecovery: defineLimit({
+    mechanism: "binding",
+    name: "owner_recovery",
+    binding: "AUTH_RATE_LIMITER",
+    periodSeconds: 60,
+  }),
+  /** Email-change confirmation lookup and POST: 5 per minute per IP (default, as the other links; M1c). */
+  emailConfirm: defineLimit({
+    mechanism: "binding",
+    name: "email_confirm",
+    binding: "AUTH_RATE_LIMITER",
+    periodSeconds: 60,
+  }),
+  /** The domain move link's POST on the new origin: 5 per minute per IP (default, as the other links; M1c). */
+  domainComplete: defineLimit({
+    mechanism: "binding",
+    name: "domain_complete",
+    binding: "AUTH_RATE_LIMITER",
+    periodSeconds: 60,
+  }),
   /** `GET /status/public`: 60 per minute per IP (Platform §8). */
   publicStatus: defineLimit({
     mechanism: "binding",
@@ -58,6 +81,22 @@ export function limitPasskeyIp(ctx: CoreContext, request: Request): Promise<Resu
 
 export function limitInvitation(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
   return checkLimit(ctx, IDENTITY_LIMITS.invitation, ipKey(request));
+}
+
+export function limitRecovery(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
+  return checkLimit(ctx, IDENTITY_LIMITS.recovery, ipKey(request));
+}
+
+export function limitOwnerRecovery(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
+  return checkLimit(ctx, IDENTITY_LIMITS.ownerRecovery, ipKey(request));
+}
+
+export function limitEmailConfirm(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
+  return checkLimit(ctx, IDENTITY_LIMITS.emailConfirm, ipKey(request));
+}
+
+export function limitDomainComplete(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {
+  return checkLimit(ctx, IDENTITY_LIMITS.domainComplete, ipKey(request));
 }
 
 export function limitPublicStatus(ctx: CoreContext, request: Request): Promise<Result<void, ApiError>> {

@@ -1,4 +1,9 @@
 import {
+  adminMemberListSchema,
+  domainStatusSchema,
+  emailChangeResultSchema,
+  recoveryLinkResultSchema,
+  startDomainMoveResultSchema,
   createInvitationResultSchema,
   invitationLinkSchema,
   invitationListSchema,
@@ -72,4 +77,56 @@ export async function resendInvitation(id: string) {
 
 export async function revokeInvitation(id: string) {
   return unwrap(await apiRequest(`/api/admin/invitations/${encodeURIComponent(id)}`, { method: "DELETE" }));
+}
+
+// ---- Members (M1c's subset: Identity §4.6, §4.11) ----------------------------------------------
+
+export const membersQueryKey = ["admin", "members"] as const;
+
+export const membersQuery = queryOptions({
+  queryKey: membersQueryKey,
+  queryFn: async ({ signal }) =>
+    unwrap(await apiRequest("/api/admin/members", { schema: adminMemberListSchema, signal })).members,
+});
+
+const memberPath = (id: string, rest = "") => `/api/admin/members/${encodeURIComponent(id)}${rest}`;
+
+/** Step-up first: the client asks for a passkey on `reauth_required` and retries. */
+export async function issueRecoveryLink(memberId: string) {
+  return unwrap(
+    await apiRequest(memberPath(memberId, "/recovery-link"), {
+      method: "POST",
+      body: {},
+      schema: recoveryLinkResultSchema,
+    }),
+  );
+}
+
+export async function changeMemberEmail({ id, email }: { id: string; email: string }) {
+  return unwrap(
+    await apiRequest(memberPath(id), { method: "PATCH", body: { email }, schema: emailChangeResultSchema }),
+  );
+}
+
+export async function acknowledgeReset(memberId: string) {
+  return unwrap(await apiRequest(memberPath(memberId, "/acknowledge-reset"), { method: "POST", body: {} }));
+}
+
+// ---- The domain move (M1c: Identity §4.4) ------------------------------------------------------
+
+export const domainQueryKey = ["admin", "domain"] as const;
+
+export const domainQuery = queryOptions({
+  queryKey: domainQueryKey,
+  queryFn: async ({ signal }) => unwrap(await apiRequest("/api/admin/domain", { schema: domainStatusSchema, signal })),
+});
+
+export async function startDomainMove(origin: string) {
+  return unwrap(
+    await apiRequest("/api/admin/domain", { method: "POST", body: { origin }, schema: startDomainMoveResultSchema }),
+  );
+}
+
+export async function cancelDomainMove() {
+  return unwrap(await apiRequest("/api/admin/domain/pending", { method: "DELETE" }));
 }

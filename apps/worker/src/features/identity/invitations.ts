@@ -101,11 +101,13 @@ interface InvitationRow {
   revoked_at: number | null;
   last_sent_at: number | null;
   created_at: number;
+  /** M1c: a committed domain move invalidated the link; copy again or resend makes a new one. */
+  origin_moved_at: number | null;
   inviter_name?: string | null;
 }
 
 const COLUMNS = `i.id, i.email, i.email_normalised, i.role, i.token_nonce, i.invited_by, i.expires_at, i.accepted_at,
-  i.accepted_by, i.accepted_attempt_id, i.revoked_at, i.last_sent_at, i.created_at`;
+  i.accepted_by, i.accepted_attempt_id, i.revoked_at, i.last_sent_at, i.created_at, i.origin_moved_at`;
 
 function roleOf(row: InvitationRow): InvitableRole {
   const parsed = invitableRoleSchema.safeParse(row.role);
@@ -128,6 +130,7 @@ function summary(row: InvitationRow, now: number): InvitationSummary {
     expiresAt: row.expires_at,
     lastSentAt: row.last_sent_at,
     status: statusOf(row, now),
+    needsNewLink: row.origin_moved_at !== null,
   };
 }
 
@@ -304,6 +307,31 @@ async function pendingInvitation(ctx: CoreContext, id: string): Promise<Result<I
   return ok(row);
 }
 
+/**
+ * The invitation's link token, making a new link first when a domain move invalidated the old one
+ * (M1c; Identity §4.4): a new nonce and hash, by compare-and-set on `origin_moved_at`. Otherwise the
+ * same link as before ("copy again" returns the same link, M1b default).
+ */
+async function currentToken(ctx: CoreContext, secrets: IdentitySecrets, row: InvitationRow): Promise<string> {
+  if (row.origin_moved_at === null) return invitationToken(secrets.tokenHashKey, row.token_nonce);
+  const nonce = randomToken(32);
+  const token = await invitationToken(secrets.tokenHashKey, nonce);
+  const updated = expectOk(
+    await new Database(ctx.env.DB).run(
+      `UPDATE invitations SET token_nonce = ?, token_hash = ?, origin_moved_at = NULL
+        WHERE id = ? AND origin_moved_at IS NOT NULL AND token_nonce = ?`,
+      nonce,
+      await tokenHash(secrets.tokenHashKey, token),
+      row.id,
+      row.token_nonce,
+    ),
+  );
+  if (updated.changes === 1) return token;
+  // A concurrent copy or resend made the new link first: use it.
+  const fresh = await loadById(ctx.env.DB, row.id);
+  return invitationToken(secrets.tokenHashKey, fresh?.token_nonce ?? row.token_nonce);
+}
+
 /** "Copy again": the same link, while the invitation is valid. Authorized by the route. */
 export async function copyInvitationLink(
   ctx: CoreContext,
@@ -313,7 +341,7 @@ export async function copyInvitationLink(
 ): Promise<Result<{ link: string }, ApiError>> {
   const row = await pendingInvitation(ctx, id);
   if (!row.ok) return row;
-  const token = await invitationToken(secrets.tokenHashKey, row.value.token_nonce);
+  const token = await currentToken(ctx, secrets, row.value);
   return ok({ link: invitationLink(installation.canonicalOrigin, token) });
 }
 
@@ -327,7 +355,7 @@ export async function resendInvitation(
 ): Promise<Result<{ email: InvitationEmailOutcome }, ApiError>> {
   const row = await pendingInvitation(ctx, id);
   if (!row.ok) return row;
-  const token = await invitationToken(secrets.tokenHashKey, row.value.token_nonce);
+  const token = await currentToken(ctx, secrets, row.value);
   const link = invitationLink(installation.canonicalOrigin, token);
   const outcome = await sendInvitationEmail(ctx, installation, row.value, link, await displayName(ctx.env.DB, actorId));
   const database = new Database(ctx.env.DB);

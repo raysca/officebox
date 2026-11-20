@@ -222,6 +222,12 @@ export const securityNoticeDetailsSchema = z.object({
   /** A new-device magic-link sign-in: the browser and system, and the approximate place (Identity §4.4). */
   deviceLabel: z.string().nullable().optional(),
   approxLocation: z.string().nullable().optional(),
+  /** Who acted (M1c): the admin or owner who issued a recovery link, changed an email or moved the domain. */
+  actorName: z.string().optional(),
+  /** An email change (M1c; Identity §4.11): the new address. */
+  newEmail: z.string().optional(),
+  /** A domain move (M1c; Identity §4.4): the new canonical origin. */
+  origin: z.string().optional(),
 });
 export type SecurityNoticeDetails = z.infer<typeof securityNoticeDetailsSchema>;
 
@@ -271,6 +277,11 @@ export const meSchema = z.object({
     freshAuthAt: z.number().int().nullable(),
     freshAuthMethod: z.enum(FRESH_AUTH_METHODS).nullable(),
   }),
+  /**
+   * Owners only (M1c; Identity §4.6): `RECOVERY_TOKEN` is still set although its value was used. Owners
+   * see a banner until the secret is deleted. Optional so an older Worker's answer still parses.
+   */
+  ownerRecoveryUsed: z.boolean().optional(),
 });
 export type Me = z.infer<typeof meSchema>;
 
@@ -385,6 +396,11 @@ export const invitationSummarySchema = z.object({
   expiresAt: z.number().int(),
   lastSentAt: z.number().int().nullable(),
   status: invitationStatusSchema,
+  /**
+   * M1c: the workspace moved to a new address after this link was made, so the old link no longer
+   * works (Identity §4.4). "Copy again" or "Resend" makes a new one. Optional for older Workers.
+   */
+  needsNewLink: z.boolean().optional(),
 });
 export type InvitationSummary = z.infer<typeof invitationSummarySchema>;
 
@@ -494,3 +510,181 @@ export function isInviteDomainAllowed(email: string, allowed: readonly string[])
   const domain = normaliseEmail(email.slice(at + 1));
   return allowed.includes(domain);
 }
+
+// ---- Recovery links and owner recovery (Identity §4.6, M1c) -----------------------------------
+
+/** Recovery links are single-use and valid for 24 hours (Identity §4.6, Platform §10). */
+export const RECOVERY_LINK_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** The minimum length of `RECOVERY_TOKEN`, in characters (Identity §4.6, Platform §16). */
+export const RECOVERY_TOKEN_MIN_LENGTH = 32;
+
+/** `POST /api/admin/members/:id/recovery-link`: the copy link (token in the fragment) and when it expires. */
+export const recoveryLinkResultSchema = z.object({
+  link: z.string(),
+  expiresAt: z.number().int(),
+  /** The person is told by email too (email configured), besides the banner list. */
+  notifiedByEmail: z.boolean(),
+  /** Email isn't configured: the member is flagged to every owner and warned on the sign-in page. */
+  flagged: z.boolean(),
+});
+export type RecoveryLinkResult = z.infer<typeof recoveryLinkResultSchema>;
+
+/** `POST /api/auth/recover/lookup` and `POST /api/auth/recover`: the link's token. */
+export const recoveryLinkBodySchema = z.strictObject({ token: linkTokenSchema });
+export type RecoveryLinkBody = z.infer<typeof recoveryLinkBodySchema>;
+
+/** What the recovery page shows before Continue: the account's email, prominently. */
+export const recoveryLookupSchema = z.object({ email: z.string(), workspaceName: z.string() });
+export type RecoveryLookup = z.infer<typeof recoveryLookupSchema>;
+
+/** The answer to using a recovery link or owner recovery: an enrolment ticket cookie is set. */
+export const recoveryEnrolmentSchema = z.object({
+  email: z.string(),
+  enrolmentExpiresInSeconds: z.number().int().positive(),
+});
+export type RecoveryEnrolment = z.infer<typeof recoveryEnrolmentSchema>;
+
+/** `POST /api/recover`: owner recovery with the `RECOVERY_TOKEN` secret, for one owner named by email. */
+export const ownerRecoveryBodySchema = z.strictObject({
+  token: z.string().min(1).max(1024),
+  email: emailSchema,
+});
+export type OwnerRecoveryBody = z.infer<typeof ownerRecoveryBodySchema>;
+
+// ---- Email change (Identity §4.11, M1c) -------------------------------------------------------
+
+/** Email-change confirmation links are single-use and valid for 24 hours (Platform §10). */
+export const EMAIL_CHANGE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * `PATCH /api/admin/members/:id`. M1c handles `email`; role and status changes arrive with M1e, which
+ * extends this schema.
+ */
+export const patchMemberBodySchema = z.strictObject({ email: emailSchema });
+export type PatchMemberBody = z.infer<typeof patchMemberBodySchema>;
+
+/**
+ * The outcome of an email change: `pending_confirmation` when email is configured (a confirmation link
+ * went to the new address), `changed` when it isn't (it takes effect at once).
+ */
+export const emailChangeResultSchema = z.object({
+  status: z.enum(["pending_confirmation", "changed"]),
+  email: z.string(),
+});
+export type EmailChangeResult = z.infer<typeof emailChangeResultSchema>;
+
+/** `POST /api/me/email/confirm/lookup` and `POST /api/me/email/confirm`. */
+export const emailChangeConfirmBodySchema = z.strictObject({ token: linkTokenSchema });
+export type EmailChangeConfirmBody = z.infer<typeof emailChangeConfirmBodySchema>;
+
+export const emailChangeLookupSchema = z.object({ newEmail: z.string(), workspaceName: z.string() });
+export type EmailChangeLookup = z.infer<typeof emailChangeLookupSchema>;
+
+export const emailChangeConfirmResultSchema = z.object({ email: z.string() });
+export type EmailChangeConfirmResult = z.infer<typeof emailChangeConfirmResultSchema>;
+
+// ---- Members for the admin area (Identity §4.6, §4.11; Admin §5; M1c's subset) ----------------
+
+export const adminMemberSchema = z.object({
+  id: ulidSchema,
+  email: z.string(),
+  displayName: z.string(),
+  handle: z.string().nullable(),
+  role: workspaceRoleSchema,
+  status: z.enum(["active", "disabled"]),
+  passkeyCount: z.number().int().nonnegative(),
+  /**
+   * Owners only: a recovery link was issued without email and no owner has acknowledged it yet
+   * (Identity §4.6). Always null for admins.
+   */
+  recoveryFlag: z.object({ at: z.number().int(), byName: z.string().nullable() }).nullable(),
+  /** An email change waiting for its confirmation link to be used. */
+  pendingEmail: z.string().nullable(),
+});
+export type AdminMember = z.infer<typeof adminMemberSchema>;
+
+export const adminMemberListSchema = z.object({ members: z.array(adminMemberSchema) });
+export type AdminMemberList = z.infer<typeof adminMemberListSchema>;
+
+// ---- Domain move (Identity §4.4, M1c) ---------------------------------------------------------
+
+/** A pending domain move expires 24 hours after it starts (Identity §2, default). */
+export const DOMAIN_MOVE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Whether a host name is a loopback name (`localhost`, `*.localhost`), where `http:` is allowed (local runs). */
+export function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/\.$/, "");
+  return h === "localhost" || h.endsWith(".localhost");
+}
+
+const ORIGIN_MESSAGE = "An address such as https://work.example.com, with nothing after it.";
+
+/**
+ * A new address for the workspace: an origin only (no path, query, fragment or credentials), `https:`
+ * (or `http:` on a loopback name, for local runs), with a domain name rather than an IP address, since a
+ * passkey's relying-party ID must be a domain **(default)**. Normalised to `URL.origin`.
+ */
+export const domainOriginSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(300)
+  .transform((value, ctx) => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      ctx.addIssue({ code: "custom", message: ORIGIN_MESSAGE });
+      return z.NEVER;
+    }
+    const loopback = isLoopbackHost(url.hostname);
+    const bare = url.pathname === "/" && url.search === "" && url.hash === "" && !/[?#]/.test(value);
+    const noCredentials = url.username === "" && url.password === "";
+    const secure = url.protocol === "https:" || (url.protocol === "http:" && loopback);
+    const ip = /^[0-9.]+$/.test(url.hostname) || url.hostname.startsWith("[");
+    const domain = loopback || url.hostname.includes(".");
+    if (!bare || !noCredentials || !secure || ip || !domain) {
+      ctx.addIssue({ code: "custom", message: ORIGIN_MESSAGE });
+      return z.NEVER;
+    }
+    return url.origin;
+  });
+
+/** `POST /api/admin/domain`. */
+export const startDomainMoveBodySchema = z.strictObject({ origin: domainOriginSchema });
+export type StartDomainMoveBody = z.infer<typeof startDomainMoveBodySchema>;
+
+/** The move link for the new origin, shown once to the owner who started the move. */
+export const startDomainMoveResultSchema = z.object({
+  origin: z.string(),
+  link: z.string(),
+  expiresAt: z.number().int(),
+});
+export type StartDomainMoveResult = z.infer<typeof startDomainMoveResultSchema>;
+
+/** `GET /api/admin/domain` (owners): the current address and any pending move. */
+export const domainStatusSchema = z.object({
+  canonicalOrigin: z.string(),
+  pending: z
+    .object({
+      origin: z.string(),
+      expiresAt: z.number().int(),
+      startedBy: z.object({ id: z.string(), displayName: z.string() }).nullable(),
+    })
+    .nullable(),
+});
+export type DomainStatus = z.infer<typeof domainStatusSchema>;
+
+/** `POST /api/admin/domain/complete`, on the new origin: the move link's token. */
+export const completeDomainMoveBodySchema = z.strictObject({ token: linkTokenSchema });
+export type CompleteDomainMoveBody = z.infer<typeof completeDomainMoveBodySchema>;
+
+/** The answer on the new origin: an enrolment ticket cookie is set; registering a passkey commits the move. */
+export const completeDomainMoveResultSchema = z.object({
+  email: z.string(),
+  origin: z.string(),
+  workspaceName: z.string(),
+  enrolmentExpiresInSeconds: z.number().int().positive(),
+});
+export type CompleteDomainMoveResult = z.infer<typeof completeDomainMoveResultSchema>;

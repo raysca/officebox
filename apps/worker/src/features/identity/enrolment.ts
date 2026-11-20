@@ -25,6 +25,10 @@ const payloadSchema = z.object({
   via: passkeyCreatedViaSchema,
   /** The setup claim nonce, when the ticket was issued by setup. */
   claim: z.string().nullable().default(null),
+  /** The recovery link's token hash, when a recovery link issued the ticket (M1c). */
+  recovery: z.string().nullable().default(null),
+  /** The domain move link's token hash, when the ticket was issued on a pending move's origin (M1c). */
+  move: z.string().nullable().default(null),
   challenge: z.string().optional(),
 });
 export type TicketPayload = z.infer<typeof payloadSchema>;
@@ -45,6 +49,12 @@ export interface IssuedTicket {
   expiresAt: number;
 }
 
+/** What issued a ticket (M1c): a recovery link or a domain move's link, by token hash. */
+export interface TicketLinks {
+  recovery?: string;
+  move?: string;
+}
+
 /** Issues a ticket for `userId`, revoking that user's other outstanding tickets. */
 export async function issueTicket(
   db: D1Database,
@@ -53,6 +63,7 @@ export async function issueTicket(
   via: PasskeyCreatedVia,
   claim: string | null,
   now: number,
+  links: TicketLinks = {},
 ): Promise<IssuedTicket> {
   const token = randomToken(32);
   const hash = await tokenHash(key, token);
@@ -71,7 +82,7 @@ export async function issueTicket(
          VALUES (?, ?, 'passkey_enrol', ?, ?, ?)`,
         hash,
         userId,
-        JSON.stringify({ via, claim }),
+        JSON.stringify({ via, claim, recovery: links.recovery ?? null, move: links.move ?? null }),
         expiresAt,
         now,
       ),

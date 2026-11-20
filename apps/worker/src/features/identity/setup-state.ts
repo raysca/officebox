@@ -1,6 +1,7 @@
 import { auditStatement } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk } from "../../core/db";
+import { clearPageInstallationCache } from "./installation";
 
 /**
  * Setup state (TDD §6.8): whether setup is complete, and completing it.
@@ -71,6 +72,7 @@ export async function completeSetupClaim(ctx: CoreContext, claim: string, ownerI
   const done = (result[0]?.changes ?? 0) === 1;
   if (done) {
     completed.add(ctx.env.DB);
+    clearPageInstallationCache(ctx.env.DB);
     ctx.log.info("first-run setup complete", { ownerId });
   }
   return done;

@@ -22,6 +22,11 @@ export interface RaisedNotice {
   kind: SecurityNoticeKind;
   details: SecurityNoticeDetails;
   at: number;
+  /**
+   * Send to this address instead of the person's current one: an email change notifies the **old**
+   * address (Identity §4.11; Notifications §3).
+   */
+  to?: string;
 }
 
 async function deliver(ctx: CoreContext, notices: readonly RaisedNotice[]): Promise<void> {
@@ -45,7 +50,7 @@ async function deliver(ctx: CoreContext, notices: readonly RaisedNotice[]): Prom
       at: notice.at,
       signInUrl: new URL("/sign-in", installation.canonicalOrigin).toString(),
     });
-    const queued = await enqueueEmail(ctx, { kind: "security_notice", to: user.email, ...rendered });
+    const queued = await enqueueEmail(ctx, { kind: "security_notice", to: notice.to ?? user.email, ...rendered });
     if (!queued.ok) ctx.log.warn("security notice email not queued", { userId: notice.userId, kind: notice.kind });
   }
 }
