@@ -32,12 +32,14 @@
   },
 
   // The React app (apps/web, built by `npm run build`). Navigations to unknown paths get index.html.
-  // /api/*, /ws/* and /health always run the Worker first, so the SPA fallback never answers them.
+  // Everything except the hashed build files under /assets/ runs the Worker first (M1c): /api/*, /ws/*
+  // and /health so the SPA fallback never answers them, and pages so that after an owner's domain move the
+  // old host redirects to the new one (Identity §4.4). The Worker hands pages back to Assets.
   "assets": {
     "directory": "apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/ws/*", "/health"]
+    "run_worker_first": ["/*", "!/assets/*"]
   },
 
   "observability": {

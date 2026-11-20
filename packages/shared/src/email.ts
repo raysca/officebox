@@ -106,7 +106,7 @@ export const sendTestEmailResultSchema = z.object({
 export type SendTestEmailResult = z.infer<typeof sendTestEmailResultSchema>;
 
 /** What an email is for: logged and counted, never the content (TDD §7.6). */
-export const EMAIL_KINDS = ["invitation", "magic_link", "security_notice", "test"] as const;
+export const EMAIL_KINDS = ["invitation", "magic_link", "security_notice", "email_change", "test"] as const;
 export const emailKindSchema = z.enum(EMAIL_KINDS);
 export type EmailKind = z.infer<typeof emailKindSchema>;
 
@@ -137,5 +137,10 @@ export type EmailSendMessage = z.infer<typeof emailSendMessage>;
 export const publicStatusSchema = z.object({
   /** "Email me a sign-in link" is offered: email configured and `magic_link_enabled` on. */
   magicLinks: z.boolean(),
+  /**
+   * M1c (Identity §4.6): an admin reset this browser's member's account with a recovery link, and the
+   * notice is still pending. Found from the known-device cookie **(default)**; absent otherwise.
+   */
+  recoveryNotice: z.object({ at: z.number().int() }).optional(),
 });
 export type PublicStatus = z.infer<typeof publicStatusSchema>;

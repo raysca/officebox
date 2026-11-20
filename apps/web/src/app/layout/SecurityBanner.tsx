@@ -20,7 +20,29 @@ function describe(notice: SecurityNotice): string {
     const device = [notice.details.deviceLabel, notice.details.approxLocation].filter(Boolean).join(", ");
     return copy.magic_link_new_device(device || null);
   }
+  if (notice.kind === "recovery_link_issued") return copy.recovery_link_issued(notice.details.actorName);
+  if (notice.kind === "recovery_link_used") return copy.recovery_link_used(notice.details.passkeyName);
+  if (notice.kind === "email_changed") return copy.email_changed(notice.details.newEmail, notice.details.actorName);
+  if (notice.kind === "owner_recovery_used") return copy.owner_recovery_used(notice.details.subjectName);
+  if (notice.kind === "domain_moved") return copy.domain_moved(notice.details.origin, notice.details.actorName);
   return copy.other;
+}
+
+/**
+ * Owners only (Identity §4.6): while a used `RECOVERY_TOKEN` is still set, a banner asks for the secret
+ * to be deleted. It goes away by itself once the secret is gone (nothing to acknowledge).
+ */
+export function OwnerRecoveryBanner() {
+  const me = useMe().data;
+  if (!me?.ownerRecoveryUsed) return null;
+  return (
+    <section
+      aria-label={messages.ownerRecovery.title}
+      className="border-b border-danger bg-danger-subtle px-4 py-3 text-sm text-fg sm:px-8"
+    >
+      <p>{copy.ownerRecoveryUsed}</p>
+    </section>
+  );
 }
 
 /**

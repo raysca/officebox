@@ -114,6 +114,14 @@ describe("CSRF on our routes and better-auth's (Identity §4.5; TDD §8.2)", () 
     ["POST", "/api/setup"],
     ["POST", "/api/me/reauth"],
     ["POST", "/api/me/sessions/sign-out-everywhere"],
+    // M1c
+    ["POST", "/api/auth/recover"],
+    ["POST", "/api/auth/recover/lookup"],
+    ["POST", "/api/recover"],
+    ["POST", "/api/me/email/confirm"],
+    ["POST", "/api/admin/domain"],
+    ["DELETE", "/api/admin/domain/pending"],
+    ["PATCH", `/api/admin/members/${"0".repeat(26)}`],
   ];
   for (const [method, path] of stateChanging) {
     it(`${method} ${path}: refused without the header, and with another Origin`, async () => {
@@ -237,6 +245,63 @@ describe("no response body or log line contains a session token (required test; 
       for (const body of bodies) expect(body).not.toContain(key);
       for (const line of lines) expect(line).not.toContain(key);
     }
+  });
+
+  it("sweeps the M1c flows: recovery link, owner recovery, email change (no session token, secret or link in logs)", async () => {
+    const lines: string[] = [];
+    const originals = { log: console.log, warn: console.warn, error: console.error, info: console.info };
+    const capture = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+    Object.assign(console, { log: capture, warn: capture, error: capture, info: capture });
+    const secret = `recovery-${crypto.randomUUID()}-${crypto.randomUUID()}`;
+    const browsers: Browser[] = [];
+    const linkTokens: string[] = [];
+    try {
+      const member = await addMember();
+      const issued = await ws.browser.json<{ link: string }>(`/api/admin/members/${member.id}/recovery-link`, {
+        body: {},
+      });
+      const recoveryToken = issued.body.link.split("#t=")[1]!;
+      linkTokens.push(recoveryToken);
+      const holder = new Browser();
+      browsers.push(holder);
+      await holder.json("/api/auth/recover/lookup", { body: { token: recoveryToken } });
+      await holder.json("/api/auth/recover", { body: { token: recoveryToken } });
+      await registerPasskey(holder, new SoftAuthenticator());
+      await holder.json("/api/me");
+
+      const owner = await addMember("owner");
+      const recovering = new Browser();
+      browsers.push(recovering);
+      await recovering.json("/api/recover", {
+        body: { token: secret, email: owner.email },
+        env: { RECOVERY_TOKEN: secret },
+      });
+      await registerPasskey(recovering, new SoftAuthenticator());
+
+      const target = await addMember();
+      await ws.browser.json(`/api/admin/members/${target.id}`, {
+        method: "PATCH",
+        body: { email: `changed-${crypto.randomUUID()}@officebox.test` },
+      });
+      await ws.browser.json("/api/admin/members");
+    } finally {
+      Object.assign(console, originals);
+    }
+    const bodies = browsers.flatMap((b) => b.bodies).concat(ws.browser.bodies);
+    const issuedTokens = new Set<string>(await sessionTokens());
+    for (const b of browsers) {
+      const value = b.cookies.get("__Host-officebox.session_token");
+      if (value) issuedTokens.add(decodeURIComponent(value).split(".")[0]!);
+    }
+    for (const token of issuedTokens) {
+      for (const body of bodies) expect(body).not.toContain(token);
+      for (const line of lines) expect(line).not.toContain(token);
+    }
+    for (const line of lines) {
+      expect(line).not.toContain(secret);
+      for (const token of linkTokens) expect(line).not.toContain(token);
+    }
+    for (const body of bodies) expect(body).not.toContain(secret);
   });
 
   it("the filter drops token keys and token-valued strings at any depth", () => {

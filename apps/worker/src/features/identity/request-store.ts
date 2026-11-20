@@ -33,6 +33,10 @@ export interface ConsumedTicket {
   via: PasskeyCreatedVia;
   /** The setup claim nonce, for setup completion (TDD §6.8). */
   claim: string | null;
+  /** The recovery link's token hash, marked used once its passkey is registered (M1c; Identity §4.6). */
+  recovery: string | null;
+  /** The domain move link's token hash: the move this registration commits (M1c; Identity §4.4). */
+  move: string | null;
 }
 
 export interface RequestStore {
@@ -64,6 +68,11 @@ export interface RequestStore {
   magicLinkConfirm?: { userId: string };
   /** Set by the session-create after hook: a session was created in this request (device cookie). */
   sessionCreated?: { userId: string; sessionId: string };
+  /**
+   * Set by the identity host guard on a request to a pending domain move's new origin (M1c; Identity
+   * §4.4): only the move-completion routes answer there, with a better-auth instance for that origin.
+   */
+  pendingMove?: { origin: string };
 }
 
 const storage = new AsyncLocalStorage<RequestStore>();

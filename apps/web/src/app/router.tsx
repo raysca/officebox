@@ -16,11 +16,16 @@ import { PublicLayout } from "./layout/PublicLayout";
 import { AcceptInvitationPage } from "./routes/accept-invitation";
 import { AdminPage } from "./routes/admin";
 import { DevicesPage } from "./routes/devices";
+import { DomainPage } from "./routes/domain";
+import { DomainCompletePage } from "./routes/domain-complete";
+import { EmailConfirmPage } from "./routes/email-confirm";
 import { InvitationsPage } from "./routes/invitations";
 import { MagicLinkPage } from "./routes/magic-link";
+import { MembersPage } from "./routes/members";
 import { CalendarPage, ChatPage, DocumentsPage, HomePage, NotFoundPage } from "./routes/pages";
 import { NotConfiguredPage } from "./routes/not-configured";
 import { PasskeysPage } from "./routes/passkeys";
+import { OwnerRecoverPage, RecoverPage } from "./routes/recover";
 import { SettingsPage } from "./routes/settings";
 import { SetupPage } from "./routes/setup";
 import { SignInPage, signInSearchSchema } from "./routes/sign-in";
@@ -86,6 +91,24 @@ const acceptInvitationRoute = createRoute({
   path: "/invitations/accept",
   component: AcceptInvitationPage,
 });
+// M1c: recovery links, the email-change confirmation and the domain move's commit step (fragment
+// pages), and owner recovery with RECOVERY_TOKEN (a form; no token in any link).
+const recoverRoute = createRoute({ getParentRoute: () => publicRoute, path: "/auth/recover", component: RecoverPage });
+const ownerRecoverRoute = createRoute({
+  getParentRoute: () => publicRoute,
+  path: "/recover",
+  component: OwnerRecoverPage,
+});
+const emailConfirmRoute = createRoute({
+  getParentRoute: () => publicRoute,
+  path: "/me/email/confirm",
+  component: EmailConfirmPage,
+});
+const domainCompleteRoute = createRoute({
+  getParentRoute: () => publicRoute,
+  path: "/admin/domain/complete",
+  component: DomainCompletePage,
+});
 
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -128,6 +151,12 @@ const adminSettingsRoute = createRoute({
   path: "/admin/settings",
   component: SettingsPage,
 });
+const adminMembersRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/admin/members",
+  component: MembersPage,
+});
+const adminDomainRoute = createRoute({ getParentRoute: () => appRoute, path: "/admin/domain", component: DomainPage });
 const devicesRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings/devices", component: DevicesPage });
 const passkeysRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -139,7 +168,17 @@ const passkeysRoute = createRoute({
 const notFoundRoute = createRoute({ getParentRoute: () => appRoute, path: "$", component: NotFoundPage });
 
 export const routeTree = rootRoute.addChildren([
-  publicRoute.addChildren([setupRoute, signInRoute, notConfiguredRoute, magicLinkRoute, acceptInvitationRoute]),
+  publicRoute.addChildren([
+    setupRoute,
+    signInRoute,
+    notConfiguredRoute,
+    magicLinkRoute,
+    acceptInvitationRoute,
+    recoverRoute,
+    ownerRecoverRoute,
+    emailConfirmRoute,
+    domainCompleteRoute,
+  ]),
   appRoute.addChildren([
     homeRoute,
     chatRoute,
@@ -148,6 +187,8 @@ export const routeTree = rootRoute.addChildren([
     adminRoute,
     adminInvitationsRoute,
     adminSettingsRoute,
+    adminMembersRoute,
+    adminDomainRoute,
     devicesRoute,
     passkeysRoute,
     notFoundRoute,

@@ -16,7 +16,9 @@ import { createKysely } from "./d1-kysely";
 import { approxLocation, deviceLabel } from "./device";
 import { bindChallenge, consumeTicket, findValidTicket, readTicketCookie } from "./enrolment";
 import type { ClaimedInstallation } from "./installation";
+import { commitDomainMove } from "./domain-move";
 import { issueMagicLink } from "./magic-link";
+import { markRecoveryLinkUsedStatement } from "./recovery";
 import { emailSecurityNotices, type RaisedNotice } from "./notice-email";
 import { noticeStatement } from "./notices";
 import { consumeRateLimit } from "./rate-limits";
@@ -211,6 +213,26 @@ async function signedInVia(env: Env, sessionId: string | undefined): Promise<Pas
   return row?.fresh_auth_method === "magic_link" ? "magic_link" : "signed_in";
 }
 
+/**
+ * Whether a ticket of this kind may register here (M1c): a domain-move ticket only on the pending
+ * move's new origin, and no other ticket there, so a move commits only by a registration on the new
+ * origin and the new origin registers nothing else.
+ */
+function ticketFitsOrigin(via: PasskeyCreatedVia): boolean {
+  return (via === "domain_move") === Boolean(currentStore()?.pendingMove);
+}
+
+/** Removes a passkey and session a registration just made, when what it was for can't happen any more. */
+async function undoRegistration(env: Env, passkeyId: string, sessionId: string | null): Promise<void> {
+  const database = new Database(env.DB);
+  expectOk(
+    await database.batchRun([
+      database.statement("DELETE FROM passkeys WHERE id = ?", passkeyId),
+      database.statement("DELETE FROM sessions WHERE id = ?", sessionId ?? ""),
+    ]),
+  );
+}
+
 /** After a successful registration: label the passkey, complete setup, raise the notice, audit. */
 async function afterRegistration(env: Env, passkeyId: string, userId: string, name: string | null): Promise<void> {
   const ctx = hookContext(env);
@@ -234,7 +256,23 @@ async function afterRegistration(env: Env, passkeyId: string, userId: string, na
   ];
   // Every addition raises a notice, except the first passkey at setup or acceptance (Identity §4.4).
   const raised: RaisedNotice[] = [];
-  if (via !== "setup" && via !== "invitation") {
+  if (ticket?.via === "recovery_link" && ticket.recovery) {
+    // The link is used now: opening it again answers 410 (Identity §4.6). The notice names the passkey.
+    statements.push(
+      markRecoveryLinkUsedStatement(database, ticket.recovery, userId, now),
+      await auditStatement(ctx, {
+        action: "auth.recovery_link_used",
+        actor: userId,
+        target: { type: "passkey", id: passkeyId },
+      }),
+    );
+    raised.push({
+      userId,
+      kind: "recovery_link_used",
+      details: { passkeyName: name, createdVia: via },
+      at: now,
+    });
+  } else if (via !== "setup" && via !== "invitation") {
     raised.push({ userId, kind: "passkey_added", details: { passkeyName: name, createdVia: via }, at: now });
   }
   statements.push(...raised.map((n) => noticeStatement(database, n.userId, n.kind, n.details, n.at)));
@@ -376,7 +414,8 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
             if (!raw) throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_REQUIRED", "An enrolment ticket is required.");
             const key = secrets.tokenHashKey;
             const ticket = await findValidTicket(env.DB, await tokenHash(key, raw), Date.now());
-            if (!ticket)
+            // A domain-move ticket works only on the pending origin, and only it does (M1c).
+            if (!ticket || !ticketFitsOrigin(ticket.payload.via))
               throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "The enrolment ticket isn't valid.");
             return { id: ticket.userId, name: ticket.email, displayName: ticket.displayName };
           },
@@ -398,9 +437,15 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
             const payload = challenge
               ? await consumeTicket(env.DB, mode.ticketHash, user.id, challenge, Date.now())
               : null;
-            if (!payload)
+            if (!payload || !ticketFitsOrigin(payload.via))
               throw apiError("UNAUTHORIZED", "ENROLMENT_TICKET_INVALID", "The enrolment ticket isn't valid.");
-            store.consumedTicket = { userId: user.id, via: payload.via, claim: payload.claim };
+            store.consumedTicket = {
+              userId: user.id,
+              via: payload.via,
+              claim: payload.claim,
+              recovery: payload.recovery,
+              move: payload.move,
+            };
           },
         },
         authentication: {
@@ -574,6 +619,30 @@ export function buildAuthOptions(env: Env, secrets: IdentitySecrets, installatio
         if (ctx.path === PATH_VERIFY_REGISTRATION) {
           const result = returnedObject(returned);
           if (result && typeof result.id === "string" && typeof result.userId === "string") {
+            // A domain move commits only on this registration on the new origin (M1c; Identity §4.4).
+            const store = currentStore();
+            const ticket = store?.consumedTicket;
+            if (ticket?.via === "domain_move") {
+              const committed =
+                ticket.move !== null && store?.pendingMove
+                  ? await commitDomainMove(hookContext(env), {
+                      moveHash: ticket.move,
+                      ownerId: result.userId,
+                      origin: store.pendingMove.origin,
+                      keepSessionId: store.sessionCreated?.sessionId ?? null,
+                    })
+                  : false;
+              if (!committed) {
+                // Cancelled, replaced or expired meanwhile: undo the passkey and session just made.
+                await undoRegistration(env, result.id, store?.sessionCreated?.sessionId ?? null);
+                if (store) store.sessionCreated = undefined;
+                throw apiError(
+                  "BAD_REQUEST",
+                  "DOMAIN_MOVE_INVALID",
+                  "This move can't be completed any more. Start it again from the current address.",
+                );
+              }
+            }
             await afterRegistration(
               env,
               result.id,

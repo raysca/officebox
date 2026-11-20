@@ -22,6 +22,14 @@ export interface Installation {
   setupClaim: string | null;
   setupClaimedAt: number | null;
   setupCompletedAt: number | null;
+  /** The two-step domain move (M1c; Identity §4.4): started, not yet committed. Null when none. */
+  pendingMove: PendingMove | null;
+}
+
+export interface PendingMove {
+  origin: string;
+  startedBy: string | null;
+  expiresAt: number;
 }
 
 interface InstallationRow {
@@ -31,6 +39,9 @@ interface InstallationRow {
   setup_claim: string | null;
   setup_claimed_at: number | null;
   setup_completed_at: number | null;
+  pending_origin: string | null;
+  pending_origin_started_by: string | null;
+  pending_origin_expires_at: number | null;
 }
 
 const hostListSchema = z.array(z.string());
@@ -49,7 +60,8 @@ function parseHosts(raw: string | null): string[] {
 export async function loadInstallation(db: D1Database): Promise<Installation | null> {
   const row = expectOk(
     await new Database(db).first<InstallationRow>(
-      `SELECT name, canonical_origin, allowed_hosts, setup_claim, setup_claimed_at, setup_completed_at
+      `SELECT name, canonical_origin, allowed_hosts, setup_claim, setup_claimed_at, setup_completed_at,
+              pending_origin, pending_origin_started_by, pending_origin_expires_at
          FROM installation WHERE id = 1`,
     ),
   );
@@ -61,7 +73,21 @@ export async function loadInstallation(db: D1Database): Promise<Installation | n
     setupClaim: row.setup_claim,
     setupClaimedAt: row.setup_claimed_at,
     setupCompletedAt: row.setup_completed_at,
+    pendingMove:
+      row.pending_origin && row.pending_origin_expires_at !== null
+        ? {
+            origin: row.pending_origin,
+            startedBy: row.pending_origin_started_by,
+            expiresAt: row.pending_origin_expires_at,
+          }
+        : null,
   };
+}
+
+/** The pending domain move, if one is waiting and hasn't expired at `now`. */
+export function activePendingMove(installation: Installation | null, now: number): PendingMove | null {
+  const pending = installation?.pendingMove ?? null;
+  return pending && pending.expiresAt > now ? pending : null;
 }
 
 /** An installation with a canonical origin: the shape better-auth is configured from. */

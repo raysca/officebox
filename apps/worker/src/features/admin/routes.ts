@@ -1,10 +1,13 @@
 import {
   apiError,
   can,
+  completeDomainMoveBodySchema,
   createInvitationBodySchema,
   err,
   ok,
+  patchMemberBodySchema,
   patchSettingBodySchema,
+  startDomainMoveBodySchema,
   sendTestEmailBodySchema,
   ulidSchema,
   type ApiError,
@@ -34,6 +37,13 @@ import {
   revokeInvitation,
 } from "../identity/invitations";
 import { identityServices, requireAuth } from "../identity/middleware";
+import { cancelDomainMove, domainStatus, openMoveLink, startDomainMove } from "../identity/domain-move";
+import { changeEmail } from "../identity/email-change";
+import { ticketCookie } from "../identity/enrolment";
+import { acknowledgeReset, listAdminMembers } from "../identity/members-admin";
+import { limitDomainComplete } from "../identity/rate-limits";
+import { issueRecoveryLink } from "../identity/recovery";
+import { currentStore } from "../identity/request-store";
 
 /**
  * The admin area's M1b endpoints (Admin §3, §6, §17; Platform §15; Identity §6), under `/api/admin`.
@@ -70,8 +80,111 @@ async function roleFor(c: AppContext, id: string) {
   return role ? ok(role) : err(NOT_FOUND);
 }
 
+/** The member an admin route acts on: a ULID, or 404 before any fact is loaded. */
+function memberId(c: AppContext): string | null {
+  const id = c.req.param("id");
+  return id && ulidSchema.safeParse(id).success ? id : null;
+}
+
+const NO_MEMBER: ApiError = apiError("not_found", "No such member.");
+
 const adminRoutes = new Hono<AppEnv>()
+  // The domain move's commit step, on the **new** origin (M1c; Identity §4.4): public there (the move
+  // link is the proof; cookies are per host, so there's no session yet). The host guard lets the pending
+  // origin answer only this and the passkey registration routes. Registered before `requireAuth`.
+  .post("/domain/complete", async (c) => {
+    const ctx = coreContext(c);
+    const pending = currentStore()?.pendingMove;
+    if (!pending) return respond(c, err(apiError("not_found", "No such endpoint.")));
+    const limited = await limitDomainComplete(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, completeDomainMoveBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const result = await openMoveLink(ctx, services.value.secrets, pending.origin, body.value.token);
+    if (!result.ok) return respond(c, result);
+    const now = c.var.now();
+    c.header("Set-Cookie", ticketCookie(result.value.ticket, now), { append: true });
+    return respond(
+      c,
+      ok({
+        email: result.value.email,
+        origin: pending.origin,
+        workspaceName: result.value.workspaceName,
+        enrolmentExpiresInSeconds: Math.max(1, Math.floor((result.value.ticket.expiresAt - now) / 1000)),
+      }),
+      201,
+    );
+  })
   .use(requireAuth)
+  // ---- Members (M1c's subset: list, recovery links, email changes, the owners' reset flag) ----
+  .get("/members", async (c) => {
+    const me = authOf(c);
+    const allowed = await authorize(permissionContext(c, me), { action: "admin.members.view" });
+    if (!allowed.ok) return respond(c, allowed);
+    return respond(c, ok({ members: await listAdminMembers(coreContext(c), me.role) }));
+  })
+  .post("/members/:id/recovery-link", async (c) => {
+    const me = authOf(c);
+    const id = memberId(c);
+    // Fact-free first: a member learns nothing, not even whether the ID exists.
+    const view = await authorize(permissionContext(c, me), { action: "admin.members.view" });
+    if (!view.ok) return respond(c, view);
+    if (!id) return respond(c, err(NO_MEMBER));
+    // Admins for members only; owners for anyone; step-up (Identity §4.6; Permissions §6).
+    const allowed = await authorize(permissionContext(c, me), { action: "member.issue_recovery_link", targetId: id });
+    if (!allowed.ok) return respond(c, allowed);
+    const { secrets, installation } = await services(c);
+    return respond(c, await issueRecoveryLink(coreContext(c), secrets, installation, me.userId, id), 201);
+  })
+  .patch("/members/:id", async (c) => {
+    const me = authOf(c);
+    const id = memberId(c);
+    const view = await authorize(permissionContext(c, me), { action: "admin.members.view" });
+    if (!view.ok) return respond(c, view);
+    if (!id) return respond(c, err(NO_MEMBER));
+    const body = await readJson(c, patchMemberBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    // Admins for members only; owners for anyone; step-up (Identity §4.11; Permissions §6).
+    const allowed = await authorize(permissionContext(c, me), { action: "member.change_email", targetId: id });
+    if (!allowed.ok) return respond(c, allowed);
+    const { secrets, installation } = await services(c);
+    return respond(c, await changeEmail(coreContext(c), secrets, installation, me.userId, id, body.value.email));
+  })
+  .post("/members/:id/acknowledge-reset", async (c) => {
+    const me = authOf(c);
+    const id = memberId(c);
+    const allowed = await authorize(permissionContext(c, me), { action: "member.acknowledge_reset" });
+    if (!allowed.ok) return respond(c, allowed);
+    if (!id) return respond(c, err(NO_MEMBER));
+    return respond(c, await acknowledgeReset(coreContext(c), me.userId, id));
+  })
+  // ---- The domain move (M1c; Identity §4.4): owners ----
+  .get("/domain", async (c) => {
+    const me = authOf(c);
+    const allowed = await authorize(permissionContext(c, me), { action: "domain.view" });
+    if (!allowed.ok) return respond(c, allowed);
+    return respond(c, await domainStatus(coreContext(c)));
+  })
+  .post("/domain", async (c) => {
+    const me = authOf(c);
+    // The role first, so a member or admin learns nothing and isn't asked for a passkey.
+    const view = await authorize(permissionContext(c, me), { action: "domain.view" });
+    if (!view.ok) return respond(c, view);
+    const body = await readJson(c, startDomainMoveBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const allowed = await authorize(permissionContext(c, me), { action: "domain.move_start" });
+    if (!allowed.ok) return respond(c, allowed);
+    const { secrets } = await services(c);
+    return respond(c, await startDomainMove(coreContext(c), secrets, me.userId, body.value.origin), 201);
+  })
+  .delete("/domain/pending", async (c) => {
+    const me = authOf(c);
+    const allowed = await authorize(permissionContext(c, me), { action: "domain.move_cancel" });
+    if (!allowed.ok) return respond(c, allowed);
+    return respond(c, await cancelDomainMove(coreContext(c), me.userId));
+  })
   .get("/settings", async (c) => {
     const me = authOf(c);
     const allowed = await authorize(permissionContext(c, me), { action: "admin.settings.view" });

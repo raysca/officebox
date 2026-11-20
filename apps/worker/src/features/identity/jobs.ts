@@ -1,6 +1,7 @@
 import { defineJob, type CronJob } from "../../core/cron";
 import { Database, expectOk } from "../../core/db";
 import { pruneCounterEventsStatement } from "./counters";
+import { expirePendingMove } from "./domain-move";
 import { repairInvitations } from "./invitations";
 import { DEVICE_RETENTION_MS } from "./known-devices";
 import { expireStaleClaim, observeReleaseIfMarked, repairSetup } from "./setup";
@@ -14,7 +15,8 @@ const EMAIL_DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
  * - **identity.repair** (hourly): the setup half of the repair job (TDD §6.8): completes setup when the
  *   claimed owner has a passkey but completion didn't run, and releases a claim that expired 24 hours
  *   after it was made, in one conditional batch. The invitation half rolls partial accepts forward or
- *   releases them, never resurrecting a consumed invitation (`repairInvitations`, M1b).
+ *   releases them, never resurrecting a consumed invitation (`repairInvitations`, M1b). It also clears
+ *   a pending domain move 24 hours after it started and audits it (`expirePendingMove`, M1c).
  * - **identity.prune** (daily): deletes expired sessions (better-auth deletes them lazily, only when the
  *   cookie is presented again), expired WebAuthn challenges and spent or expired enrolment tickets.
  *   Expired sessions are deleted by SQL here: their sockets were already closed by the UserHub's
@@ -29,8 +31,10 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
       const released = await expireStaleClaim(ctx);
       // A release made with scripts/setup-release.sql is audited by whichever observer comes first (M1b-1).
       const releasedOutsideApp = await observeReleaseIfMarked(ctx);
-      if (completed || released || releasedOutsideApp) {
-        ctx.log.info("identity repair", { completed, released, releasedOutsideApp });
+      // A pending domain move expires 24 hours after it started (M1c; Identity §4.4), audited once.
+      const moveExpired = await expirePendingMove(ctx);
+      if (completed || released || releasedOutsideApp || moveExpired) {
+        ctx.log.info("identity repair", { completed, released, releasedOutsideApp, moveExpired });
       }
       await repairInvitations(ctx);
     },
@@ -65,6 +69,11 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
           db.statement("DELETE FROM email_deliveries WHERE created_at < ?", now - EMAIL_DELIVERY_RETENTION_MS),
           // Setup resume codes a day after they expire (M1b-1); completion already revoked them.
           db.statement("DELETE FROM auth_tokens WHERE kind = 'setup_resume' AND expires_at < ?", now - day),
+          // Recovery links, email-change links and domain-move links a day after they expire (M1c, default).
+          db.statement(
+            "DELETE FROM auth_tokens WHERE kind IN ('recovery', 'email_change', 'domain_move') AND expires_at < ?",
+            now - day,
+          ),
         ]),
       );
       ctx.log.info("pruned identity rows", {
@@ -76,6 +85,7 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
         invitations: result[6]?.changes ?? 0,
         emailDeliveries: result[7]?.changes ?? 0,
         setupResumeCodes: result[8]?.changes ?? 0,
+        links: result[9]?.changes ?? 0,
       });
     },
   }),

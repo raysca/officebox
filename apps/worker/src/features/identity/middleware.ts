@@ -13,7 +13,13 @@ import type { MiddlewareHandler } from "hono";
 import { coreContext, type AppContext, type AppEnv } from "../../core/context";
 import { errorResponse } from "../../core/errors";
 import { authFor, type Auth } from "./auth";
-import { claimed, loadInstallation, type ClaimedInstallation, type Installation } from "./installation";
+import {
+  activePendingMove,
+  claimed,
+  loadInstallation,
+  type ClaimedInstallation,
+  type Installation,
+} from "./installation";
 import { currentStore, runWithStore, type RequestStore } from "./request-store";
 import { identitySecrets, type IdentitySecrets } from "./secrets";
 import { isSetupComplete } from "./setup-state";
@@ -71,11 +77,19 @@ export const identityApiMiddleware: MiddlewareHandler<AppEnv> = async (c, next) 
     if (canonical) {
       const url = new URL(c.req.url);
       if (url.origin !== canonical) {
-        if (installation?.allowedHosts.includes(url.host)) {
-          const target = new URL(url.pathname + url.search, canonical).toString();
-          const status = c.req.method === "GET" || c.req.method === "HEAD" ? 302 : 307;
-          return new Response(null, { status, headers: { Location: target, "Cache-Control": "no-store" } });
+        // A pending domain move's new origin answers only the move-completion routes (M1c; TDD §8.1),
+        // with that origin as the CSRF origin and a better-auth instance built for it.
+        const pending = activePendingMove(installation, c.var.now());
+        if (pending && url.origin === pending.origin) {
+          if (!PENDING_ORIGIN_ROUTES.has(`${c.req.method} ${url.pathname}`)) {
+            return errorResponse(c, apiError("not_found", "No such endpoint."));
+          }
+          store.pendingMove = { origin: pending.origin };
+          c.set("canonicalOrigin", pending.origin);
+          await next();
+          return;
         }
+        if (installation?.allowedHosts.includes(url.host)) return canonicalRedirect(c.req.method, url, canonical);
         c.var.log.warn("request on an unknown host refused");
         return errorResponse(c, apiError("not_found", "No such endpoint."));
       }
@@ -83,6 +97,50 @@ export const identityApiMiddleware: MiddlewareHandler<AppEnv> = async (c, next) 
     }
     await next();
   });
+};
+
+/** The only routes a pending domain move's new origin answers (exact method and path; Identity §4.4). */
+const PENDING_ORIGIN_ROUTES: ReadonlySet<string> = new Set([
+  "POST /api/admin/domain/complete",
+  "GET /api/auth/passkey/generate-register-options",
+  "POST /api/auth/passkey/verify-registration",
+]);
+
+/**
+ * The old host's redirect after a domain move (and any other allowed host's): 302 for GET and HEAD,
+ * otherwise 307, to the same path and query on the canonical origin built from the installation record,
+ * never from the request's host; `no-store`, never a cacheable 301. Browsers keep the fragment.
+ */
+function canonicalRedirect(method: string, url: URL, canonical: string): Response {
+  const target = new URL(url.pathname + url.search, canonical).toString();
+  const status = method === "GET" || method === "HEAD" ? 302 : 307;
+  return new Response(null, { status, headers: { Location: target, "Cache-Control": "no-store" } });
+}
+
+/**
+ * The same redirect for page navigations (M1c): requests outside `/api`, `/ws` and `/health` reach the
+ * Worker first (`run_worker_first` in wrangler.jsonc; hashed build assets excepted), so after a domain
+ * move the old host's pages redirect too. Pages on the canonical host, on a pending move's origin and on
+ * hosts the installation doesn't know are served as before. When the installation can't be read (before
+ * migrations, or D1 is down) the page is served: the API reports the problem.
+ */
+export const identityPageMiddleware: MiddlewareHandler<AppEnv> = async (c, next) => {
+  let installation: Installation | null;
+  try {
+    installation = await loadInstallation(c.env.DB);
+  } catch {
+    await next();
+    return;
+  }
+  const canonical = installation?.canonicalOrigin;
+  if (canonical) {
+    const url = new URL(c.req.url);
+    const pending = activePendingMove(installation, c.var.now());
+    if (url.origin !== canonical && url.origin !== pending?.origin && installation?.allowedHosts.includes(url.host)) {
+      return canonicalRedirect(c.req.method, url, canonical);
+    }
+  }
+  await next();
 };
 
 /** The installation loaded for this request by `identityApiMiddleware`. */
@@ -102,8 +160,11 @@ export interface IdentityServices {
 export async function identityServices(c: AppContext): Promise<Result<IdentityServices, ApiError>> {
   const secrets = await identitySecrets(c.env, c.var.log);
   if (!secrets.ok) return secrets;
-  const installation = claimed(await requestInstallation(c));
-  if (!installation) return err(apiError("setup_required", "This workspace hasn't been set up yet."));
+  const record = claimed(await requestInstallation(c));
+  if (!record) return err(apiError("setup_required", "This workspace hasn't been set up yet."));
+  // On a pending domain move's new origin: a second better-auth instance, for that origin (TDD §8.1).
+  const pending = currentStore()?.pendingMove;
+  const installation = pending ? { ...record, canonicalOrigin: pending.origin } : record;
   return ok({ secrets: secrets.value, installation, auth: authFor(c.env, secrets.value, installation) });
 }
 

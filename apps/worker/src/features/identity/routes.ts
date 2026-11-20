@@ -2,12 +2,15 @@ import {
   acceptInvitationBodySchema,
   ackSecurityNoticesBodySchema,
   apiError,
+  emailChangeConfirmBodySchema,
   err,
   invitationLookupBodySchema,
   magicLinkConfirmBodySchema,
   magicLinkRequestBodySchema,
   ok,
+  ownerRecoveryBodySchema,
   reauthBodySchema,
+  recoveryLinkBodySchema,
   renamePasskeyBodySchema,
   setupBodySchema,
   setupResumeBodySchema,
@@ -37,21 +40,34 @@ import { SESSION_COOKIE } from "./auth";
 import { tokenHash } from "./crypto";
 import { listDevices, signOutDevice, signOutEverywhere, signOutOthers } from "./devices";
 import { CLEAR_TICKET_COOKIE, readTicketCookie, ticketCookie } from "./enrolment";
-import { permissionContext } from "./facts";
+import { permissionContext, recoveryTokenState } from "./facts";
 import { getMe } from "./me";
 import { forwardSetCookies, identityServices, loadSession, requireAuth } from "./middleware";
 import { acknowledgeNotices, listNotices } from "./notices";
 import { listPasskeys, removePasskey, renamePasskey } from "./passkeys";
 import {
   ipKey,
+  limitEmailConfirm,
   limitInvitation,
+  limitOwnerRecovery,
   limitPasskeyIp,
   limitPublicStatus,
   limitReauth,
+  limitRecovery,
   limitSetup,
   limitSetupStatus,
 } from "./rate-limits";
 import { reauthenticate, reauthOptions } from "./reauth";
+import {
+  lookupRecoveryLink,
+  RECOVERY_TOKEN_NOT_SET,
+  recoverOwner,
+  recoveryTokenSet,
+  signInRecoveryNotice,
+  useRecoveryLink,
+  type RecoveryEnrolmentOutcome,
+} from "./recovery";
+import { confirmEmailChange, lookupEmailChange } from "./email-change";
 import { currentStore } from "./request-store";
 import { filterAuthResponse } from "./token-filter";
 import { identitySecrets } from "./secrets";
@@ -187,8 +203,45 @@ async function withBody(
   return new Request(request.url, { method: request.method, headers, body: JSON.stringify(copy) });
 }
 
+/** An enrolment ticket cookie and the answer for the passkey step that follows (recovery, owner recovery). */
+function recoveryEnrolmentResponse(c: AppContext, outcome: RecoveryEnrolmentOutcome) {
+  const now = c.var.now();
+  c.header("Set-Cookie", ticketCookie(outcome.ticket, now), { append: true });
+  return respond(
+    c,
+    ok({
+      email: outcome.email,
+      enrolmentExpiresInSeconds: Math.max(1, Math.floor((outcome.ticket.expiresAt - now) / 1000)),
+    }),
+    201,
+  );
+}
+
 const authRoutes = new Hono<AppEnv>()
   .post("/ws-ticket", requireAuth, (c) => handleIssueWsTicket(c))
+  // Recovery links (M1c; Identity §4.6): ours, registered ahead of the better-auth mount.
+  .post("/recover/lookup", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await limitRecovery(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, recoveryLinkBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, installation } = services.value;
+    return respond(c, await lookupRecoveryLink(ctx, secrets, installation, body.value.token));
+  })
+  .post("/recover", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await limitRecovery(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, recoveryLinkBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const result = await useRecoveryLink(ctx, services.value.secrets, body.value.token);
+    return result.ok ? recoveryEnrolmentResponse(c, result.value) : respond(c, result);
+  })
   .all("/*", async (c) => {
     const url = new URL(c.req.url);
     const path = url.pathname;
@@ -241,7 +294,10 @@ const authRoutes = new Hono<AppEnv>()
     const store = currentStore();
     if (isRegistrationRoute(path)) {
       const isVerify = path.endsWith("/verify-registration");
-      const session = await loadSession(c, { forward: false, setCookies: extraCookies });
+      // On a pending domain move's new origin only an enrolment ticket registers (M1c): no session there.
+      const session = store?.pendingMove
+        ? err(apiError("unauthenticated", "Sign in to continue."))
+        : await loadSession(c, { forward: false, setCookies: extraCookies });
       if (session.ok) {
         // A signed-in member adding a passkey: step-up, through the engine (Identity §4.5).
         const me = authOf(c);
@@ -275,6 +331,9 @@ const authRoutes = new Hono<AppEnv>()
       }
     }
 
+    // On a pending move's new origin better-auth never sees a session cookie (M1c): only the move's
+    // enrolment ticket registers there, so a session can't stand in for it.
+    if (store?.pendingMove) request = withoutSessionCookie(request);
     const response = await auth.handler(request);
     if (store?.consumedTicket && response.ok) extraCookies.push(CLEAR_TICKET_COOKIE);
     // The known-device cookie is set on every sign-in, passkey ones included (Identity §4.4), so a later
@@ -311,6 +370,20 @@ const authRoutes = new Hono<AppEnv>()
     return new Response(filtered.body, { status: filtered.status, headers });
   });
 
+/** The request without the session cookie (every other cookie kept). */
+function withoutSessionCookie(request: Request): Request {
+  const cookie = request.headers.get("cookie");
+  if (!cookie) return request;
+  const kept = cookie
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part !== "" && part.split("=")[0] !== SESSION_COOKIE);
+  const headers = new Headers(request.headers);
+  if (kept.length > 0) headers.set("cookie", kept.join("; "));
+  else headers.delete("cookie");
+  return new Request(request, { headers });
+}
+
 async function userExists(c: AppContext, userId: string): Promise<boolean> {
   return (await c.env.DB.prepare("SELECT 1 AS one FROM users WHERE id = ?").bind(userId).first()) !== null;
 }
@@ -325,10 +398,37 @@ function services(c: AppContext) {
 }
 
 const meRoutes = new Hono<AppEnv>()
+  // The email-change confirmation page's POSTs (M1c; Identity §4.11): public, the token is the proof.
+  // Registered before `requireAuth`, which applies only to the routes after it.
+  .post("/email/confirm/lookup", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await limitEmailConfirm(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, emailChangeConfirmBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    const { secrets, installation } = services.value;
+    return respond(c, await lookupEmailChange(ctx, secrets, installation, body.value.token));
+  })
+  .post("/email/confirm", async (c) => {
+    const ctx = coreContext(c);
+    const limited = await limitEmailConfirm(ctx, c.req.raw);
+    if (!limited.ok) return respond(c, limited);
+    const body = await readJson(c, emailChangeConfirmBodySchema, SMALL_BODY);
+    if (!body.ok) return respond(c, body);
+    const services = await identityServices(c);
+    if (!services.ok) return respond(c, services);
+    return respond(c, await confirmEmailChange(ctx, services.value.secrets, body.value.token));
+  })
   .use(requireAuth)
   .get("/", async (c) => {
     const { installation } = await services(c);
-    return respond(c, await getMe(coreContext(c), authOf(c), installation));
+    const me = authOf(c);
+    const result = await getMe(coreContext(c), me, installation);
+    if (!result.ok || me.role !== "owner") return respond(c, result);
+    // Owners see a banner while a used RECOVERY_TOKEN is still set (Identity §4.6).
+    return respond(c, ok({ ...result.value, ownerRecoveryUsed: (await recoveryTokenState(c.env)) === "consumed" }));
   })
   .get("/sessions", async (c) => {
     const me = authOf(c);
@@ -493,10 +593,34 @@ const statusRoutes = new Hono<AppEnv>().get("/public", async (c) => {
   const limited = await limitPublicStatus(ctx, c.req.raw);
   if (!limited.ok) return respond(c, limited);
   const status: PublicStatus = { magicLinks: await magicLinksAvailable(ctx) };
+  // The sign-in page's "An admin reset your account" notice, for this browser's member (M1c; §4.6).
+  const services = await identityServices(c);
+  if (services.ok) {
+    const notice = await signInRecoveryNotice(c.env.DB, services.value.secrets.tokenHashKey, c.req.raw.headers);
+    if (notice) status.recoveryNotice = notice;
+  }
   // Cacheable for 30 seconds by the browser only (TDD §8.2 keeps API responses out of shared caches).
   return c.json(status, 200, { "Cache-Control": "private, max-age=30" });
 });
 
+// ---- /api/recover: owner recovery with RECOVERY_TOKEN (Identity §4.6, M1c) ------------------------
+
+const recoverRoutes = new Hono<AppEnv>().post("/", async (c) => {
+  // Without the secret there's nothing here (Identity §9: 404).
+  if (!recoveryTokenSet(c.env)) return respond(c, err(RECOVERY_TOKEN_NOT_SET));
+  const ctx = coreContext(c);
+  // Per IP, before the secret is compared (Platform §8: 5 a minute).
+  const limited = await limitOwnerRecovery(ctx, c.req.raw);
+  if (!limited.ok) return respond(c, limited);
+  const body = await readJson(c, ownerRecoveryBodySchema, SMALL_BODY);
+  if (!body.ok) return respond(c, body);
+  const services = await identityServices(c);
+  if (!services.ok) return respond(c, services);
+  const result = await recoverOwner(ctx, services.value.secrets, body.value);
+  return result.ok ? recoveryEnrolmentResponse(c, result.value) : respond(c, result);
+});
+
+export const recoverFeature = defineFeature("recover", recoverRoutes);
 export const invitationsFeature = defineFeature("invitations", invitationRoutes);
 export const signInFeature = defineFeature("sign-in", signInRoutes);
 export const statusFeature = defineFeature("status", statusRoutes);

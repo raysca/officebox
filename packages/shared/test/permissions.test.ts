@@ -132,6 +132,8 @@ const WORKSPACE_MATRIX: Record<WorkspaceAction, RoleRow> = {
   "domain.move_start": OWNERS,
   "domain.move_commit": OWNERS,
   "domain.move_cancel": OWNERS,
+  "domain.view": OWNERS,
+  "member.acknowledge_reset": OWNERS,
 };
 
 // "Invite with role member / admin" (§4.6, §6): admins invite members; only owners invite admins; owner

@@ -251,6 +251,8 @@ export const WORKSPACE_ACTION_AUDIENCE = {
   "domain.move_start": "owner", // step-up (Identity §4.4, Permissions §6)
   "domain.move_commit": "owner", // committed by a passkey registration on the new origin, no step-up
   "domain.move_cancel": "owner",
+  "domain.view": "owner", // the current address and any pending move (Identity §4.4; M1c, default)
+  "member.acknowledge_reset": "owner", // clear the no-email recovery-link flag (Identity §4.6, §6)
 } as const satisfies Record<string, "everyone" | "admin" | "owner">;
 
 export type WorkspaceAction = keyof typeof WORKSPACE_ACTION_AUDIENCE;

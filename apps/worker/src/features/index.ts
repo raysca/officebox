@@ -4,6 +4,7 @@ import {
   authFeature,
   invitationsFeature,
   meFeature,
+  recoverFeature,
   setupFeature,
   signInFeature,
   statusFeature,
@@ -14,7 +15,7 @@ import { membersFeature, realtimeFeature, wsFeature } from "./realtime/routes";
  * Feature route modules, mounted under `/api/<name>`. Each feature lives in `src/features/<feature>/`
  * with its routes, Durable Objects, services and jobs, and exports `defineFeature(...)` values that
  * are listed here. Identity (M1) serves `/api/setup`, `/api/auth` (better-auth behind its allowlist),
- * `/api/me`, `/api/invitations`, `/api/sign-in` and `/api/status`; the admin area serves `/api/admin`;
+ * `/api/me`, `/api/invitations`, `/api/sign-in`, `/api/status` and `/api/recover` (M1c); the admin area serves `/api/admin`;
  * realtime (M2a) serves `/api/ws`, `/api/members` and `/api/realtime`.
  */
 export const features: readonly Feature[] = [
@@ -24,6 +25,7 @@ export const features: readonly Feature[] = [
   invitationsFeature,
   signInFeature,
   statusFeature,
+  recoverFeature,
   adminFeature,
   wsFeature,
   membersFeature,

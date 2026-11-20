@@ -53,13 +53,16 @@ export function d1Facts(env: Env): PermissionFacts {
   };
 }
 
-/** `RECOVERY_TOKEN` is set (at least 32 characters) and its hash isn't in `recovery_token_uses` (Identity §4.6). */
-export async function recoveryTokenUnconsumed(env: Env): Promise<boolean> {
+/**
+ * The state of `RECOVERY_TOKEN` (Identity §4.6): `unset` (absent, shorter than 32 characters, or no
+ * token-hash key to hash it with), `unconsumed`, or `consumed` (its hash is in `recovery_token_uses`).
+ */
+export async function recoveryTokenState(env: Env): Promise<"unset" | "unconsumed" | "consumed"> {
   const secret = env.RECOVERY_TOKEN;
-  if (!secret || [...secret].length < MIN_SECRET_BYTES) return false;
+  if (!secret || [...secret].length < MIN_SECRET_BYTES) return "unset";
   // The Worker secret, or the key the Worker generated (M1b-1).
   const key = await tokenHashKeyOrNull(env, rootLogger);
-  if (!key) return false;
+  if (!key) return "unset";
   const hash = await tokenHash(key, secret);
   const rows = expectOk(
     await new Database(env.DB).all<{ token_hash: string }>("SELECT token_hash FROM recovery_token_uses"),
@@ -68,7 +71,12 @@ export async function recoveryTokenUnconsumed(env: Env): Promise<boolean> {
   // Constant-time comparison against every recorded use.
   let used = false;
   for (const row of rows) used = timingSafeEqual(target, new TextEncoder().encode(row.token_hash)) || used;
-  return !used;
+  return used ? "consumed" : "unconsumed";
+}
+
+/** `RECOVERY_TOKEN` is set (at least 32 characters) and its hash isn't in `recovery_token_uses` (Identity §4.6). */
+export async function recoveryTokenUnconsumed(env: Env): Promise<boolean> {
+  return (await recoveryTokenState(env)) === "unconsumed";
 }
 
 /** The engine's actor for a signed-in request. */

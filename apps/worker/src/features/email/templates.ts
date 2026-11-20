@@ -105,6 +105,32 @@ export function magicLinkEmail(input: { workspace: string; email: string; link: 
   return { subject: `Sign in to ${workspace}`, ...body };
 }
 
+/** The email-change confirmation, sent to the **new** address (Identity §4.11; Platform §10). */
+export function emailChangeEmail(input: {
+  workspace: string;
+  newEmail: string;
+  actorName: string;
+  link: string;
+  expiresAt: number;
+}): RenderedEmail {
+  const workspace = oneLine(input.workspace);
+  const expires = new Date(input.expiresAt).toUTCString();
+  const body = layout(
+    workspace,
+    `Confirm your new email for ${workspace}`,
+    [
+      {
+        text: `${oneLine(input.actorName)} changed the email address of your ${workspace} account to ${input.newEmail}.`,
+        strong: input.newEmail,
+      },
+      { text: `Confirm it to make the change. The link works once and expires on ${expires}.` },
+    ],
+    { label: "Confirm the new address", url: input.link },
+    "If you weren't expecting this, you can ignore this email: nothing changes until the link is used.",
+  );
+  return { subject: `Confirm your new email for ${workspace}`, ...body };
+}
+
 const VIA_LABEL: Record<PasskeyCreatedVia, string> = {
   setup: "during setup",
   invitation: "when accepting an invitation",
@@ -146,25 +172,44 @@ function noticeLines(kind: SecurityNoticeKind, details: SecurityNoticeDetails): 
     case "recovery_link_issued":
       return {
         title: "A recovery link was issued for your account",
-        lines: ["An admin issued a recovery link for your account."],
+        lines: [
+          `${details.actorName ? oneLine(details.actorName) : "An admin"} issued a recovery link for your account. Anyone with the link can add a passkey to your account until it's used or expires.`,
+        ],
       };
-    case "recovery_link_used":
+    case "recovery_link_used": {
+      const name = details.passkeyName ? `the passkey "${oneLine(details.passkeyName)}"` : "a passkey";
       return {
-        title: "Your recovery link was used",
-        lines: ["A recovery link was used to add a passkey to your account."],
+        title: "A recovery link was used on your account",
+        lines: [`A recovery link was used to add ${name} to your account, and your other sessions were signed out.`],
       };
-    case "email_changed":
-      return { title: "Your email address was changed", lines: ["The email address on your account was changed."] };
+    }
+    case "email_changed": {
+      const to = details.newEmail ? ` to ${details.newEmail}` : "";
+      const by = details.actorName ? ` by ${oneLine(details.actorName)}` : "";
+      return {
+        title: "Your email address was changed",
+        lines: [`The email address on your account was changed${to}${by}.`],
+      };
+    }
     case "owner_recovery_used":
       return {
         title: "Owner recovery was used",
-        lines: ["The owner recovery token was used to add a passkey to an owner's account."],
+        lines: [
+          details.subjectName
+            ? `The owner recovery token was used to add a passkey to ${oneLine(details.subjectName)}'s account.`
+            : "The owner recovery token was used to add a passkey to an owner's account.",
+        ],
       };
-    case "domain_moved":
+    case "domain_moved": {
+      const to = details.origin ? ` to ${details.origin}` : "";
+      const by = details.actorName ? ` by ${oneLine(details.actorName)}` : " by an owner";
       return {
         title: "The workspace moved to a new address",
-        lines: ["The workspace's address was changed by an owner."],
+        lines: [
+          `The workspace was moved${to}${by}. Everyone was signed out; passkeys made for the old address don't work at the new one.`,
+        ],
       };
+    }
     case "member_export":
       return { title: "An admin exported your data", lines: ["An admin exported a copy of your data."] };
   }
