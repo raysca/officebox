@@ -63,6 +63,19 @@ export function linkIn(email: SinkEmail): string {
   return match[0];
 }
 
+/**
+ * Browser-context options that give one test its own client IP, so it can't spend (or be refused by)
+ * the per-IP limits every other e2e browser shares on loopback (Platform §8). The Worker keys those
+ * limits on `CF-Connecting-IP`. Local `wrangler dev` keeps a client-sent value; Cloudflare's edge
+ * always replaces it with the real client address, so this works only in local runs and changes
+ * nothing in the Worker or its limits. Each address is its own /64 in the documentation range
+ * (2001:db8::/32), never a real one.
+ */
+export function ownClientIp(): { extraHTTPHeaders: Record<string, string> } {
+  const [a = 0, b = 0] = crypto.getRandomValues(new Uint16Array(2));
+  return { extraHTTPHeaders: { "CF-Connecting-IP": `2001:db8:${a.toString(16)}:${b.toString(16)}::1` } };
+}
+
 /** The owner created by first-run setup (first-run.setup.ts). */
 export const OWNER = {
   workspace: "Acme Studio",

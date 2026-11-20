@@ -17,8 +17,17 @@ export const SETUP_TOKEN = "test-setup-token-0123456789abcdefghijklmnop";
 
 export const uniqueEmail = (tag = "user") => `${tag}-${ulid().toLowerCase()}@officebox.test`;
 export const uniqueHandle = (tag = "u") => `${tag}${ulid().toLowerCase().slice(-12)}`;
-export const randomIp = () =>
-  `10.${(Math.random() * 255) | 0}.${(Math.random() * 255) | 0}.${(Math.random() * 255) | 0}`;
+/**
+ * A client IP no other test shares. Per-IP limits count an IPv6 address by its /64, so each call gets
+ * its own /64 in the documentation range (2001:db8::/32, never a real address): a per-file random
+ * start plus a counter, so two tests in a file never share a limiter key, and files almost never do.
+ */
+const ipStart = crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
+let ipCount = 0;
+export const uniqueIp = () => {
+  const n = (ipStart + ipCount++) >>> 0;
+  return `2001:db8:${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}::1`;
+};
 
 /**
  * The test email sink (PLAN M1 exit criteria): a fake `EMAIL_QUEUE` that keeps every queued message,
@@ -132,7 +141,7 @@ export interface CallOptions {
 /** A browser-like client: a cookie jar, the CSRF header and Origin, a stable client IP. */
 export class Browser {
   readonly cookies = new Map<string, string>();
-  readonly ip = randomIp();
+  readonly ip = uniqueIp();
   /** Every response body this browser received (the token-exposure test reads them). */
   readonly bodies: string[] = [];
 
@@ -235,8 +244,14 @@ export function ownerDetails(): OwnerDetails {
   return { email: uniqueEmail("owner"), name: "Sam Lee", handle: uniqueHandle("sam"), workspace: "Acme Studio" };
 }
 
-export async function claim(browser: Browser, owner: OwnerDetails = ownerDetails(), token = SETUP_TOKEN) {
+export async function claim(
+  browser: Browser,
+  owner: OwnerDetails = ownerDetails(),
+  token = SETUP_TOKEN,
+  options: Omit<CallOptions, "body"> = {},
+) {
   return browser.json("/api/setup", {
+    ...options,
     body: {
       token,
       workspaceName: owner.workspace,

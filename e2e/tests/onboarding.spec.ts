@@ -1,5 +1,14 @@
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { addAuthenticator, d1, expectNoAxeViolations, linkIn, loadCredential, OWNER, sinkEmails } from "./fixtures";
+import {
+  addAuthenticator,
+  d1,
+  expectNoAxeViolations,
+  linkIn,
+  loadCredential,
+  OWNER,
+  ownClientIp,
+  sinkEmails,
+} from "./fixtures";
 
 /**
  * Invitations, email and magic links end to end (Identity §4.2–§4.4; PLAN M1 exit criteria): invite
@@ -251,15 +260,19 @@ test("axe in the dark theme: the new admin pages and the fragment-token pages", 
   await owner.keyboard.press("Escape");
   await owner.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
 
-  const context = await browser.newContext({ colorScheme: "dark", reducedMotion: "reduce" });
+  // Its own client IP: the two lookups below are limited per IP, and the earlier tests spend the budget
+  // every other browser here shares. With a fresh one, neither can be refused as too many.
+  const context = await browser.newContext({ colorScheme: "dark", reducedMotion: "reduce", ...ownClientIp() });
   const page = await context.newPage();
   await page.goto("/sign-in");
   await expect(page.getByRole("region", { name: "Email me a sign-in link" })).toBeVisible();
   await expectNoAxeViolations(page);
   const dead = `#t=${"A".repeat(43)}`;
-  await limitedStep(page, () => page.goto(`/sign-in/link${dead}`), page.getByText(/isn't valid any more/));
+  await page.goto(`/sign-in/link${dead}`);
+  await expect(page.getByText(/isn't valid any more/)).toBeVisible();
   await expectNoAxeViolations(page);
-  await limitedStep(page, () => page.goto(`/invitations/accept${dead}`), page.getByText(/isn't valid any more/));
+  await page.goto(`/invitations/accept${dead}`);
+  await expect(page.getByText(/isn't valid any more/)).toBeVisible();
   await expectNoAxeViolations(page);
   await context.close();
 });
