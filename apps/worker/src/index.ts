@@ -7,11 +7,14 @@ import { features } from "./features";
 import { emailQueueHandler } from "./features/email/delivery";
 import { IDENTITY_JOBS } from "./features/identity/jobs";
 import { identityApiMiddleware } from "./features/identity/middleware";
+import { REALTIME_JOBS } from "./features/realtime/jobs";
 
+export { WorkspacePresence } from "./features/realtime/presence-do";
+export { UserHub } from "./features/realtime/user-hub-do";
 export { SystemObject } from "./system-object";
 
 /** Cron jobs by schedule (TDD §7.8). Features append theirs. */
-const JOBS: readonly CronJob[] = [...CORE_JOBS, ...IDENTITY_JOBS];
+const JOBS: readonly CronJob[] = [...CORE_JOBS, ...IDENTITY_JOBS, ...REALTIME_JOBS];
 
 /** Queues and their typed handlers. The email queue sends through the configured driver (TDD §7.6). */
 const QUEUES: QueueRegistry = {

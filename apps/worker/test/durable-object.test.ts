@@ -2,6 +2,7 @@ import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "c
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { RpcMethodsReturnResults } from "../src/core/do/base";
+import type { UserHub, WorkspacePresence } from "../src/index";
 import type { SystemObject } from "../src/system-object";
 import type { TestObject } from "./fixtures/test-object";
 
@@ -375,9 +376,11 @@ describe("migration failures and newer schemas", () => {
 });
 
 describe("RPC method types", () => {
-  it("every SystemObject RPC method returns an RpcResult (checked at compile time)", () => {
-    const check: RpcMethodsReturnResults<SystemObject> = true;
-    expect(check).toBe(true);
+  it("every SystemObject, UserHub and WorkspacePresence RPC method returns an RpcResult (checked at compile time)", () => {
+    const checkSystem: RpcMethodsReturnResults<SystemObject> = true;
+    const checkHub: RpcMethodsReturnResults<UserHub> = true;
+    const checkPresence: RpcMethodsReturnResults<WorkspacePresence> = true;
+    expect(checkSystem && checkHub && checkPresence).toBe(true);
   });
 });
 

@@ -98,6 +98,8 @@ const OWNERS: RoleRow = { owner: "✓", admin: "owner_required", member: "not_pe
 // Permissions §4.6 (directory, groups, audit) and §6; Admin §3 pages and §17 endpoints.
 const WORKSPACE_MATRIX: Record<WorkspaceAction, RoleRow> = {
   "directory.view": EVERYONE,
+  "presence.view": EVERYONE,
+  "availability.view": EVERYONE,
   "admin.open": ADMINS,
   "admin.overview.view": ADMINS,
   "admin.alerts.dismiss": ADMINS,

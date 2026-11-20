@@ -27,6 +27,8 @@ export default defineConfig({
         },
         durableObjects: {
           SYSTEM: { className: "SystemObject", useSQLite: true },
+          USER_HUB: { className: "UserHub", useSQLite: true },
+          PRESENCE: { className: "WorkspacePresence", useSQLite: true },
           TEST_OBJECT: { className: "TestObject", useSQLite: true },
         },
       },

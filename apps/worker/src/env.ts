@@ -1,3 +1,5 @@
+import type { WorkspacePresence } from "./features/realtime/presence-do";
+import type { UserHub } from "./features/realtime/user-hub-do";
 import type { SystemObject } from "./system-object";
 
 /**
@@ -13,6 +15,8 @@ export interface Env {
   ASSETS: Fetcher;
 
   SYSTEM: DurableObjectNamespace<SystemObject>;
+  USER_HUB: DurableObjectNamespace<UserHub>;
+  PRESENCE: DurableObjectNamespace<WorkspacePresence>;
 
   EMAIL_QUEUE: Queue;
   EMAIL_DLQ: Queue;

@@ -77,6 +77,9 @@ export interface MessageSet<M> {
   parseText(text: string, maxBytes?: number): Result<M, MessageParseError>;
 }
 
+/** Extracts the union message type `M` from a `MessageSet<M>`. */
+export type MessageOf<S> = S extends MessageSet<infer M> ? M : never;
+
 const DEFAULT_MAX_TEXT_BYTES = 256 * 1024;
 const encoder = new TextEncoder();
 

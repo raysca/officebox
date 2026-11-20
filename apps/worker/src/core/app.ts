@@ -93,10 +93,13 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     c.set("log", log);
     c.set("now", clock);
     await next();
+    // Request ID and security headers are skipped on 101 Switching Protocols responses, whose
+    // headers are immutable in the Workers runtime.
+    if (c.res.status === 101) return;
     const path = new URL(c.req.url).pathname;
     c.header("X-Request-Id", requestId);
     for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) c.header(name, value);
-    const isApi = path === "/api" || path.startsWith("/api/") || path === "/health";
+    const isApi = path === "/api" || path.startsWith("/api/") || path.startsWith("/ws/") || path === "/health";
     c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
     // API responses carry user data: never stored by shared caches (TDD §8.2).
     if (isApi && !keepsApiCacheControl(c.res.headers.get("Cache-Control"))) c.header("Cache-Control", "no-store");
@@ -104,7 +107,7 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     if (FRAGMENT_PAGES.includes(path))
       for (const [name, value] of Object.entries(FRAGMENT_PAGE_HEADERS)) c.header(name, value);
     // Assets fall-through and health probes are noisy and carry nothing worth keeping.
-    if (path.startsWith("/api/") || path === "/api") {
+    if (path.startsWith("/api/") || path === "/api" || path.startsWith("/ws/")) {
       log.info("request", {
         method: c.req.method,
         route: c.req.routePath,
@@ -119,7 +122,10 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     return c.json(body, body.status === "ok" ? 200 : 503, { "Cache-Control": "no-store" });
   });
 
-  for (const middleware of options.apiMiddleware ?? []) app.use("/api/*", middleware);
+  for (const middleware of options.apiMiddleware ?? []) {
+    app.use("/api/*", middleware);
+    app.use("/ws/*", middleware);
+  }
   // CSRF defence for every state-changing API request (TDD §8.2), before any feature route runs.
   app.use("/api/*", csrfProtection);
 
@@ -128,10 +134,14 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     if (names.has(feature.name)) throw new Error(`Feature ${feature.name} mounted twice`);
     names.add(feature.name);
     app.route(`/api/${feature.name}`, feature.routes);
+    if (feature.name === "ws") {
+      app.route("/ws", feature.routes);
+    }
   }
 
   app.all("/api", (c) => errorResponse(c, apiError("not_found", "No such endpoint.")));
   app.all("/api/*", (c) => errorResponse(c, apiError("not_found", "No such endpoint.")));
+  app.all("/ws/*", (c) => errorResponse(c, apiError("not_found", "No such endpoint.")));
 
   // Static files and SPA navigations are served by Workers Assets before the Worker runs. Requests that
   // reach the Worker anyway (for example a non-navigation request for a missing file) go back to Assets,
