@@ -245,8 +245,11 @@ test("set up, turn email on, and invite a member (the starting point)", async ({
   await step(
     member.page,
     () => member.page.getByRole("button", { name: "Create passkey" }).click(),
-    member.page.getByRole("heading", { level: 1, name: "Home" }),
+    // The profile setup step comes next (Identity §4.3; M1d).
+    member.page.getByRole("heading", { level: 1, name: "Profile and status" }),
   );
+  await member.page.getByRole("link", { name: "Skip for now" }).click();
+  await expect(member.page.getByRole("heading", { level: 1, name: "Home" })).toBeVisible();
 });
 
 test("a recovery link: step-up to issue, the email shown, a new passkey, every old session signed out", async ({

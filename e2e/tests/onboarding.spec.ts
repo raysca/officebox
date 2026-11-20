@@ -79,7 +79,10 @@ async function acceptAsNewPerson(browser: Browser, link: string, email: string, 
   await expectNoAxeViolations(page);
   // The enrolment ticket is HttpOnly and never visible to scripts.
   expect(await page.evaluate(() => document.cookie)).toBe("");
-  await passkeyStep(page, "Create passkey", page.getByRole("heading", { level: 1, name: "Home" }));
+  // Then the profile setup step (Identity §4.3; M1d), which can be skipped.
+  await passkeyStep(page, "Create passkey", page.getByRole("heading", { level: 1, name: "Profile and status" }));
+  await page.getByRole("link", { name: "Skip for now" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Home" })).toBeVisible();
   expect(await authenticator.credentials()).toHaveLength(1);
   expect((await context.cookies()).some((c) => c.name === "__Host-officebox.session_token")).toBe(true);
   return { context, page };

@@ -1,9 +1,11 @@
 import {
   ACTIVE_WINDOW_MS,
   derivedAvailabilitySchema,
+  effectiveStatus,
   HUB_HEARTBEAT_MS,
   hubClientMessages,
   ok,
+  statusLine,
   WS_CLOSE_ACCESS_REMOVED,
   WS_CLOSE_SESSION_REVOKED,
   type DerivedAvailability,
@@ -41,6 +43,11 @@ import { dispatchRoomCloses } from "./revocation";
  *   open, `heartbeat:tick` fires every 5 minutes, rechecks `users.status === 'active'` and each
  *   connected session's `expires_at > now` in D1, closes any expired or revoked session's sockets with
  *   `4401`, sweeps stale `room_registry` rows, and sends a heartbeat to `WorkspacePresence`.
+ * - **Status text (M1d; Identity §4.7, Notifications §5.5):** the member's manual status (emoji and text)
+ *   is read from D1 by `refreshStatus` (after `PUT /me/status`) and when the member comes online, kept
+ *   in `meta('status_text')`, and published to `WorkspacePresence` with their presence. A
+ *   `status_expiry` timer clears it from presence when it expires (Platform §11's ReminderScheduler
+ *   `status_expire` kind isn't built yet; the hub's own alarm does it until then, default).
  * - **Room registry & revocation (TDD §3.5):** rooms register/unregister open sockets in
  *   `room_registry`. `closeConnections(userId, reason, scope)` closes matching hub sockets and
  *   dispatches room closes for registered rooms.
@@ -111,6 +118,7 @@ export class UserHub extends CoreDurableObject {
     this.onTimer("heartbeat", () => this.onHeartbeatTimer());
     this.onTimer("active_expiry", () => this.onActiveExpiryTimer());
     this.onTimer("availability_expiry", () => this.onAvailabilityExpiryTimer());
+    this.onTimer("status_expiry", () => this.onStatusExpiryTimer());
   }
 
   protected override migrations(): readonly DoMigration[] {
@@ -246,7 +254,12 @@ export class UserHub extends CoreDurableObject {
     if (presence === "offline") {
       await presenceStub.setOffline(userId, availability);
     } else if (prevPresence !== presence || availChanged) {
-      await presenceStub.setOnline(userId, presence, null, availability);
+      // Coming online: read the status afresh (it may have been set while no tab was open).
+      const statusText =
+        prevPresence === null || prevPresence === "offline"
+          ? await this.loadStatusText(userId, now)
+          : this.getMeta("status_text") || null;
+      await presenceStub.setOnline(userId, presence, statusText, availability);
     }
     return { presence, availability };
   }
@@ -375,6 +388,41 @@ export class UserHub extends CoreDurableObject {
     const uid = this.userId();
     if (!uid) return;
     await this.syncPresenceAndAvailability(uid, this.now(), false);
+  }
+
+  private async onStatusExpiryTimer(): Promise<void> {
+    const uid = this.userId();
+    if (!uid) return;
+    await this.syncStatus(uid);
+  }
+
+  /**
+   * Reads the member's status from D1 (hidden once expired), remembers its one-line form and schedules
+   * the `status_expiry` timer for its expiry. Returns the line, or null.
+   */
+  private async loadStatusText(userId: string, now = this.now()): Promise<string | null> {
+    const row = expectOk(
+      await new Database(this.env.DB).first<{
+        status_emoji: string | null;
+        status_text: string | null;
+        status_expires_at: number | null;
+      }>("SELECT status_emoji, status_text, status_expires_at FROM users WHERE id = ? AND status = 'active'", userId),
+    );
+    const status = row
+      ? effectiveStatus({ emoji: row.status_emoji, text: row.status_text, expiresAt: row.status_expires_at }, now)
+      : null;
+    if (status?.expiresAt) this.setTimer("status_expiry:window", status.expiresAt);
+    else this.cancelTimer("status_expiry:window");
+    const line = statusLine(status);
+    this.setMeta("status_text", line ?? "");
+    return line;
+  }
+
+  /** Re-reads the status and publishes it to `WorkspacePresence` (which updates online members). */
+  private async syncStatus(userId: string): Promise<string | null> {
+    const line = await this.loadStatusText(userId);
+    await this.env.PRESENCE.getByName("presence").setStatusText(userId, line);
+    return line;
   }
 
   private async onAvailabilityExpiryTimer(): Promise<void> {
@@ -656,6 +704,17 @@ export class UserHub extends CoreDurableObject {
       const now = this.now();
       const { availability } = await this.syncPresenceAndAvailability(userId, now, true);
       return ok(availability);
+    });
+  }
+
+  /**
+   * Re-reads the member's manual status from D1 (after `PUT /me/status`, M1d), schedules its expiry and
+   * publishes the one-line form to `WorkspacePresence`, which tells the other online members.
+   */
+  refreshStatus(userId: string): Promise<RpcResult<{ statusText: string | null }>> {
+    return this.rpc(async () => {
+      this.setMeta("user_id", userId);
+      return ok({ statusText: await this.syncStatus(userId) });
     });
   }
 

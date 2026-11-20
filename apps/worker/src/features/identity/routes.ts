@@ -42,6 +42,7 @@ import { listDevices, signOutDevice, signOutEverywhere, signOutOthers } from "./
 import { CLEAR_TICKET_COOKIE, readTicketCookie, ticketCookie } from "./enrolment";
 import { permissionContext, recoveryTokenState } from "./facts";
 import { getMe } from "./me";
+import { meProfileRoutes } from "./profile-routes";
 import { forwardSetCookies, identityServices, loadSession, requireAuth } from "./middleware";
 import { acknowledgeNotices, listNotices } from "./notices";
 import { listPasskeys, removePasskey, renamePasskey } from "./passkeys";
@@ -95,6 +96,7 @@ import { handleIssueWsTicket, handleSetMyDnd, handleUpdateMyPreferences } from "
  * | `POST /auth/recover/lookup` · `POST /auth/recover` (M1c) | Recovery link token |
  * | `POST /recover` (M1c) | `RECOVERY_TOKEN` (404 when unset) |
  * | `POST /me/email/confirm/lookup` · `POST /me/email/confirm` (M1c) | Email-change token (public) |
+ * | `GET/PATCH /me/profile` · `PUT/DELETE /me/avatar` · `PUT/DELETE /me/status` (M1d) | Member (own), profile-routes.ts |
  *
  * Every state change passes the core CSRF check first; every route that touches user content asks
  * the permission engine. No route returns a session token.
@@ -519,7 +521,9 @@ const meRoutes = new Hono<AppEnv>()
     return respond(c, ok({ acknowledged: await acknowledgeNotices(c.env.DB, me.userId, body.value.ids) }));
   })
   .put("/dnd", (c) => handleSetMyDnd(c))
-  .patch("/preferences", (c) => handleUpdateMyPreferences(c));
+  .patch("/preferences", (c) => handleUpdateMyPreferences(c))
+  // M1d: profile, avatar and status (profile-routes.ts).
+  .route("/", meProfileRoutes);
 
 // ---- /api/invitations: the invitee's side (Identity §4.3) ---------------------------------------
 

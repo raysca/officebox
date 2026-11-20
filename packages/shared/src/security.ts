@@ -16,6 +16,13 @@ export const APP_CONTENT_SECURITY_POLICY =
 export const API_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'";
 
 /**
+ * CSP for user files the Worker serves (avatars from M1d; TDD §8.3): the API policy plus `sandbox`, so
+ * even a file opened directly in a tab runs nothing and gets an opaque origin. A route sets exactly this
+ * value and the app keeps it.
+ */
+export const FILE_CONTENT_SECURITY_POLICY = `${API_CONTENT_SECURITY_POLICY}; sandbox`;
+
+/**
  * Pages whose link carries a token in the URL fragment (Identity §2, Platform §10). They're served with
  * {@link FRAGMENT_PAGE_HEADERS} instead of the usual referrer policy, by `_headers` for Workers Assets
  * and by the Worker for anything that reaches it.

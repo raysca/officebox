@@ -29,6 +29,7 @@ import { invitationEmail } from "../email/templates";
 import { authFor } from "./auth";
 import { base64url, hmacSha256, randomToken, tokenHash } from "./crypto";
 import { issueTicket, type IssuedTicket } from "./enrolment";
+import { freeHeldHandleStatement, handleAvailability, handleError } from "./handles";
 import type { ClaimedInstallation } from "./installation";
 import { currentStore, runWithStore } from "./request-store";
 import type { IdentitySecrets } from "./secrets";
@@ -515,10 +516,9 @@ export async function acceptInvitation(
   const handle = body.handle;
 
   const database = new Database(ctx.env.DB);
-  const handleTaken = expectOk(
-    await database.first<{ one: number }>("SELECT 1 AS one FROM handles WHERE handle = ?", handle),
-  );
-  if (handleTaken) return err(handleConflict());
+  // Taken, reserved (the assistant's derived handle) or held for 30 days after a change (M1d).
+  const availability = await handleAvailability(ctx.env.DB, handle, null, ctx.now());
+  if (!availability.available) return err(handleError(availability.reason ?? "taken"));
 
   // 1. Consume by compare-and-set: exactly one request wins the attempt.
   const attemptId = ulid();
@@ -575,12 +575,16 @@ export async function acceptInvitation(
   }
 
   // 3. Claim the handle with the same attempt ID; a race lost since the check is compensated.
-  const claimed = await database.run(
-    "INSERT INTO handles (handle, owner_type, owner_id, created_attempt_id) VALUES (?, 'user', ?, ?)",
-    handle,
-    userId,
-    attemptId,
-  );
+  const claimed = await database.batchRun([
+    // A released handle whose 30-day hold has passed is free again (M1d).
+    freeHeldHandleStatement(database, handle, ctx.now()),
+    database.statement(
+      "INSERT INTO handles (handle, owner_type, owner_id, created_attempt_id) VALUES (?, 'user', ?, ?)",
+      handle,
+      userId,
+      attemptId,
+    ),
+  ]);
   if (!claimed.ok) {
     expectOk(
       await database.batchRun([
@@ -631,8 +635,7 @@ export async function acceptInvitation(
 }
 
 function handleConflict(): ApiError {
-  const message = "That handle is taken. Pick another.";
-  return apiError("conflict", message, { reason: "handle_taken", fields: { handle: [message] } });
+  return handleError("taken");
 }
 
 /** Puts a consumed invitation back to pending when no account was written for the attempt. */

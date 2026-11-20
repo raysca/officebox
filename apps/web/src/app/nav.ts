@@ -1,10 +1,10 @@
 import type { WorkspaceAction } from "@officebox/shared";
 import type { ComponentType, SVGProps } from "react";
-import { AdminIcon, CalendarIcon, ChatIcon, DocumentIcon, HomeIcon } from "../lib/ui/icons";
+import { AdminIcon, CalendarIcon, ChatIcon, DocumentIcon, HomeIcon, PeopleIcon } from "../lib/ui/icons";
 import { messages } from "./messages";
 
 export interface NavItem {
-  to: "/" | "/chat" | "/calendar" | "/documents" | "/admin";
+  to: "/" | "/chat" | "/calendar" | "/documents" | "/directory" | "/admin";
   label: string;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
   /** Shown only to people the permission engine allows this action (an affordance; the API checks again). */
@@ -21,5 +21,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { to: "/chat", label: messages.areas.chat.label, icon: ChatIcon },
   { to: "/calendar", label: messages.areas.calendar.label, icon: CalendarIcon },
   { to: "/documents", label: messages.areas.documents.label, icon: DocumentIcon },
+  // M1d: the member directory (Identity §4.10), for everyone (`directory.view`).
+  { to: "/directory", label: messages.areas.directory.label, icon: PeopleIcon, requires: "directory.view" },
   { to: "/admin", label: messages.areas.admin.label, icon: AdminIcon, requires: "admin.open" },
 ];

@@ -227,7 +227,8 @@ function PasskeyStep({ email }: { email: string }) {
       if (result.ok) {
         toastStore.show(copy.welcome, "info");
         await queryClient.invalidateQueries({ queryKey: meQueryKey });
-        await navigate({ to: "/", replace: true });
+        // Then profile setup (Identity §4.3 step 2; M1d): time zone, working hours, region, the rest.
+        await navigate({ to: "/settings/profile", search: { welcome: true }, replace: true });
         return;
       }
       const failure = result.error;

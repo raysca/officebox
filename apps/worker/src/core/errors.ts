@@ -78,6 +78,20 @@ const TOO_LARGE: ApiError = apiError("payload_too_large", "The request body is t
  * The body is consumed here: read it once per request.
  */
 export async function readBodyText(request: Request, maxBytes: number): Promise<AppResult<string>> {
+  const bytes = await readBodyBytes(request, maxBytes);
+  if (!bytes.ok) return bytes;
+  try {
+    return ok(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes.value));
+  } catch {
+    return err(apiError("validation_failed", "The request body is not valid UTF-8."));
+  }
+}
+
+/**
+ * Reads a request body as bytes, with the same streaming bound as {@link readBodyText} (uploads such
+ * as avatars). The body is consumed here.
+ */
+export async function readBodyBytes(request: Request, maxBytes: number): Promise<AppResult<Uint8Array>> {
   const header = request.headers.get("Content-Length");
   if (header !== null) {
     if (!/^\s*\d{1,15}\s*$/.test(header)) {
@@ -85,7 +99,7 @@ export async function readBodyText(request: Request, maxBytes: number): Promise<
     }
     if (Number(header) > maxBytes) return err(TOO_LARGE);
   }
-  if (!request.body) return ok("");
+  if (!request.body) return ok(new Uint8Array(0));
   // Request bodies are byte streams; the Workers types declare the reader loosely.
   const reader = (request.body as ReadableStream<Uint8Array>).getReader();
   const chunks: Uint8Array[] = [];
@@ -106,11 +120,7 @@ export async function readBodyText(request: Request, maxBytes: number): Promise<
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  try {
-    return ok(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
-  } catch {
-    return err(apiError("validation_failed", "The request body is not valid UTF-8."));
-  }
+  return ok(bytes);
 }
 
 /**

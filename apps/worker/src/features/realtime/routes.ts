@@ -15,6 +15,7 @@ import { errorResponse, readJson, respond } from "../../core/errors";
 import { authorize } from "../../core/permissions";
 import { permissionContext } from "../identity/facts";
 import { identityServices, loadSession, requireAuth } from "../identity/middleware";
+import { directoryRoutes } from "../identity/profile-routes";
 import { consumeWsTicket, issueWsTicket } from "./tickets";
 
 /**
@@ -217,38 +218,42 @@ export async function handleUpdateMyPreferences(c: AppContext): Promise<Response
 
 const wsRoutes = new Hono<AppEnv>().get("/hub", (c) => upgradeHubWebSocket(c));
 
-const membersRoutes = new Hono<AppEnv>().use(requireAuth).get("/:id/availability", async (c) => {
-  const me = authOf(c);
-  const allowed = await authorize(permissionContext(c, me), { action: "availability.view" });
-  if (!allowed.ok) return respond(c, allowed);
+// The directory (`GET /members`, `/members/:id`, `/members/:id/avatar`; identity, M1d) shares this mount.
+const membersRoutes = new Hono<AppEnv>()
+  .use(requireAuth)
+  .route("/", directoryRoutes)
+  .get("/:id/availability", async (c) => {
+    const me = authOf(c);
+    const allowed = await authorize(permissionContext(c, me), { action: "availability.view" });
+    if (!allowed.ok) return respond(c, allowed);
 
-  const targetId = c.req.param("id");
-  if (!ulidSchema.safeParse(targetId).success) {
-    return respond(c, err(apiError("not_found", "No such member.")));
-  }
+    const targetId = c.req.param("id");
+    if (!ulidSchema.safeParse(targetId).success) {
+      return respond(c, err(apiError("not_found", "No such member.")));
+    }
 
-  const db = new Database(c.env.DB);
-  const target = expectOk(
-    await db.first<{ id: string; status: string; role: string }>(
-      "SELECT id, status, role FROM users WHERE id = ?",
-      targetId,
-    ),
-  );
-  if (!target || target.status === "deleted" || target.status === "system" || target.role === "system") {
-    return respond(c, err(apiError("not_found", "No such member.")));
-  }
+    const db = new Database(c.env.DB);
+    const target = expectOk(
+      await db.first<{ id: string; status: string; role: string }>(
+        "SELECT id, status, role FROM users WHERE id = ?",
+        targetId,
+      ),
+    );
+    if (!target || target.status === "deleted" || target.status === "system" || target.role === "system") {
+      return respond(c, err(apiError("not_found", "No such member.")));
+    }
 
-  const res = await c.env.USER_HUB.getByName(targetId).getAvailability(targetId);
-  if (!res.ok) return respond(c, res);
-  return respond(
-    c,
-    ok({
-      userId: targetId,
-      presence: res.value.presence,
-      availability: res.value.availability,
-    }),
-  );
-});
+    const res = await c.env.USER_HUB.getByName(targetId).getAvailability(targetId);
+    if (!res.ok) return respond(c, res);
+    return respond(
+      c,
+      ok({
+        userId: targetId,
+        presence: res.value.presence,
+        availability: res.value.availability,
+      }),
+    );
+  });
 
 const realtimeRoutes = new Hono<AppEnv>()
   .use(requireAuth)

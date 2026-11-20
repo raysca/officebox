@@ -148,6 +148,11 @@ export function UserMenu() {
             </button>
           </li>
           <li>
+            <Link to="/settings/profile" className={itemClass} onClick={() => setOpen(false)}>
+              {messages.account.profile}
+            </Link>
+          </li>
+          <li>
             <Link to="/settings/passkeys" className={itemClass} onClick={() => setOpen(false)}>
               {messages.account.passkeys}
             </Link>
