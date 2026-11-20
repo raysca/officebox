@@ -1,4 +1,5 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import type { QueryClient } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import axe from "axe-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +35,21 @@ async function expectNoViolations() {
     rules: { "color-contrast": { enabled: false } },
   });
   expect(results.violations.map((v) => ({ id: v.id, nodes: v.nodes.map((n) => n.target.join(" ")) }))).toEqual([]);
+}
+
+/**
+ * Waits for every in-flight query to finish and React to render the result, inside `act`. Tests that
+ * must not depend on a findBy timeout under load wait on the requests themselves this way.
+ */
+async function settleQueries(queryClient: QueryClient) {
+  await act(async () => {
+    while (queryClient.isFetching() > 0) {
+      // `cancelRefetch: false` joins the fetch already in flight rather than starting another.
+      await queryClient.refetchQueries({ fetchStatus: "fetching" }, { cancelRefetch: false });
+    }
+    // Query results reach observers in a zero-delay task (TanStack's notifyManager); let it run.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 }
 
 const on =
@@ -174,24 +190,30 @@ describe("setup (Identity §4.1)", () => {
         ),
       ],
     });
-    await renderApp("/setup", { fetch });
-    expect(await screen.findByRole("heading", { level: 1, name: "Officebox isn't ready to set up yet" })).toBeDefined();
+    const { queryClient } = await renderApp("/setup", { fetch });
+    await settleQueries(queryClient);
+    expect(screen.getByRole("heading", { level: 1, name: "Officebox isn't ready to set up yet" })).toBeDefined();
     const list = screen.getByRole("list", { name: "Required services" });
     expect(
       within(list).getByText("R2 isn't enabled on this Cloudflare account: dashboard → R2, then redeploy."),
     ).toBeDefined();
     expect(within(list).getAllByText("Working")).toHaveLength(5);
     expect(within(list).getByText("Needs attention:")).toBeDefined();
+    // The live region gets its text in a zero-delay task after the commit (see ServicesChecklist).
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(screen.getByText("1 required service needs attention.")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Create workspace" })).toBeNull();
     await expectNoViolations();
     failing = false;
+    const setupCalls = () => fetch.mock.calls.filter(([url]) => url === "/api/setup").length;
+    const before = setupCalls();
     await user.click(screen.getByRole("button", { name: "Check again" }));
-    expect(await screen.findByRole("button", { name: "Create workspace" })).toBeDefined();
+    // The button itself started the re-check; wait for that request, not for a findBy timeout.
+    expect(setupCalls()).toBe(before + 1);
+    await settleQueries(queryClient);
+    expect(screen.getByRole("button", { name: "Create workspace" })).toBeDefined();
     // Focus moves to the new page's heading.
-    await waitFor(() =>
-      expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1, name: "Set up your workspace" })),
-    );
+    expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1, name: "Set up your workspace" }));
   });
 
   it("inside the open window: the notice with the time left, no token needed, and the resume code shown once", async () => {

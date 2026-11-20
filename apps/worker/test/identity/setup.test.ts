@@ -6,6 +6,7 @@ import { authFor } from "../../src/features/identity/auth";
 import { identitySecrets } from "../../src/features/identity/secrets";
 import { expireIfStale, expireStaleClaim, SETUP_CLAIM_TTL_MS } from "../../src/features/identity/setup";
 import { completeSetupClaim } from "../../src/features/identity/setup-state";
+import { configuredLimit, FakeRateLimit } from "../fake-rate-limit";
 import { SoftAuthenticator } from "./authenticator";
 import {
   Browser,
@@ -268,12 +269,23 @@ describe("first-run setup with a passkey (Identity §4.1; TDD §6.8)", () => {
   });
 
   it("setup is limited to 5 attempts per minute per IP, before the token is checked", async () => {
+    // The limiter's clock is the test's, so the minute can't roll over mid-burst (AGENTS §5).
+    let now = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const limiter = new FakeRateLimit(configuredLimit("AUTH_RATE_LIMITER"), () => now);
+    const call = { env: { AUTH_RATE_LIMITER: limiter } };
+    const wrongToken = "wrong-token-0123456789abcdefghijklmnopq";
     const browser = new Browser();
     const statuses: number[] = [];
-    for (let i = 0; i < 6; i++)
-      statuses.push((await claim(browser, ownerDetails(), "wrong-token-0123456789abcdefghijklmnopq")).status);
+    for (let i = 0; i < 6; i++) statuses.push((await claim(browser, ownerDetails(), wrongToken, call)).status);
     expect(statuses.slice(0, 5)).toEqual([403, 403, 403, 403, 403]);
     expect(statuses[5]).toBe(429);
+    // Per IP: another client isn't held back.
+    expect((await claim(new Browser(), ownerDetails(), wrongToken, call)).status).toBe(403);
+    // Per minute: the same client may try again once the window has passed.
+    now += 59_999;
+    expect((await claim(browser, ownerDetails(), wrongToken, call)).status).toBe(429);
+    now += 1;
+    expect((await claim(browser, ownerDetails(), wrongToken, call)).status).toBe(403);
   });
 
   it("before setup completes, signed-in routes answer setup_required", async () => {
@@ -343,9 +355,12 @@ describe("GET /api/setup stays cheap (review m2)", () => {
   });
 
   it("is rate-limited per IP (20 per minute)", async () => {
+    // An injected-clock limiter, so the minute can't roll over mid-burst (see test/fake-rate-limit.ts).
+    const limiter = new FakeRateLimit(configuredLimit("PASSKEY_RATE_LIMITER"), () => Date.UTC(2026, 0, 1, 12));
+    const call = { env: { PASSKEY_RATE_LIMITER: limiter } };
     const browser = new Browser();
     const statuses: number[] = [];
-    for (let i = 0; i < 21; i++) statuses.push((await browser.call("/api/setup")).status);
+    for (let i = 0; i < 21; i++) statuses.push((await browser.call("/api/setup", call)).status);
     expect(statuses.slice(0, 20).every((st) => st === 200)).toBe(true);
     expect(statuses[20]).toBe(429);
   });

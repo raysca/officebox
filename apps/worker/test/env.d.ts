@@ -8,6 +8,8 @@ declare global {
     interface Env extends AppEnv {
       TEST_MIGRATIONS: D1Migration[];
       SETUP_RELEASE_SQL: string;
+      /** `ratelimits` from wrangler.jsonc (test/fake-rate-limit.ts). */
+      TEST_RATE_LIMITS: { name: string; simple: { limit: number; period: number } }[];
       TEST_OBJECT: DurableObjectNamespace<TestObject>;
     }
     interface GlobalProps {
