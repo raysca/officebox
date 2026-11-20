@@ -6,6 +6,7 @@ import { ulid } from "../../src/core/ids";
 import { features } from "../../src/features";
 import { identityApiMiddleware, identityPageMiddleware } from "../../src/features/identity/middleware";
 import { clearSettingsCache } from "../../src/core/settings";
+import { clearPageInstallationCache } from "../../src/features/identity/installation";
 import { clearSetupCache } from "../../src/features/identity/setup-state";
 import worker from "../../src/index";
 import type { Env } from "../../src/env";
@@ -210,6 +211,7 @@ export async function resetInstallation(): Promise<void> {
   ]);
   clearSetupCache(env.DB);
   clearSettingsCache(env.DB);
+  clearPageInstallationCache(env.DB);
 }
 
 /** Stores a known generated setup token (generated-token mode: no SETUP_TOKEN secret in tests). */

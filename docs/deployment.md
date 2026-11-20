@@ -228,7 +228,7 @@ There are no passwords, so recovering an account always means creating a new pas
 
 - **Members** with email on can sign in with an emailed sign-in link and add a passkey.
 - **Recovery links:** in **Admin → Members**, an admin (for members) or an owner (for anyone) presses **Recovery link** and confirms with their own passkey. Share the link privately; it works for 24 hours, until a passkey is created with it, and it signs the person out everywhere when they open it. The person is told by email (when email is on) and with a notice after signing in. Without email, owners see the member flagged until one of them acknowledges it.
-- **All owners locked out:** set the `RECOVERY_TOKEN` Worker secret (at least 32 characters) in the Cloudflare dashboard, open `/recover` (or **owner recovery** on the sign-in page), enter the secret and the owner's email, and create a passkey. Each value works once. The other owners are told, and owners see a banner until you **delete the secret**; set a fresh value only for the next recovery.
+- **All owners locked out:** set the `RECOVERY_TOKEN` Worker secret to a random value of at least 32 characters (for example `openssl rand -base64 32`) in the Cloudflare dashboard, open `/recover` (or **owner recovery** on the sign-in page), enter the secret and the owner's email, and create a passkey. Each value works once. The other owners are told, and owners see a banner until you **delete the secret**; set a fresh value only for the next recovery.
 - **Email changes:** in **Admin → Members → Change email**. With email on, a confirmation link goes to the new address and nothing changes until it's used; the old address is told. Without email, the change applies at once.
 
 ### Moving to a new address

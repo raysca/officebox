@@ -139,6 +139,7 @@ export async function startDomainMove(
       ),
     ]),
   );
+  clearPageInstallationCache(ctx.env.DB);
   if ((result[2]?.changes ?? 0) !== 1) {
     return err(apiError("conflict", "The workspace's address changed meanwhile. Reload and try again."));
   }
@@ -176,6 +177,7 @@ export async function cancelDomainMove(ctx: CoreContext, actorId: string): Promi
       ),
     ]),
   );
+  clearPageInstallationCache(ctx.env.DB);
   return (result[0]?.changes ?? 0) === 1 ? ok(null) : err(NO_PENDING);
 }
 
@@ -204,6 +206,7 @@ export async function expirePendingMove(ctx: CoreContext): Promise<boolean> {
       ),
     ]),
   );
+  clearPageInstallationCache(ctx.env.DB);
   return (result[0]?.changes ?? 0) === 1;
 }
 

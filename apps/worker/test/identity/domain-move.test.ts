@@ -525,3 +525,46 @@ describe("review fixes (M1c)", () => {
     expect(await count("SELECT count(*) AS n FROM auth_tokens WHERE kind = 'domain_move'")).toBe(1);
   });
 });
+
+describe("second review fixes (M1c)", () => {
+  it("a stale isolate's cached row never redirects the new canonical origin back to the old one", async () => {
+    const newHost = new URL(NEW).host;
+    // A workspace that had moved away from NEW once (so NEW is an allowed host) and now lives on ORIGIN.
+    await env.DB.prepare("UPDATE installation SET allowed_hosts = json(?) WHERE id = 1")
+      .bind(JSON.stringify([OLD_HOST, newHost]))
+      .run();
+    clearPageInstallationCache(env.DB);
+    // This isolate caches that row (canonical ORIGIN)...
+    const warm = await callWorker(new Request(`${NEW}/chat`, { redirect: "manual" }));
+    expect(warm.headers.get("Location")).toBe(`${ORIGIN}/chat`);
+    // ...then another isolate commits a move back to NEW, without clearing this isolate's cache.
+    await env.DB.prepare("UPDATE installation SET canonical_origin = ? WHERE id = 1").bind(NEW).run();
+    const page = await callWorker(new Request(`${NEW}/chat`, { redirect: "manual" }));
+    expect(page.status).not.toBe(302);
+    // The old origin, now an allowed host, redirects forward.
+    const old = await callWorker(new Request(`${ORIGIN}/chat`, { redirect: "manual" }));
+    expect(old.headers.get("Location")).toBe(`${NEW}/chat`);
+  });
+
+  it("redirect targets stay on the canonical origin for @, encoded CR/LF and an encoded #", async () => {
+    const token = fragmentToken((await start(ws.browser, NEW)).body.link)!;
+    expect((await commit(token)).reg?.verify?.status).toBe(200);
+    for (const path of [
+      "/@evil.example",
+      "/a@evil.example/x",
+      "/x%0d%0aSet-Cookie:%20a=b",
+      "/x?y=%0d%0aLocation:%20https://evil.example",
+      "/x%23frag?q=%23y",
+    ]) {
+      const response = await callWorker(new Request(`${ORIGIN}${path}`, { redirect: "manual" }));
+      expect(response.status, path).toBe(302);
+      const location = response.headers.get("Location")!;
+      expect(location, path).not.toMatch(/[\r\n]/);
+      const parsed = new URL(location);
+      expect(parsed.origin, path).toBe(NEW);
+      expect(parsed.username + parsed.password, path).toBe("");
+      expect(parsed.hash, path).toBe("");
+      expect(response.headers.get("Set-Cookie"), path).toBeNull();
+    }
+  });
+});

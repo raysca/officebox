@@ -16,7 +16,7 @@ import { ulid } from "../../core/ids";
 import { authFor } from "./auth";
 import { randomToken, tokenHash } from "./crypto";
 import { issueTicket, type IssuedTicket } from "./enrolment";
-import { loadInstallation } from "./installation";
+import { clearPageInstallationCache, loadInstallation } from "./installation";
 import { runWithStore, currentStore } from "./request-store";
 import type { IdentitySecrets } from "./secrets";
 import type { ServicesReport } from "./services";
@@ -377,6 +377,8 @@ export async function claimSetup(
       ),
     ]),
   );
+  // The canonical origin was just recorded: this isolate's pages see it at once.
+  clearPageInstallationCache(ctx.env.DB);
   if ((claimed[1]?.changes ?? 0) !== 1) {
     if (await isSetupComplete(ctx)) return err(NOT_FOUND);
     const installation = await loadInstallation(ctx.env.DB);

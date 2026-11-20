@@ -77,8 +77,14 @@ test.describe("realtime backbone (M2a)", () => {
     browser,
     page,
   }) => {
-    // Sign in as the owner on a second device (fresh browser context with no cookies).
-    const device2Context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+    // Sign in as the owner on a second device (fresh browser context with no cookies). Its user agent
+    // names a browser no other test uses ("Edge on Windows"), so My devices shows exactly one row for it:
+    // other tests sign the owner in in parallel, so "the first Sign out button" could be another session.
+    const device2Context = await browser.newContext({
+      storageState: { cookies: [], origins: [] },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+    });
     const device2Page = await device2Context.newPage();
     const auth = await addAuthenticator(device2Context, device2Page);
     const saved = loadCredential();
@@ -94,8 +100,8 @@ test.describe("realtime backbone (M2a)", () => {
     // On device 1, open My devices and revoke device 2's session.
     await page.goto("/settings/devices");
     await expect(page.getByRole("heading", { level: 1, name: "My devices" })).toBeVisible();
-    const signOutOther = page.getByRole("button", { name: "Sign out" }).first();
-    await expect(signOutOther).toBeVisible();
+    const signOutOther = page.getByRole("button", { name: "Sign out Edge on Windows" });
+    await expect(signOutOther).toHaveCount(1);
     await signOutOther.click();
 
     // Device 2's hub socket closes with 4401 and redirects to /sign-in?reason=expired within 5 seconds.

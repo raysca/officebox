@@ -17,6 +17,7 @@ import {
   activePendingMove,
   claimed,
   loadInstallation,
+  clearPageInstallationCache,
   loadInstallationForPages,
   type ClaimedInstallation,
   type Installation,
@@ -153,16 +154,32 @@ export const identityPageMiddleware: MiddlewareHandler<AppEnv> = async (c, next)
     await next();
     return;
   }
-  const canonical = installation?.canonicalOrigin;
-  if (canonical) {
-    const url = new URL(c.req.url);
-    const pending = activePendingMove(installation, c.var.now());
-    if (url.origin !== canonical && url.origin !== pending?.origin && installation?.allowedHosts.includes(url.host)) {
-      return canonicalRedirect(c.req.method, url, canonical);
+  const url = new URL(c.req.url);
+  let target = pageRedirectTarget(installation, url, c.var.now());
+  if (target) {
+    // Never redirect on a cached row alone: an isolate that cached the row before a move would send the
+    // new origin back to the old one, which redirects forward again (a loop). Re-read, then decide.
+    try {
+      clearPageInstallationCache(c.env.DB);
+      installation = await loadInstallationForPages(c.env.DB, c.var.now());
+    } catch (error) {
+      c.var.log.warn("installation unreadable for a page request; serving the page", { error });
+      await next();
+      return;
     }
+    target = pageRedirectTarget(installation, url, c.var.now());
   }
+  if (target) return canonicalRedirect(c.req.method, url, target);
   await next();
 };
+
+/** The canonical origin a page request should be redirected to, or null to serve it here. */
+function pageRedirectTarget(installation: Installation | null, url: URL, now: number): string | null {
+  const canonical = installation?.canonicalOrigin;
+  if (!canonical || url.origin === canonical) return null;
+  if (url.origin === activePendingMove(installation, now)?.origin) return null;
+  return installation?.allowedHosts.includes(url.host) ? canonical : null;
+}
 
 /** The installation loaded for this request by `identityApiMiddleware`. */
 export async function requestInstallation(c: AppContext): Promise<Installation | null> {

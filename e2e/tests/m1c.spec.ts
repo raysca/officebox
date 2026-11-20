@@ -1,8 +1,8 @@
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { addAuthenticator, E2E_VARS, expectNoAxeViolations, linkIn, type SinkEmail } from "./fixtures";
 
 /**
@@ -57,11 +57,16 @@ async function waitForHealth(url: string, output: () => string): Promise<void> {
  */
 function testConfig(): string {
   const source = readFileSync(join(ROOT, "wrangler.jsonc"), "utf8");
-  const raised = source.replace(
-    /"simple": \{ "limit": \d+, "period": (10|60) \}/g,
-    '"simple": { "limit": 1000, "period": $1 }',
-  );
-  if (raised === source) throw new Error("couldn't raise the rate limits in wrangler.jsonc");
+  const pattern = /"simple": \{ "limit": \d+, "period": (10|60) \}/g;
+  const bindings = source.match(/"name": "[A-Z_]+_RATE_LIMITER"/g) ?? [];
+  const matched = source.match(pattern) ?? [];
+  // Every Rate Limiting binding must be raised, or a step would hit its real limit.
+  if (bindings.length !== 5 || matched.length !== bindings.length) {
+    throw new Error(
+      `expected 5 rate-limit bindings to raise; found ${bindings.length} bindings, ${matched.length} limits`,
+    );
+  }
+  const raised = source.replace(pattern, '"simple": { "limit": 1000, "period": $1 }');
   const absolute = raised
     .replace('"main": "apps/worker/src/index.ts"', `"main": ${JSON.stringify(join(ROOT, "apps/worker/src/index.ts"))}`)
     .replace('"directory": "apps/web/dist"', `"directory": ${JSON.stringify(join(ROOT, "apps/web/dist"))}`)
@@ -69,8 +74,11 @@ function testConfig(): string {
       '"migrations_dir": "apps/worker/migrations"',
       `"migrations_dir": ${JSON.stringify(join(ROOT, "apps/worker/migrations"))}`,
     );
-  const path = join(ROOT, ".wrangler", "e2e", `m1c-${process.pid}.jsonc`);
-  mkdirSync(dirname(path), { recursive: true });
+  const dir = join(ROOT, ".wrangler", "e2e");
+  mkdirSync(dir, { recursive: true });
+  // Copies left by earlier runs (one per process) are removed.
+  for (const name of readdirSync(dir)) if (/^m1c-\d+\.jsonc$/.test(name)) rmSync(join(dir, name), { force: true });
+  const path = join(dir, `m1c-${process.pid}.jsonc`);
   writeFileSync(path, absolute);
   return path;
 }
@@ -130,6 +138,7 @@ async function stopServer(): Promise<void> {
       // already gone
     }
   };
+  if (config) rmSync(config, { force: true });
   signal("SIGTERM");
   const timedOut = await Promise.race([
     exited.then(() => false),
