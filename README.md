@@ -64,7 +64,7 @@ Officebox reads these Worker secrets (full inventory and rotation rules: [platfo
 | `BETTER_AUTH_SECRET` | Recommended for production | Signs the session cookie (better-auth). **Changing it signs everyone out**: the cookie is signed with the newest secret only. To rotate, set `BETTER_AUTH_SECRETS` to `2:<new>,1:<old>` (newest first), tell members they'll need to sign in again, and after 30 days set `BETTER_AUTH_SECRET` to the new value and delete `BETTER_AUTH_SECRETS`. |
 | `TOKEN_HASH_KEY` | Recommended for production | Keys the stored hashes of our tokens (passkey enrolment tickets, invitation links, sign-in links and known devices; recovery and email-change links later). Changing it invalidates outstanding links. |
 | `SETUP_TOKEN` | No | First-run setup token (at least 32 characters). Setting it turns off the open first hour. Leave it unset for no token in the first hour and a one-time token in the logs after that. Delete it after setup. |
-| `RECOVERY_TOKEN` | No | Owner recovery when every owner has lost their passkeys (at least 32 characters; arrives with recovery links). While it's set and unused, it also lets an owner with one passkey invite people. |
+| `RECOVERY_TOKEN` | No | Owner recovery when every owner has lost their passkeys (at least 32 characters; use it at `/recover`, then delete it). While it's set and unused, it also lets an owner with one passkey invite people. |
 | `RESEND_API_KEY` | No | Only with the Resend email service ([Email](#email)). |
 | `POSTMARK_SERVER_TOKEN` | No | Only with the Postmark email service. |
 | `SES_ACCESS_KEY_ID`, `SES_SECRET_ACCESS_KEY` | No | Only with Amazon SES: an IAM user allowed only `ses:SendEmail`. |

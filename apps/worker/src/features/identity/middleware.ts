@@ -33,6 +33,9 @@ import { isSetupComplete } from "./setup-state";
  *   host gets a 302 (GET/HEAD) or 307 to the same path and query on the canonical origin, built from
  *   the record (never from the request's host), with `Cache-Control: no-store`, never a 301; any other
  *   host is refused (404). Before setup is claimed there is no canonical origin and every host passes.
+ * - on a **pending domain move's new origin** (M1c), answers only the move-completion routes, marks the
+ *   request's store (`pendingMove`, so `identityServices` builds a better-auth instance for that origin)
+ *   and uses that origin for CSRF;
  * - sets `c.var.canonicalOrigin` for the CSRF check that follows.
  *
  * **`requireAuth`** guards every signed-in route: it reads the session through better-auth

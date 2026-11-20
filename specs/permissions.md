@@ -294,7 +294,8 @@ effective role(user, item) = max(
 | Invite members | ✓ | ✓ |
 | Invite or promote admins; demote admins; manage owners | — | ✓ (promoting to admin needs the person to have a passkey; to owner, two passkeys or an unconsumed `RECOVERY_TOKEN`) |
 | Change email, issue recovery link, disable, re-enable, delete, sign out all sessions: **members** | ✓ | ✓ |
-| **Move the workspace's domain** (two steps, Identity §4.4) | — | ✓ |
+| **Move the workspace's domain** (two steps, Identity §4.4); see the current address and a pending move (`domain.view`, M1c **default**) | — | ✓ |
+| Acknowledge the no-email recovery-link flag on the member list (`member.acknowledge_reset`, Identity §4.6, §6; M1c) | — (they don't see the flag) | ✓ |
 | Same actions on **admins or owners** | — | ✓ (an owner can't disable or delete the last owner) |
 | Transfer content of leavers (My files, organised events, owned calendars, open personal tasks) | ✓ | ✓ |
 | Archive, delete or remove members of **any** channel, including private ones (without reading) | ✓ | ✓ |

@@ -331,7 +331,7 @@ Exceeding a limit returns a typed `rate_limited` result with a retry-after value
 | Magic-link requests, per IP | 20 per hour per IP **(default)** | D1 counter, in our middleware | Identity §4.4 |
 | Magic-link confirmation POSTs, per IP | 10 per minute **(default)** | binding, in our middleware | Identity §4.4 |
 | Passkey sign-in and registration (options and verification), and step-up attempts, per IP | 20 per minute **(default)** | binding (`PASSKEY_RATE_LIMITER`), in our middleware | Identity §4.4, §4.5 |
-| Setup, setup resume, recovery links, owner recovery (`/recover`), invitation lookup and acceptance | 5 per minute per IP | binding, in our middleware | TDD §8.1 |
+| Setup, setup resume, recovery links, owner recovery (`/recover`), invitation lookup and acceptance; from M1c also the email-change confirmation and the domain move link's POST on the new origin **(default)** | 5 per minute per IP | binding, in our middleware | TDD §8.1 |
 | Message sends | 10 per 10 seconds per user per conversation **(default)** | DO (ChatChannel) | Chat §20 |
 | `@channel` / `@here` | 1 per 5 minutes per user per channel **(default)** | DO (ChatChannel) | Chat §20 |
 | "Notify anyway" (break through DND) | Once per sender per recipient per 30 minutes **(default)** | D1 counter (`notify_anyway_log`) | Notifications §5.2 |
@@ -613,7 +613,7 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `groups`, `group_members` | Add | `groups.handle`; `group_members.role` (`manager`, `member`) | Identity §5 |
 | `sessions` | Add | `device_label`, `approx_location` (better-auth `additionalFields`). **Not created:** `refresh_token_hash`, `session_epoch`, `previous_refresh_hash`, `rotated_at`, `revoked_at` and the M1a draft's `retired_refresh_hashes` (15 Nov 2026: no refresh tokens) | Identity §4.5, §5 |
 | `users` | Add | `admin_reset_at`, `admin_reset_by`, `admin_reset_acknowledged_by` (no-email recovery flag) | Identity §4.6, §5 |
-| `auth_tokens.kind` | Values | `recovery`, `email_change`, **`passkey_enrol`** (enrolment tickets, bound to a registration challenge in `payload`), **`setup_resume`** (the setup resume code after an open-window claim, M1b-1 **(default)**); plus `payload` and `revoked_at` columns. `magic_link` moves to better-auth's `auth_verifications` plus our `magic_link_issues`; `password_reset` is removed (15 Nov 2026). | Identity §4.4, §4.11, §5 |
+| `auth_tokens.kind` | Values | `recovery`, `email_change`, **`passkey_enrol`** (enrolment tickets, bound to a registration challenge in `payload`), **`setup_resume`** (the setup resume code after an open-window claim, M1b-1 **(default)**), **`domain_move`** (the move link of a pending domain move, M1c **(default)**); plus `payload` and `revoked_at` columns. `magic_link` moves to better-auth's `auth_verifications` plus our `magic_link_issues`; `password_reset` is removed (15 Nov 2026). | Identity §4.4, §4.11, §5 |
 | `installation` | Add column (M1b-1) | `setup_opened_at`: start of the open claim window, written once at the first setup request that finds every required service passing; set to 0 by the operator's setup release, then to -1 once the Worker has audited that release | Identity §4.1; TDD §2.1, §6.8 |
 | `installation` | Add columns | `canonical_origin`, `allowed_hosts` (JSON), written at the setup claim and by an owner's domain move; `setup_claimed_at` (incomplete claims expire 24 hours after the claim); `pending_origin`, `pending_origin_started_by`, `pending_origin_expires_at` (two-step domain move) | Identity §4.1, §4.4; TDD §2.1, §6.8 |
 | `recovery_token_uses` | New table | One row per `RECOVERY_TOKEN` value used (hash, owner, time), replacing a single consumed-hash column | Identity §4.6, §5 |
@@ -622,7 +622,8 @@ Each object is created by the **milestone that builds it**. Earlier milestones d
 | `users`, `handles` | Add column | `created_attempt_id` (repair job) | Identity §4.3, §5 |
 | `users.pending_security_notice` | Shape | A JSON **list** of notices (kind, time, details), not a single notice | Identity §4.6a |
 | `users` | Add columns | `email_normalised` (trim, lowercase, NFKC) with a **unique index**; `first_signed_in_at` (gates setup resume and invitation reopening) | Identity §4.1, §4.3, §5 |
-| `passkeys` | Add column | `created_via` (`setup`, `invitation`, `recovery_link`, `owner_recovery`, `magic_link`, `signed_in`; Zod) | Identity §4.4, §5 |
+| `passkeys` | Add column | `created_via` (`setup`, `invitation`, `recovery_link`, `owner_recovery`, `magic_link`, `signed_in`, `domain_move`; Zod) | Identity §4.4, §5 |
+| `invitations` | Add column | `origin_moved_at` (M1c): a committed domain move invalidated the link; cleared when a new link is made | Identity §4.4 |
 | `magic_link_issues`, `user_devices` | New tables | Our consumption and revocation record for magic links, and known devices for the new-device notice; excluded from export | Identity §4.4, §5 |
 | `invitations` | Add columns (M1b, baseline) | `token_nonce` (the link token is HMAC(`TOKEN_HASH_KEY`, nonce), so "copy again" rebuilds the same link while D1 alone can't **(default)**) and `last_sent_at` (resend) | Identity §4.2 |
 | `email_deliveries` | New table (M1b) | One row per email job: id (the idempotency key), kind, recipient HMAC, state (`queued`, `sent`, `failed`, `dead`; Zod), attempts, driver, provider message ID, last error. Never the address, subject, body or link. Excluded from export (operational); kept 30 days **(default)** | TDD §7.6 |

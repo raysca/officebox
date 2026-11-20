@@ -49,7 +49,13 @@ export default defineConfig({
     {
       name: "chromium",
       dependencies: ["setup"],
-      testIgnore: [/first-run\.setup\.ts/, /passkeys\.spec\.ts/, /onboarding\.spec\.ts/, /quick-start\.spec\.ts/],
+      testIgnore: [
+        /first-run\.setup\.ts/,
+        /passkeys\.spec\.ts/,
+        /onboarding\.spec\.ts/,
+        /quick-start\.spec\.ts/,
+        /m1c\.spec\.ts/,
+      ],
       use: { ...devices["Desktop Chrome"], storageState: OWNER_STATE },
     },
     {
@@ -71,6 +77,13 @@ export default defineConfig({
     {
       name: "quick-start",
       testMatch: /quick-start\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    // M1c recovery, email change and the domain move: a fresh deploy of its own (wrangler dev on
+    // E2E_PORT + 6, with RECOVERY_TOKEN set), because the domain move signs everyone out.
+    {
+      name: "m1c",
+      testMatch: /m1c\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
     },
   ],

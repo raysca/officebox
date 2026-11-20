@@ -64,6 +64,10 @@ import { completeSetupClaim } from "./setup-state";
  * 17. no background work outlives the request that builds an instance: `validateSchema: false`, so
  *     no schema-check promise started by one request is awaited by a later one (M1b-1 production fix, found after the spike;
  *     not in the spike README)
+ *
+ * M1c adds no workaround: the registration after hook also marks a recovery link used and commits a
+ * domain move (`domain-move.ts`), and `ticketFitsOrigin` keeps domain-move tickets to the pending
+ * origin, whose better-auth instance comes from `identityServices` (the spike's "second instance").
  */
 
 export const SESSION_COOKIE = "__Host-officebox.session_token";

@@ -222,6 +222,25 @@ Go to **Admin → Invitations → Invite**, and enter an email and a role. Admin
 
 Pending invitations can be copied again, resent or revoked.
 
+### Lost passkeys and email changes
+
+There are no passwords, so recovering an account always means creating a new passkey.
+
+- **Members** with email on can sign in with an emailed sign-in link and add a passkey.
+- **Recovery links:** in **Admin → Members**, an admin (for members) or an owner (for anyone) presses **Recovery link** and confirms with their own passkey. Share the link privately; it works for 24 hours, until a passkey is created with it, and it signs the person out everywhere when they open it. The person is told by email (when email is on) and with a notice after signing in. Without email, owners see the member flagged until one of them acknowledges it.
+- **All owners locked out:** set the `RECOVERY_TOKEN` Worker secret (at least 32 characters) in the Cloudflare dashboard, open `/recover` (or **owner recovery** on the sign-in page), enter the secret and the owner's email, and create a passkey. Each value works once. The other owners are told, and owners see a banner until you **delete the secret**; set a fresh value only for the next recovery.
+- **Email changes:** in **Admin → Members → Change email**. With email on, a confirmation link goes to the new address and nothing changes until it's used; the old address is told. Without email, the change applies at once.
+
+### Moving to a new address
+
+Passkeys belong to the address they were made on. To move the workspace (for example from `*.workers.dev` to `work.<your-domain>`):
+
+1. Point the new address at the Worker first (a custom domain on the Worker), so it reaches this workspace.
+2. As an owner, go to **Admin → Workspace address**, enter the new address and confirm with your passkey. You get a **move link** for the new address, shown once. The old address keeps working.
+3. Open the move link **at the new address** and create a passkey there. That completes the move. If you don't within 24 hours, the move expires; you can also cancel it.
+
+After the move everyone is signed out, the old address forwards to the new one, and old sign-in, recovery and invitation links stop working (copy or resend invitations from Admin → Invitations, which flags them). Members sign in with an email link (when email is on) or a recovery link; admins and other owners need a recovery link from an owner. Restoring onto another address works the same way.
+
 ## 9. Updating, rolling back and troubleshooting
 
 ### Updating

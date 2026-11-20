@@ -59,6 +59,12 @@ import { currentStore } from "../identity/request-store";
  * | `POST /admin/invitations` | `invitation.create` (admins: members; owners: admins too, with the invite gate) |
  * | `GET /admin/invitations/:id/link` · `POST …/:id/resend` | `invitation.create` for the invitation's role |
  * | `DELETE /admin/invitations/:id` | `invitation.revoke` for the invitation's role |
+ * | `GET /admin/members` (M1c) | Owner, admin (`admin.members.view`); the recovery-link flag for owners only |
+ * | `POST /admin/members/:id/recovery-link` (M1c) | `member.issue_recovery_link` (members only for admins; step-up) |
+ * | `PATCH /admin/members/:id` `{ email }` (M1c) | `member.change_email` (members only for admins; step-up) |
+ * | `POST /admin/members/:id/acknowledge-reset` (M1c) | Owner (`member.acknowledge_reset`) |
+ * | `GET /admin/domain` · `POST /admin/domain` · `DELETE /admin/domain/pending` (M1c) | Owner; starting needs step-up |
+ * | `POST /admin/domain/complete` (M1c) | The move link, on the pending origin only (no session) |
  */
 
 const SMALL_BODY = 16 * 1024;

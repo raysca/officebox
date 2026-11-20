@@ -220,7 +220,7 @@ describe("Members and the workspace address (admin)", () => {
     expect(within(dialog).getByLabelText<HTMLInputElement>("Recovery link").value).toContain("#t=");
     await expectNoViolations();
     await user.click(within(dialog).getByRole("button", { name: "Done" }));
-    await user.click(within(row).getByRole("button", { name: "Change the email address of Ana Diaz" }));
+    await user.click(within(row).getByRole("button", { name: "Change email for Ana Diaz" }));
     const edit = await screen.findByRole("dialog", { name: "Change email" });
     await user.type(within(edit).getByLabelText("New email"), "ana.new@example.com");
     await user.click(within(edit).getByRole("button", { name: "Change email" }));

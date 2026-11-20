@@ -318,7 +318,7 @@ export const messages = {
     recoveryFlagged:
       "Email isn't set up, so owners will see this flagged and the person sees a notice when signing in.",
     changeEmail: "Change email",
-    changeEmailLabel: (name: string) => `Change the email address of ${name}`,
+    changeEmailLabel: (name: string) => `Change email for ${name}`,
     changeEmailTitle: "Change email",
     newEmailLabel: "New email",
     save: "Change email",

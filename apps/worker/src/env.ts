@@ -65,7 +65,10 @@ export interface Env {
    * everyone out: the session cookie is signed with the newest secret only (M1a-0 spike).
    */
   BETTER_AUTH_SECRETS?: string;
-  /** Owner recovery secret (Identity §4.6). M1a reads it only for the engine's "set and unconsumed" fact. */
+  /**
+   * Owner recovery secret (Identity §4.6), at least 32 characters: `POST /api/recover` registers a new passkey
+   * for one owner with it, once (M1c); while set and unconsumed it also satisfies the owners' invite gate.
+   */
   RECOVERY_TOKEN?: string;
 
   // Email provider secrets (Platform §16), read only by the driver the owner chose in settings.

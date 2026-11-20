@@ -91,7 +91,10 @@ import { handleIssueWsTicket, handleSetMyDnd, handleUpdateMyPreferences } from "
  * | better-auth `POST /auth/sign-in/magic-link` (M1b) | Public; our availability check and limits first |
  * | `POST /sign-in/link/lookup` · `POST /sign-in/link` (M1b) | Magic-link token: show the email; consume and sign in |
  * | `POST /invitations/lookup` · `POST /invitations/accept` (M1b) | Invitation token |
- * | `GET /status/public` (M1b) | Anyone: whether magic links are offered |
+ * | `GET /status/public` (M1b) | Anyone: whether magic links are offered (and, M1c, this browser's recovery notice) |
+ * | `POST /auth/recover/lookup` · `POST /auth/recover` (M1c) | Recovery link token |
+ * | `POST /recover` (M1c) | `RECOVERY_TOKEN` (404 when unset) |
+ * | `POST /me/email/confirm/lookup` · `POST /me/email/confirm` (M1c) | Email-change token (public) |
  *
  * Every state change passes the core CSRF check first; every route that touches user content asks
  * the permission engine. No route returns a session token.
