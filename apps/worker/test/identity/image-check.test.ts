@@ -1,10 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { checkAvatarImage } from "../../src/features/identity/image-check";
-import { concat, GIF, HTML, jpeg, png, PNG_1X1, SVG, text, webp } from "./images";
+import {
+  concat,
+  contains,
+  GIF,
+  HTML,
+  jpeg,
+  jpegWithMetadata,
+  jpegWithTwoFrames,
+  png,
+  PNG_1X1,
+  pngWithText,
+  SVG,
+  text,
+  webp,
+  webpWithExif,
+} from "./images";
 
 describe("avatar image checks (Identity §4.7, TDD §8.3)", () => {
   it("accepts a real PNG and reads its size", () => {
-    expect(checkAvatarImage(PNG_1X1)).toEqual({ ok: true, type: "image/png", extension: "png", width: 1, height: 1 });
+    expect(checkAvatarImage(PNG_1X1)).toEqual({
+      ok: true,
+      type: "image/png",
+      extension: "png",
+      width: 1,
+      height: 1,
+      bytes: PNG_1X1,
+    });
   });
 
   it.each([
@@ -46,5 +68,35 @@ describe("avatar image checks (Identity §4.7, TDD §8.3)", () => {
     ["zero-sized", png(0, 10)],
   ])("refuses an image %s", (_name, bytes) => {
     expect(checkAvatarImage(bytes)).toEqual({ ok: false, reason: "dimensions" });
+  });
+
+  it("refuses a JPEG with two frame headers", () => {
+    expect(checkAvatarImage(jpegWithTwoFrames())).toEqual({ ok: false, reason: "malformed" });
+  });
+
+  const PAYLOAD = "<script>alert(1)</script> GPS 51.5N";
+  it.each([
+    ["PNG tEXt and eXIf chunks", pngWithText(PAYLOAD), png(4, 4)],
+    ["JPEG APP1 and COM segments", jpegWithMetadata(PAYLOAD), jpeg(4, 4)],
+  ])("accepts an image with metadata in %s, and strips it", (_name, bytes, clean) => {
+    const checked = checkAvatarImage(bytes);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(contains(bytes, "<script>")).toBe(true);
+    expect(contains(checked.bytes, "<script>")).toBe(false);
+    expect(checked.bytes).toEqual(clean);
+    // The cleaned copy is itself a valid image of the same size.
+    expect(checkAvatarImage(checked.bytes)).toMatchObject({ ok: true, width: 4, height: 4 });
+  });
+
+  it("strips a WebP EXIF chunk, fixing the RIFF size and the VP8X flag", () => {
+    const bytes = webpWithExif(PAYLOAD);
+    const checked = checkAvatarImage(bytes);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(contains(checked.bytes, "<script>")).toBe(false);
+    expect(new DataView(checked.bytes.buffer).getUint32(4, true)).toBe(checked.bytes.length - 8);
+    expect(checked.bytes[20]! & 0x08).toBe(0);
+    expect(checkAvatarImage(checked.bytes)).toMatchObject({ ok: true, width: 4, height: 4 });
   });
 });

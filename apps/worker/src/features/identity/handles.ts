@@ -12,6 +12,7 @@ import {
   type Result,
 } from "@officebox/shared";
 import { Database, expectOk } from "../../core/db";
+import { ulid } from "../../core/ids";
 
 /**
  * @handles (Identity §4.8; M1d). The `handles` table is authoritative; `users.handle` is a copy written
@@ -24,8 +25,9 @@ import { Database, expectOk } from "../../core/db";
  * - **Released handles are held for 30 days:** a change keeps the old row with `released_at` set (and
  *   its owner), so nobody else can claim it until the hold passes; the same person may take it back at
  *   once **(default)**. An expired hold is deleted in the batch that claims the handle.
- * - **History:** those released rows are also the handle history Platform §8 counts: at most
- *   {@link HANDLE_CHANGES_PER_WINDOW} changes per {@link HANDLE_CHANGE_WINDOW_MS}.
+ * - **History:** every change is logged in `handle_changes` (who and when, no handle values), which
+ *   Platform §8's limit counts: at most {@link HANDLE_CHANGES_PER_WINDOW} changes per
+ *   {@link HANDLE_CHANGE_WINDOW_MS}. Taking a handle back doesn't delete that log.
  */
 
 interface HandleRow {
@@ -98,65 +100,78 @@ export function handleError(reason: HandleUnavailableReason): ApiError {
   return apiError("conflict", message, { reason: `handle_${reason}`, fields: { handle: [message] } });
 }
 
-/** Handle changes left in the current 30-day window, and when the oldest counted change drops out. */
+/**
+ * Handle changes left in the current 30-day window, and when the oldest counted change drops out. Counted
+ * from `handle_changes`, a log nothing else deletes, so taking a released handle back (which deletes its
+ * held row) can't reset the count.
+ */
 export async function handleChangeAllowance(
   d1: D1Database,
   userId: string,
   now: number,
 ): Promise<{ left: number; nextAt: number | null }> {
   const rows = expectOk(
-    await new Database(d1).all<{ released_at: number }>(
-      `SELECT released_at FROM handles
-        WHERE owner_type = 'user' AND owner_id = ? AND released_at IS NOT NULL AND released_at > ?
-        ORDER BY released_at`,
+    await new Database(d1).all<{ changed_at: number }>(
+      "SELECT changed_at FROM handle_changes WHERE user_id = ? AND changed_at > ? ORDER BY changed_at",
       userId,
       now - HANDLE_CHANGE_WINDOW_MS,
     ),
   );
   const left = Math.max(0, HANDLE_CHANGES_PER_WINDOW - rows.length);
-  const oldest = rows[0]?.released_at;
+  const oldest = rows[0]?.changed_at;
   return { left, nextAt: left === 0 && oldest !== undefined ? oldest + HANDLE_CHANGE_WINDOW_MS : null };
 }
 
-export type HandleChange = { changed: false } | { changed: true; from: string | null; to: string };
+/** The statements of a handle change, to run in one D1 batch (alone, or with a profile update). */
+export interface HandleChangePlan {
+  from: string | null;
+  to: string;
+  statements: D1PreparedStatement[];
+  /** The statement whose `changes` must be 1 for the change to have applied (the `users.handle` copy). */
+  appliedIndex: number;
+}
 
 /**
- * Changes an active member's handle (Identity §4.8). One D1 batch: free an expired hold, claim the new
- * handle, release the old one (held 30 days) and copy it to `users.handle`. Every write is conditional on
- * the member's handle still being the one read, so two concurrent changes by the same person can't both
- * apply; a collision with someone else's claim is the primary key's constraint failure.
+ * Checks and prepares an active member's handle change (Identity §4.8), or null when the handle is
+ * already theirs. The batch frees an expired hold, claims the new handle, releases the old one (held 30
+ * days), logs the change and copies it to `users.handle`. Every write is conditional on the member's
+ * handle still being the one read, so two concurrent changes by the same person can't both apply; a
+ * collision with someone else's claim is the primary key's constraint failure, which rolls back the batch.
  */
-export async function changeHandle(
+export async function prepareHandleChange(
   d1: D1Database,
   userId: string,
   handle: string,
   now: number,
-): Promise<Result<HandleChange, ApiError>> {
+): Promise<Result<HandleChangePlan | null, ApiError>> {
   const db = new Database(d1);
   const user = expectOk(
     await db.first<{ handle: string | null }>("SELECT handle FROM users WHERE id = ? AND status = 'active'", userId),
   );
   if (!user) return err(apiError("unauthenticated", "Sign in to continue."));
   const current = user.handle;
-  if (current === handle) return ok({ changed: false });
+  if (current === handle) return ok(null);
 
   const availability = await handleAvailability(d1, handle, userId, now);
   if (!availability.available) return err(handleError(availability.reason ?? "taken"));
 
-  const allowance = await handleChangeAllowance(d1, userId, now);
-  if (allowance.left === 0) {
-    return err(
-      apiError("rate_limited", "You can change your handle 3 times in 30 days.", {
-        reason: "handle_change_limit",
-        retryAfterSeconds: Math.max(1, Math.ceil(((allowance.nextAt ?? now) - now) / 1000)),
-      }),
-    );
+  // A first handle for someone without one isn't a change; every later one counts.
+  if (current !== null) {
+    const allowance = await handleChangeAllowance(d1, userId, now);
+    if (allowance.left === 0) {
+      return err(
+        apiError("rate_limited", "You can change your handle 3 times in 30 days.", {
+          reason: "handle_change_limit",
+          retryAfterSeconds: Math.max(1, Math.ceil(((allowance.nextAt ?? now) - now) / 1000)),
+        }),
+      );
+    }
   }
 
   const stillCurrent = "EXISTS (SELECT 1 FROM users WHERE id = ?2 AND handle IS ?3 AND status = 'active')";
   const claimed =
     "EXISTS (SELECT 1 FROM handles WHERE handle = ?1 AND owner_type = 'user' AND owner_id = ?2 AND released_at IS NULL)";
-  const result = await db.batchRun([
+  const statements = [
     freeHeldHandleStatement(db, handle, now, userId),
     db.statement(
       `INSERT INTO handles (handle, owner_type, owner_id) SELECT ?1, 'user', ?2 WHERE ${stillCurrent}`,
@@ -173,20 +188,39 @@ export async function changeHandle(
       now,
     ),
     db.statement(
+      `INSERT INTO handle_changes (id, user_id, changed_at)
+       SELECT ?5, ?2, ?4 WHERE ?3 IS NOT NULL AND ${stillCurrent} AND ${claimed}`,
+      handle,
+      userId,
+      current,
+      now,
+      ulid(),
+    ),
+    db.statement(
       `UPDATE users SET handle = ?1, updated_at = ?4 WHERE id = ?2 AND handle IS ?3 AND status = 'active' AND ${claimed}`,
       handle,
       userId,
       current,
       now,
     ),
-  ]);
+  ];
+  return ok({ from: current, to: handle, statements, appliedIndex: 4 });
+}
+
+/** Runs a prepared batch (a handle change plus any other statements) and maps its outcome. */
+export async function runHandleBatch(
+  d1: D1Database,
+  plan: HandleChangePlan,
+  extra: D1PreparedStatement[] = [],
+): Promise<Result<void, ApiError>> {
+  const result = await new Database(d1).batchRun([...plan.statements, ...extra]);
   if (!result.ok) {
     // Someone claimed it between the check and the batch (the primary key decided): nothing was written.
     if (result.error.kind === "unique") return err(handleError("taken"));
     throw new Error(`handle change: unexpected ${result.error.kind} constraint failure`);
   }
-  if ((result.value[3]?.changes ?? 0) !== 1) {
+  if ((result.value[plan.appliedIndex]?.changes ?? 0) !== 1) {
     return err(apiError("conflict", "Your handle changed at the same time. Try again.", { reason: "handle_changed" }));
   }
-  return ok({ changed: true, from: current, to: handle });
+  return ok();
 }

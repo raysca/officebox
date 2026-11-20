@@ -112,3 +112,50 @@ export const SVG = text(
 );
 export const HTML = text("<!doctype html><html><body><script>alert(document.cookie)</script></body></html>");
 export const GIF = Uint8Array.from([...ascii("GIF89a"), 1, 0, 1, 0, 0, 0, 0, 0x3b]);
+
+/** A PNG with a `tEXt` chunk and an `eXIf` chunk before IEND, each carrying `payload`. */
+export function pngWithText(payload: string): Uint8Array {
+  const base = png(4, 4);
+  const chunk = (type: string, body: number[]) => [...u32be(body.length), ...ascii(type), ...body, 0, 0, 0, 0];
+  return concat(
+    base.slice(0, base.length - 12),
+    Uint8Array.from(chunk("tEXt", [...ascii("Comment"), 0, ...ascii(payload)])),
+    Uint8Array.from(chunk("eXIf", ascii(payload))),
+    base.slice(base.length - 12),
+  );
+}
+
+/** A JPEG with an APP1 (EXIF/XMP) segment and a COM segment carrying `payload`, right after SOI. */
+export function jpegWithMetadata(payload: string): Uint8Array {
+  const base = jpeg(4, 4);
+  const body = ascii(payload);
+  const segment = (marker: number) => [
+    0xff,
+    marker,
+    ((body.length + 2) >> 8) & 0xff,
+    (body.length + 2) & 0xff,
+    ...body,
+  ];
+  return concat(base.slice(0, 2), Uint8Array.from([...segment(0xe1), ...segment(0xfe)]), base.slice(2));
+}
+
+/** A JPEG with two frame headers (SOF0 twice). */
+export function jpegWithTwoFrames(): Uint8Array {
+  const base = jpeg(4, 4);
+  // `jpeg()`'s SOF0 segment starts after SOI (2 bytes) and APP0 (18 bytes) and is 13 bytes long.
+  return concat(base.slice(0, 33), base.slice(20, 33), base.slice(33));
+}
+
+/** An extended WebP (VP8X with the EXIF flag) with an EXIF chunk carrying `payload`, then a VP8L image. */
+export function webpWithExif(payload: string): Uint8Array {
+  const vp8x = [...ascii("VP8X"), ...u32le(10), 0x08, 0, 0, 0, 3, 0, 0, 3, 0, 0]; // 4 × 4
+  const body = ascii(payload.length % 2 ? `${payload} ` : payload);
+  const exif = [...ascii("EXIF"), ...u32le(body.length), ...body];
+  const chunks = concat(Uint8Array.from(vp8x), Uint8Array.from(exif), webp(4, 4).slice(12));
+  return concat(Uint8Array.from([...ascii("RIFF"), ...u32le(4 + chunks.length), ...ascii("WEBP")]), chunks);
+}
+
+/** Whether `needle` occurs in `bytes`. */
+export function contains(bytes: Uint8Array, needle: string): boolean {
+  return new TextDecoder("latin1").decode(bytes).includes(needle);
+}

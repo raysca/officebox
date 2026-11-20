@@ -1,4 +1,4 @@
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import {
   DEFAULT_WORKING_HOURS,
@@ -31,7 +31,7 @@ import {
   uniqueHandle,
   type Workspace,
 } from "./helpers";
-import { concat, GIF, HTML, jpeg, png, PNG_1X1, SVG, text, webp } from "./images";
+import { concat, contains, GIF, HTML, jpeg, jpegWithMetadata, png, PNG_1X1, SVG, text, webp } from "./images";
 
 /**
  * M1d: profiles, status, avatars, @handles and the member directory (Identity §4.7, §4.8, §4.10, §6, §9;
@@ -51,6 +51,21 @@ beforeAll(async () => {
   butlerAtSetup = await claim(new Browser(), { ...ownerDetails(), handle: "butler" });
   ws = await setupWorkspace();
 });
+
+/** Moves a UserHub's test clock forward and its timers' due times back by `ms` (no wall-clock sleep). */
+async function advanceHubClock(userId: string, ms: number): Promise<void> {
+  await runInDurableObject(env.USER_HUB.getByName(userId), (_instance, state) => {
+    const current = Number(
+      state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'test_time_offset_ms'").toArray()[0]
+        ?.value ?? "0",
+    );
+    state.storage.sql.exec(
+      "INSERT OR REPLACE INTO meta (key, value) VALUES ('test_time_offset_ms', ?)",
+      String(current + ms),
+    );
+    state.storage.sql.exec("UPDATE core_timers SET due_at = due_at - ?", ms);
+  });
+}
 
 /** A raw-body request (avatar uploads) from a signed-in browser, with the CSRF header and Origin. */
 async function upload(browser: Browser, bytes: Uint8Array, contentType: string, headers: Record<string, string> = {}) {
@@ -241,6 +256,34 @@ describe("own profile (Identity §4.7)", () => {
     expect(res.status).toBe(403);
   });
 
+  it("stores the canonical spelling of a time zone", async () => {
+    const member = await addMember();
+    expect((await setProfile(member, { timezone: "europe/berlin" })).body.timezone).toBe("Europe/Berlin");
+    expect((await setProfile(member, { timezone: "utc" })).body.timezone).toBe("UTC");
+  });
+
+  it("PATCH /me/preferences follows the same time zone rule and records the update", async () => {
+    const member = await addMember();
+    const refused = await member.browser.json("/api/me/preferences", { method: "PATCH", body: { timezone: "+05:00" } });
+    expect(refused.status).toBe(400);
+    const before = Date.now();
+    const res = await member.browser.json<{ timezone: string }>("/api/me/preferences", {
+      method: "PATCH",
+      body: { timezone: "asia/tokyo" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.timezone).toBe("Asia/Tokyo");
+    const row = await env.DB.prepare("SELECT timezone, updated_at FROM users WHERE id = ?")
+      .bind(member.id)
+      .first<{ timezone: string; updated_at: number }>();
+    expect(row).toMatchObject({ timezone: "Asia/Tokyo" });
+    expect(row!.updated_at).toBeGreaterThanOrEqual(before);
+    // A disabled member can't change it.
+    await env.DB.prepare("UPDATE users SET status = 'disabled' WHERE id = ?").bind(member.id).run();
+    const disabled = await member.browser.json("/api/me/preferences", { method: "PATCH", body: { timezone: "UTC" } });
+    expect(disabled.status).toBe(401);
+  });
+
   it("a time zone change recomputes availability without failing", async () => {
     const member = await addMember();
     const res = await setProfile(member, { timezone: "America/New_York" });
@@ -306,13 +349,35 @@ describe("status (Identity §4.7)", () => {
     };
     await expect.poll(presenceOf).toBeTruthy();
 
-    const expiresAt = Date.now() + 1500;
+    const expiresAt = Date.now() + 10 * 60_000;
     await member.browser.json("/api/me/status", { method: "PUT", body: { emoji: "☕", text: "Coffee", expiresAt } });
     expect((await presenceOf())?.statusText).toBe("☕ Coffee");
 
-    await new Promise((resolve) => setTimeout(resolve, expiresAt - Date.now() + 100));
+    // Injected clock: the hub's time moves past the expiry and its status timer comes due.
+    await advanceHubClock(member.id, 10 * 60_000 + 1000);
     await runDurableObjectAlarm(env.USER_HUB.getByName(member.id));
     expect((await presenceOf())?.statusText).toBeNull();
+  });
+
+  it("the hub reconciles a status it was never told about on its heartbeat", async () => {
+    const member = await addMember();
+    const hub = await openHub(member.browser);
+    expect(hub).not.toBeNull();
+    const presenceOf = async () => {
+      const res = await ws.browser.json<{ online: { userId: string; statusText: string | null }[] }>(
+        "/api/realtime/presence",
+      );
+      return res.body.online.find((entry) => entry.userId === member.id);
+    };
+    await expect.poll(presenceOf).toBeTruthy();
+    // Written straight to D1, as if the Worker's refreshStatus calls had all failed.
+    await env.DB.prepare("UPDATE users SET status_emoji = '🚲', status_text = 'Cycling' WHERE id = ?")
+      .bind(member.id)
+      .run();
+    expect((await presenceOf())?.statusText).toBeNull();
+    await advanceHubClock(member.id, 5 * 60_000 + 1000);
+    await runDurableObjectAlarm(env.USER_HUB.getByName(member.id));
+    expect((await presenceOf())?.statusText).toBe("🚲 Cycling");
   });
 });
 
@@ -390,6 +455,38 @@ describe("@handles (Identity §4.8, Platform §8)", () => {
   it("refused setup with the assistant's derived handle as the owner's", () => {
     expect(butlerAtSetup.status).toBe(400);
     expect(butlerAtSetup.body.error?.reason).toBe("handle_reserved");
+  });
+
+  it("counts switching back and forth (A → B → A → B) against the limit", async () => {
+    const member = await addMember();
+    const [a, b] = [uniqueHandle("ha"), uniqueHandle("hb")];
+    expect((await setProfile(member, { handle: a })).status).toBe(200); // a first handle isn't a change
+    for (const handle of [b, a, b]) expect((await setProfile(member, { handle })).status).toBe(200);
+    const res = await setProfile(member, { handle: a });
+    expect(res.status).toBe(429);
+    expect(res.body.error?.reason).toBe("handle_change_limit");
+  });
+
+  it("a failed handle change saves nothing else and uses up no change", async () => {
+    const owner = await addMember();
+    const taken = uniqueHandle("tk");
+    await setProfile(owner, { handle: taken });
+    const member = await addMember();
+    await setProfile(member, { handle: uniqueHandle("mine") });
+    const res = await setProfile(member, { handle: taken, jobTitle: "Should not save" });
+    expect(res.status).toBe(409);
+    const profile = await member.browser.json<MyProfile>("/api/me/profile");
+    expect(profile.body.jobTitle).toBeNull();
+    expect(profile.body.handleChangesLeft).toBe(3);
+  });
+
+  it("a handle change and other fields save together", async () => {
+    const member = await addMember();
+    await setProfile(member, { handle: uniqueHandle("one") });
+    const next = uniqueHandle("two");
+    const res = await setProfile(member, { handle: next, jobTitle: "Together" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ handle: next, jobTitle: "Together", handleChangesLeft: 2 });
   });
 
   it("allows three changes in 30 days, then answers rate_limited with a retry time", async () => {
@@ -599,6 +696,20 @@ describe("avatars (Identity §4.7, TDD §8.3)", () => {
     const member = await addMember();
     await env.DB.prepare("UPDATE users SET avatar_key = ? WHERE id = ?").bind(victimKey, member.id).run();
     expect((await ws.browser.json(`/api/members/${member.id}/avatar`)).status).toBe(404);
+    // Replacing or removing the member's avatar never deletes an object outside their prefix.
+    expect((await upload(member.browser, PNG_1X1, "image/png")).status).toBe(200);
+    expect(await env.FILES.head(victimKey)).not.toBeNull();
+  });
+
+  it("stores the image with its metadata stripped", async () => {
+    const member = await addMember();
+    const bytes = jpegWithMetadata("<script>alert(1)</script> GPS 51.5N");
+    expect((await upload(member.browser, bytes, "image/jpeg")).status).toBe(200);
+    const object = await env.FILES.get((await avatarKey(member.id))!);
+    const stored = new Uint8Array(await object!.arrayBuffer());
+    expect(stored.length).toBeLessThan(bytes.length);
+    expect(contains(stored, "<script>")).toBe(false);
+    expect(contains(stored, "GPS")).toBe(false);
   });
 });
 

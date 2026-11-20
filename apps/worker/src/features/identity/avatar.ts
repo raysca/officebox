@@ -23,8 +23,8 @@ import { checkAvatarImage } from "./image-check";
  *   browsers may cache an avatar privately and still see a new one at once.
  * - **Uploads** are the raw image bytes (`PUT /api/me/avatar`, `Content-Type` image/png, image/jpeg or
  *   image/webp), streamed with a {@link MAX_AVATAR_BYTES} cap. The type comes from the bytes
- *   (`image-check.ts`) and must agree with the declared `Content-Type`; SVG, HTML, GIF and polyglots
- *   are refused.
+ *   (`image-check.ts`) and must agree with the declared `Content-Type`; SVG, HTML, GIF, malformed
+ *   files and data appended outside the image are refused, and metadata is stripped before storing.
  * - **Downloads** (`GET /api/members/:id/avatar`) go through the permission engine (`profile.view`) and
  *   carry the sniffed type, `nosniff` (every response), `Content-Security-Policy: …; sandbox`,
  *   `Content-Disposition: inline` with an image file name, and `Cross-Origin-Resource-Policy:
@@ -87,8 +87,14 @@ async function swapKey(
   return err(apiError("conflict", "Your avatar changed at the same time. Try again."));
 }
 
-async function deleteObject(ctx: CoreContext, key: string | null): Promise<void> {
+/** Deletes an avatar object, only if it's a key this module writes under `userId`'s own prefix. */
+async function deleteObject(ctx: CoreContext, userId: string, key: string | null): Promise<void> {
   if (!key) return;
+  const match = KEY_PATTERN.exec(key);
+  if (!match || match[1] !== userId) {
+    ctx.log.warn("avatar: refusing to delete a key outside the member's prefix", { userId });
+    return;
+  }
   try {
     await ctx.env.FILES.delete(key);
   } catch (error) {
@@ -126,7 +132,7 @@ export async function uploadAvatar(
   if (checked.type !== declared) return err(unsupported());
 
   const key = `${AVATAR_PREFIX}${userId}/${ulid()}.${checked.extension}`;
-  await ctx.env.FILES.put(key, body.value, {
+  await ctx.env.FILES.put(key, checked.bytes, {
     httpMetadata: { contentType: CONTENT_TYPE_FOR[checked.extension] },
     customMetadata: { userId },
   });
@@ -135,14 +141,14 @@ export async function uploadAvatar(
   try {
     swapped = await swapKey(db, userId, key, ctx.now());
   } catch (error) {
-    await deleteObject(ctx, key);
+    await deleteObject(ctx, userId, key);
     throw error;
   }
   if (!swapped.ok) {
-    await deleteObject(ctx, key);
+    await deleteObject(ctx, userId, key);
     return swapped;
   }
-  await deleteObject(ctx, swapped.value);
+  await deleteObject(ctx, userId, swapped.value);
   return ok({ avatarUrl: avatarUrl(userId, key) });
 }
 
@@ -150,7 +156,7 @@ export async function uploadAvatar(
 export async function removeAvatar(ctx: CoreContext, userId: string): Promise<Result<{ avatarUrl: null }, ApiError>> {
   const swapped = await swapKey(new Database(ctx.env.DB), userId, null, ctx.now());
   if (!swapped.ok) return swapped;
-  await deleteObject(ctx, swapped.value);
+  await deleteObject(ctx, userId, swapped.value);
   return ok({ avatarUrl: null });
 }
 

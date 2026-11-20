@@ -162,21 +162,7 @@ export async function handleUpdateMyPreferences(c: AppContext): Promise<Response
   const body = await readJson(c, updateRealtimePreferencesBodySchema, SMALL_BODY);
   if (!body.ok) return respond(c, body);
 
-  if (body.value.timezone !== undefined) {
-    try {
-      Intl.DateTimeFormat("en-GB", { timeZone: body.value.timezone });
-    } catch {
-      return respond(
-        c,
-        err(
-          apiError("validation_failed", "Invalid IANA time zone.", {
-            fields: { timezone: ["Invalid IANA time zone."] },
-          }),
-        ),
-      );
-    }
-  }
-
+  // The time zone was validated and canonicalised by the shared schema (IANA names only; M1d).
   const now = c.var.now();
   const db = new Database(c.env.DB);
   const [userRow, prefRow] = await Promise.all([
@@ -194,7 +180,15 @@ export async function handleUpdateMyPreferences(c: AppContext): Promise<Response
         : JSON.stringify(body.value.dndSchedule);
 
   if (body.value.timezone !== undefined) {
-    expectOk(await db.run("UPDATE users SET timezone = ? WHERE id = ?", nextTimezone, me.userId));
+    const written = expectOk(
+      await db.run(
+        "UPDATE users SET timezone = ?, updated_at = ? WHERE id = ? AND status = 'active'",
+        nextTimezone,
+        now,
+        me.userId,
+      ),
+    );
+    if (written.changes !== 1) return respond(c, err(UNAUTHENTICATED));
   }
   if (body.value.dndSchedule !== undefined) {
     expectOk(

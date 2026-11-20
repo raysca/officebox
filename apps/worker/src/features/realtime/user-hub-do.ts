@@ -509,6 +509,13 @@ export class UserHub extends CoreDurableObject {
       await this.env.PRESENCE.getByName("presence").heartbeat(uid, presence, availability);
     }
     this.setTimer("heartbeat:tick", now + HUB_HEARTBEAT_MS);
+    // Reconcile the status with D1 (M1d): catches up on a `refreshStatus` the Worker couldn't deliver
+    // and re-arms the expiry timer. Presence is told only if the text changed.
+    try {
+      await this.syncStatus(uid);
+    } catch (error) {
+      this.log.warn("user hub: status not reconciled", { error });
+    }
   }
 
   private async closeConnectionsInternal(

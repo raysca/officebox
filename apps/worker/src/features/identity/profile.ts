@@ -18,7 +18,7 @@ import {
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk, type SqlValue } from "../../core/db";
 import { avatarUrl } from "./avatar";
-import { changeHandle, handleChangeAllowance } from "./handles";
+import { handleChangeAllowance, prepareHandleChange, runHandleBatch } from "./handles";
 
 /**
  * Profiles and the member directory (M1d; Identity §4.7, §4.10, §6; Permissions §4.6).
@@ -118,8 +118,8 @@ export interface ProfileUpdate {
 }
 
 /**
- * `PATCH /me/profile`. A handle change runs first, in its own batch (it has its own rules and
- * conflicts); if it fails, nothing else is written. The other fields are one conditional UPDATE.
+ * `PATCH /me/profile`. A handle change (checked first: its own rules and conflicts) and the other
+ * fields are written in one D1 batch, so either the whole edit applies or none of it does.
  */
 export async function updateProfile(
   ctx: CoreContext,
@@ -130,12 +130,8 @@ export async function updateProfile(
   const before = await profileRow(ctx.env.DB, userId);
   if (!before || before.status !== "active") return err(apiError("unauthenticated", "Sign in to continue."));
 
-  let handleChanged = false;
-  if (body.handle !== undefined) {
-    const changed = await changeHandle(ctx.env.DB, userId, body.handle, now);
-    if (!changed.ok) return changed;
-    handleChanged = changed.value.changed;
-  }
+  const plan = body.handle !== undefined ? await prepareHandleChange(ctx.env.DB, userId, body.handle, now) : ok(null);
+  if (!plan.ok) return plan;
 
   const sets: string[] = [];
   const params: SqlValue[] = [];
@@ -156,16 +152,23 @@ export async function updateProfile(
     sets.push("onboarded_at = COALESCE(onboarded_at, ?)");
     params.push(now);
   }
+  const db = new Database(ctx.env.DB);
+  const fields: D1PreparedStatement[] = [];
   if (sets.length > 0) {
     set("updated_at", now);
-    expectOk(
-      await new Database(ctx.env.DB).run(
-        `UPDATE users SET ${sets.join(", ")} WHERE id = ? AND status = 'active'`,
-        ...params,
-        userId,
-      ),
+    fields.push(
+      db.statement(`UPDATE users SET ${sets.join(", ")} WHERE id = ? AND status = 'active'`, ...params, userId),
     );
   }
+  // A handle change and the other fields are one batch: either all apply, or (a lost handle race, a
+  // concurrent change) none do, so a failed save never uses up a handle change.
+  if (plan.value) {
+    const applied = await runHandleBatch(ctx.env.DB, plan.value, fields);
+    if (!applied.ok) return applied;
+  } else if (fields.length > 0) {
+    expectOk(await db.batchRun(fields));
+  }
+  const handleChanged = plan.value !== null;
   const profile = await getMyProfile(ctx, userId);
   if (!profile.ok) return profile;
   const timezoneChanged = body.timezone !== undefined && body.timezone !== (before.timezone ?? "UTC");

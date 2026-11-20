@@ -38,13 +38,22 @@ import { getMember, getMyProfile, listDirectory, setStatus, updateProfile } from
 const SMALL_BODY = 16 * 1024;
 const NO_MEMBER = apiError("not_found", "No such member.");
 
-/** Tells the member's UserHub that their status changed, so live presence follows. Best effort. */
+/**
+ * Tells the member's UserHub that their status changed, so live presence follows and the hub schedules
+ * the expiry. Tried up to 3 times (D1 is already written, so the request still succeeds). If every try
+ * fails, the hub catches up by itself: it re-reads the status from D1 (and re-arms the expiry timer)
+ * on every 5-minute heartbeat and whenever the member comes online, so presence is stale for at most
+ * one heartbeat, and every REST read hides an expired status regardless.
+ */
 async function syncLiveStatus(c: AppContext, userId: string): Promise<void> {
-  try {
-    const result = await c.env.USER_HUB.getByName(userId).refreshStatus(userId);
-    if (!result.ok) c.var.log.warn("profile: live status not refreshed", { code: result.error.code });
-  } catch (error) {
-    c.var.log.warn("profile: live status not refreshed", { error });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const result = await c.env.USER_HUB.getByName(userId).refreshStatus(userId);
+      if (result.ok) return;
+      c.var.log.warn("profile: live status not refreshed", { code: result.error.code, attempt });
+    } catch (error) {
+      c.var.log.warn("profile: live status not refreshed", { error, attempt });
+    }
   }
 }
 

@@ -120,6 +120,22 @@ describe("profile and status (M1d)", () => {
     expect(fetch.mock.calls.some(([url]) => url === "/api/me/status")).toBe(false);
   });
 
+  it("suggests a region only during profile setup; a cleared region stays cleared", async () => {
+    const cleared = healthyFetch({
+      routes: [on("GET", "/api/me/profile", () => jsonResponse({ ...PROFILE, region: null, onboardedAt: 1 }))],
+    });
+    const first = await renderApp("/settings/profile", { fetch: cleared });
+    expect((await screen.findByLabelText<HTMLSelectElement>("Country or region")).value).toBe("");
+    first.unmount();
+
+    const settingUp = healthyFetch({
+      routes: [on("GET", "/api/me/profile", () => jsonResponse({ ...PROFILE, region: null, onboardedAt: null }))],
+    });
+    await renderApp("/settings/profile", { fetch: settingUp });
+    const suggested = navigator.languages.map((tag) => new Intl.Locale(tag).maximize().region).find(Boolean) ?? "";
+    expect((await screen.findByLabelText<HTMLSelectElement>("Country or region")).value).toBe(suggested);
+  });
+
   it("is the profile setup step after accepting an invitation, with a way to skip", async () => {
     const fetch = healthyFetch({ routes: [on("GET", "/api/me/profile", () => jsonResponse(PROFILE))] });
     await renderApp("/settings/profile?welcome=1", { fetch });

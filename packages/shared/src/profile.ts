@@ -63,10 +63,20 @@ export function isValidTimeZone(value: string): boolean {
   }
 }
 
+/**
+ * The runtime's canonical spelling of a valid zone (`europe/berlin` → `Europe/Berlin`, `utc` → `UTC`), so
+ * one zone is stored one way. Aliases keep whatever name the runtime's ICU data resolves them to.
+ */
+export function canonicalTimeZone(value: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone;
+}
+
+/** An IANA zone name, validated and then canonicalised (the Worker stores the canonical form). */
 export const timeZoneSchema = z
   .string()
   .trim()
-  .refine(isValidTimeZone, { message: "Choose a time zone from the list (an IANA name such as Europe/Berlin)." });
+  .refine(isValidTimeZone, { message: "Choose a time zone from the list (an IANA name such as Europe/Berlin)." })
+  .transform(canonicalTimeZone);
 
 // ---- Working hours (Identity §4.7: per weekday, start and end, in the member's time zone) ------
 

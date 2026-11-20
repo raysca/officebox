@@ -366,8 +366,10 @@ function DetailsForm({ profile, welcome }: { profile: MyProfile; welcome: boolea
   const [timezone, setTimezone] = useState(() =>
     settingUp && profile.timezone === "UTC" ? (browserTimeZone() ?? profile.timezone) : profile.timezone,
   );
-  const suggestion = useMemo(() => suggestedRegion(navigator.languages), []);
-  const [country, setCountry] = useState(profile.region?.split("-")[0] ?? suggestion ?? "");
+  // The region is suggested only during profile setup; once set up, a cleared region stays cleared.
+  const [country, setCountry] = useState(
+    () => profile.region?.split("-")[0] ?? (settingUp ? suggestedRegion(navigator.languages) : null) ?? "",
+  );
   const [subdivision, setSubdivision] = useState(profile.region?.split("-")[1] ?? "");
   const [days, setDays] = useState<Record<Weekday, DayState>>(() => {
     const entries = WEEKDAYS.map((day) => {

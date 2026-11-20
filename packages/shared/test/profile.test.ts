@@ -14,8 +14,10 @@ import {
   setStatusBodySchema,
   statusLine,
   updateProfileBodySchema,
+  timeZoneSchema,
   workingHoursInputSchema,
 } from "../src/profile";
+import { updateRealtimePreferencesBodySchema } from "../src/realtime";
 
 describe("time zones (Identity §4.7: IANA names)", () => {
   it.each(["Europe/Berlin", "America/Argentina/Buenos_Aires", "UTC", "Etc/GMT+5", "Asia/Kolkata"])("accepts %s", (tz) =>
@@ -31,6 +33,17 @@ describe("time zones (Identity §4.7: IANA names)", () => {
     "A".repeat(65),
     "Europe//Berlin",
   ])("refuses %j", (tz) => expect(isValidTimeZone(tz)).toBe(false));
+});
+
+describe("canonical time zones", () => {
+  it("stores one spelling per zone", () => {
+    expect(timeZoneSchema.parse("europe/berlin")).toBe("Europe/Berlin");
+    expect(timeZoneSchema.parse(" utc ")).toBe("UTC");
+  });
+  it("PATCH /me/preferences uses the same rule", () => {
+    expect(updateRealtimePreferencesBodySchema.safeParse({ timezone: "+05:00" }).success).toBe(false);
+    expect(updateRealtimePreferencesBodySchema.parse({ timezone: "asia/tokyo" }).timezone).toBe("Asia/Tokyo");
+  });
 });
 
 describe("working hours", () => {
