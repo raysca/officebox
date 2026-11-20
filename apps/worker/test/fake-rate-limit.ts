@@ -6,8 +6,9 @@ import type { RateLimitBindingName } from "../src/core/rate-limit";
  *
  * The real binding (and Miniflare's) counts in fixed windows aligned to the wall clock, so a burst
  * that starts near the end of a minute is split across two windows and its last call is let through
- * (a flaky 403 where 429 was expected). This one follows the same rules (fixed `period` windows, a
- * refused call isn't counted, `delta` weights) but reads the time from `now`, so a test decides when
+ * (a flaky 403 where 429 was expected). This one follows Miniflare's rules exactly (fixed `period`
+ * windows; a call is allowed while the count is below the limit and then adds its `delta`; a refused
+ * call isn't counted) but reads the time from `now`, so a test decides when
  * a window ends. Its limit and period come from `wrangler.jsonc` ({@link configuredLimit}), so a
  * test still checks the deployed configuration.
  */

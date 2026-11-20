@@ -355,9 +355,12 @@ describe("GET /api/setup stays cheap (review m2)", () => {
   });
 
   it("is rate-limited per IP (20 per minute)", async () => {
+    // An injected-clock limiter, so the minute can't roll over mid-burst (see test/fake-rate-limit.ts).
+    const limiter = new FakeRateLimit(configuredLimit("PASSKEY_RATE_LIMITER"), () => Date.UTC(2026, 0, 1, 12));
+    const call = { env: { PASSKEY_RATE_LIMITER: limiter } };
     const browser = new Browser();
     const statuses: number[] = [];
-    for (let i = 0; i < 21; i++) statuses.push((await browser.call("/api/setup")).status);
+    for (let i = 0; i < 21; i++) statuses.push((await browser.call("/api/setup", call)).status);
     expect(statuses.slice(0, 20).every((st) => st === 200)).toBe(true);
     expect(statuses[20]).toBe(429);
   });
