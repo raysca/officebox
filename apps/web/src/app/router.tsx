@@ -17,6 +17,7 @@ import { AcceptInvitationPage } from "./routes/accept-invitation";
 import { AdminPage } from "./routes/admin";
 import { DevicesPage } from "./routes/devices";
 import { DirectoryPage } from "./routes/directory";
+import { GroupPage, GroupsPage } from "./routes/groups";
 import { DomainPage } from "./routes/domain";
 import { DomainCompletePage } from "./routes/domain-complete";
 import { EmailConfirmPage } from "./routes/email-confirm";
@@ -175,6 +176,15 @@ const profileRoute = createRoute({
   },
 });
 const directoryRoute = createRoute({ getParentRoute: () => appRoute, path: "/directory", component: DirectoryPage });
+// M1e: groups, for everyone (admins manage them; managers manage their group's members).
+const groupsRoute = createRoute({ getParentRoute: () => appRoute, path: "/groups", component: GroupsPage });
+const groupRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/groups/$groupId",
+  component: function GroupRoute() {
+    return <GroupPage groupId={groupRoute.useParams().groupId} />;
+  },
+});
 // Any other path: the not-found page inside the shell, behind the same session check. A splat route
 // rather than the root's notFoundComponent, which would render outside the shell.
 const notFoundRoute = createRoute({ getParentRoute: () => appRoute, path: "$", component: NotFoundPage });
@@ -205,6 +215,8 @@ export const routeTree = rootRoute.addChildren([
     passkeysRoute,
     profileRoute,
     directoryRoute,
+    groupsRoute,
+    groupRoute,
     notFoundRoute,
   ]),
 ]);

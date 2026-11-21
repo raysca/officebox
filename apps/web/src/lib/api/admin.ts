@@ -10,9 +10,14 @@ import {
   resendInvitationResultSchema,
   sendTestEmailResultSchema,
   settingsListSchema,
+  memberChangeResultSchema,
+  memberDeletedResultSchema,
+  signedOutCountSchema,
+  type AdminMembersQuery,
+  type AssignableRole,
   type CreateInvitationBody,
 } from "@officebox/shared";
-import { queryOptions } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions } from "@tanstack/react-query";
 import { z } from "zod";
 import { apiRequest, unwrap } from "./client";
 
@@ -83,11 +88,24 @@ export async function revokeInvitation(id: string) {
 
 export const membersQueryKey = ["admin", "members"] as const;
 
-export const membersQuery = queryOptions({
-  queryKey: membersQueryKey,
-  queryFn: async ({ signal }) =>
-    unwrap(await apiRequest("/api/admin/members", { schema: adminMemberListSchema, signal })).members,
-});
+export const membersQuery = membersQueryFor({});
+
+/** The member list with Admin §5's search and filters (M1e). */
+export function membersQueryFor(filters: AdminMembersQuery) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (typeof value === "string" && value.trim() !== "") params.set(key, value.trim());
+  }
+  const query = params.toString();
+  return queryOptions({
+    queryKey: [...membersQueryKey, query] as const,
+    queryFn: async ({ signal }) =>
+      unwrap(
+        await apiRequest(`/api/admin/members${query ? `?${query}` : ""}`, { schema: adminMemberListSchema, signal }),
+      ).members,
+    placeholderData: keepPreviousData,
+  });
+}
 
 const memberPath = (id: string, rest = "") => `/api/admin/members/${encodeURIComponent(id)}${rest}`;
 
@@ -106,6 +124,29 @@ export async function changeMemberEmail({ id, email }: { id: string; email: stri
   return unwrap(
     await apiRequest(memberPath(id), { method: "PATCH", body: { email }, schema: emailChangeResultSchema }),
   );
+}
+
+/** Owners only, with step-up (the client asks for a passkey on `reauth_required` and retries). */
+export async function changeMemberRole({ id, role }: { id: string; role: AssignableRole }) {
+  return unwrap(
+    await apiRequest(memberPath(id), { method: "PATCH", body: { role }, schema: memberChangeResultSchema }),
+  );
+}
+
+export async function setMemberStatus({ id, status }: { id: string; status: "active" | "disabled" }) {
+  return unwrap(
+    await apiRequest(memberPath(id), { method: "PATCH", body: { status }, schema: memberChangeResultSchema }),
+  );
+}
+
+export async function signOutMember(id: string) {
+  return unwrap(
+    await apiRequest(memberPath(id, "/sign-out"), { method: "POST", body: {}, schema: signedOutCountSchema }),
+  );
+}
+
+export async function deleteMember(id: string) {
+  return unwrap(await apiRequest(memberPath(id), { method: "DELETE", schema: memberDeletedResultSchema }));
 }
 
 export async function acknowledgeReset(memberId: string) {
