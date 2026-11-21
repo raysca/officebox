@@ -984,6 +984,8 @@ const STEP_UP_CHECKS = (a: Actor): [string, PermissionCheck][] => [
   ],
   ["change someone's email", { action: "member.change_email", target: person("member"), activeOwnerCount: 3 }],
   ["issue a recovery link", { action: "member.issue_recovery_link", target: person("admin"), activeOwnerCount: 3 }],
+  // M1e (default): deleting (anonymising) a member is irreversible, so it asks for a fresh passkey.
+  ["delete a member", { action: "member.delete", target: person("member"), activeOwnerCount: 3 }],
   ["start a domain move", { action: "domain.move_start" }],
   ["add a passkey", { action: "passkey.add", ownerId: a.userId, ownerPasskeyCount: 1 }],
   [
@@ -1000,7 +1002,6 @@ const STEP_UP_CHECKS = (a: Actor): [string, PermissionCheck][] => [
 const NO_STEP_UP_CHECKS = (a: Actor): [string, PermissionCheck][] => [
   ["disable", { action: "member.disable", target: person("member"), activeOwnerCount: 3 }],
   ["re-enable", { action: "member.enable", target: person("member", "disabled"), activeOwnerCount: 3 }],
-  ["delete", { action: "member.delete", target: person("member"), activeOwnerCount: 3 }],
   ["sign out all sessions", { action: "member.sign_out_all", target: person("member"), activeOwnerCount: 3 }],
   ["invite", { action: "invitation.create", role: "admin", actorPasskeyCount: 2, recoveryTokenUnconsumed: false }],
   ["start a workspace export", { action: "workspace.export", phase: "start", inMaintenance: true }],
@@ -1020,6 +1021,7 @@ describe("step-up: a passkey assertion within 10 minutes (Permissions §6; Ident
         "audit.csv.download",
         "domain.move_start",
         "member.change_email",
+        "member.delete", // M1e (default): deleting is irreversible
         "member.change_role",
         "member.export",
         "member.issue_recovery_link",

@@ -330,8 +330,10 @@ export async function updateGroup(
     const group = await getGroup(ctx, actorId, groupId);
     return group ? ok(group) : err(NO_GROUP);
   }
-  // Every write is conditional on the group (and its handle) still being as read.
-  const still = "EXISTS (SELECT 1 FROM groups WHERE id = ?1 AND deleted_at IS NULL AND handle IS ?2)";
+  // Every write is conditional on the group (and its handle) still being as read, and on the actor still
+  // managing groups, so an actor demoted or disabled meanwhile changes no handle either.
+  const still = `EXISTS (SELECT 1 FROM groups WHERE id = ?1 AND deleted_at IS NULL AND handle IS ?2)
+    AND ${ACTOR_MANAGES_GROUPS.replace("?", "?4")}`;
   const statements: D1PreparedStatement[] = [];
   if (handleChanges && handle !== null) {
     statements.push(
@@ -341,6 +343,7 @@ export async function updateGroup(
         groupId,
         current.handle,
         handle,
+        actorId,
       ),
       database.statement(
         `UPDATE handles SET released_at = ?3
@@ -348,6 +351,7 @@ export async function updateGroup(
         groupId,
         current.handle,
         now,
+        actorId,
       ),
     );
   }
@@ -477,6 +481,8 @@ export async function addGroupMember(
           WHERE EXISTS (SELECT 1 FROM groups WHERE id = ? AND deleted_at IS NULL)
             AND EXISTS (SELECT 1 FROM users WHERE id = ? AND status = 'active')
             AND ${ACTOR_MANAGES_GROUP}
+            -- An admin adding themselves needs an owner (Permissions §6), re-checked here.
+            AND NOT (? = ? AND EXISTS (SELECT 1 FROM users s WHERE s.id = ? AND s.role = 'admin'))
          ON CONFLICT (group_id, user_id) DO NOTHING`,
         groupId,
         userId,
@@ -486,6 +492,9 @@ export async function addGroupMember(
         userId,
         actorId,
         groupId,
+        userId,
+        actorId,
+        actorId,
       ),
       await auditStatement(
         ctx,
@@ -521,18 +530,28 @@ export async function setGroupMemberRole(
 ): Promise<Result<GroupMembershipResult, ApiError>> {
   if (from === to) return ok({ groupId, userId, role: to, changed: false });
   const database = new Database(ctx.env.DB);
+  // Like an add: only an active member can be made a manager (disabled people stay in, but aren't promoted).
+  if (to === "manager") {
+    const person = expectOk(await database.first<{ status: string }>("SELECT status FROM users WHERE id = ?", userId));
+    if (person?.status !== "active") {
+      return err(apiError("forbidden", "That person can't be changed.", { reason: "invalid_target" }));
+    }
+  }
   const result = expectOk(
     await database.batchRun([
       database.statement(
         `UPDATE group_members SET role = ?
           WHERE group_id = ? AND user_id = ? AND role = ?
             AND EXISTS (SELECT 1 FROM groups WHERE id = ? AND deleted_at IS NULL)
+            AND (? = 'member' OR EXISTS (SELECT 1 FROM users u WHERE u.id = ? AND u.status = 'active'))
             AND ${ACTOR_MANAGES_GROUPS}`,
         to,
         groupId,
         userId,
         from,
         groupId,
+        to,
+        userId,
         actorId,
       ),
       await auditStatement(
@@ -656,7 +675,9 @@ export function joinInvitationGroupsStatement(
      SELECT g.id, ?2, 'member', ?3 FROM groups g
       WHERE g.deleted_at IS NULL
         AND g.id IN (SELECT value FROM json_each((SELECT coalesce(group_ids, '[]') FROM invitations WHERE id = ?1)))
-        AND EXISTS (SELECT 1 FROM users WHERE id = ?2 AND status = 'active')`,
+        AND EXISTS (SELECT 1 FROM users WHERE id = ?2 AND status = 'active')
+        -- Only once this invitation's accept (or its repair) has recorded this user.
+        AND EXISTS (SELECT 1 FROM invitations WHERE id = ?1 AND accepted_by = ?2)`,
     invitationId,
     userId,
     now,

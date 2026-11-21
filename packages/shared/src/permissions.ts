@@ -266,7 +266,7 @@ export const MEMBER_ADMIN_ACTIONS = [
   "member.issue_recovery_link", // step-up
   "member.disable",
   "member.enable",
-  "member.delete",
+  "member.delete", // step-up (M1e, default: it's irreversible)
   "member.sign_out_all",
 ] as const;
 export type MemberAdminAction = (typeof MEMBER_ADMIN_ACTIONS)[number];
@@ -371,6 +371,9 @@ export const STEP_UP_ACTIONS = [
   "member.change_role",
   "member.change_email",
   "member.issue_recovery_link",
+  // Deleting (anonymising) a member is irreversible, so it asks for a fresh passkey too (M1e, **default**,
+  // for product-owner review; not in Identity §2's list). Disabling and signing out don't.
+  "member.delete",
   "domain.move_start",
   "passkey.add",
   "passkey.remove",

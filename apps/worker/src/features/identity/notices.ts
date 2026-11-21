@@ -5,7 +5,7 @@ import {
   type SecurityNoticeKind,
 } from "@officebox/shared";
 import { z } from "zod";
-import { Database, expectOk } from "../../core/db";
+import { Database, expectOk, type SqlValue } from "../../core/db";
 import { ulid } from "../../core/ids";
 
 /**
@@ -29,6 +29,8 @@ export function noticeStatement(
   kind: SecurityNoticeKind,
   details: SecurityNoticeDetails,
   now: number,
+  /** Append only while this SQL condition holds (plain `?` placeholders), e.g. a change in the same batch applied. */
+  onlyIf?: { sql: string; params: SqlValue[] },
 ): D1PreparedStatement {
   const notice: SecurityNotice = { id: ulid(), kind, at: now, details };
   return database.statement(
@@ -38,9 +40,10 @@ export function noticeStatement(
                THEN json_remove(pending_security_notice, '$[0]')
                ELSE coalesce(pending_security_notice, '[]') END,
           '$[#]', json(?))
-      WHERE id = ?`,
+      WHERE id = ?${onlyIf ? ` AND ${onlyIf.sql}` : ""}`,
     JSON.stringify(notice),
     userId,
+    ...(onlyIf?.params ?? []),
   );
 }
 

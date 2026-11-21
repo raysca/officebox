@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ulid } from "../../src/core/ids";
+import type { CoreContext } from "../../src/core/context";
+import { rootLogger } from "../../src/core/log";
+import { addGroupMember, updateGroup } from "../../src/features/identity/groups";
 import { SoftAuthenticator } from "./authenticator";
 import {
   addMember,
@@ -292,5 +295,67 @@ describe("invitations with groups (Identity §4.2)", () => {
     expect(res.status).toBe(404);
     expect(res.body.error.reason).toBe("unknown_group");
     expect((await invite(ws.browser, uniqueEmail("plain"))).status).toBe(201);
+  });
+});
+
+describe("review fixes (M1e)", () => {
+  const ctx = (): CoreContext => ({ env, log: rootLogger, now: () => Date.now() });
+
+  it("a rename by an admin demoted between the check and the write changes neither the group nor any handle", async () => {
+    const admin = await addMember("admin");
+    const group = await create(ws.browser);
+    const next = uniqueHandle("late");
+    // The route authorized the admin; then they're demoted before the batch runs.
+    await env.DB.prepare("UPDATE users SET role = 'member' WHERE id = ?").bind(admin.id).run();
+    const result = await updateGroup(ctx(), admin.id, group.body.id, { handle: next });
+    expect(result.ok).toBe(false);
+    expect(await count("SELECT count(*) AS n FROM handles WHERE handle = ?", next)).toBe(0);
+    expect(
+      await count(
+        "SELECT count(*) AS n FROM handles WHERE handle = ? AND owner_id = ? AND released_at IS NULL",
+        group.body.handle,
+        group.body.id,
+      ),
+    ).toBe(1);
+    expect((await detail(ws.browser, group.body.id)).body.handle).toBe(group.body.handle);
+  });
+
+  it("a disabled member can't be made a manager", async () => {
+    const group = await create(ws.browser);
+    const member = await addMember("member");
+    await put(ws.browser, group.body.id, member.id);
+    await env.DB.prepare("UPDATE users SET status = 'disabled' WHERE id = ?").bind(member.id).run();
+    const res = await put(ws.browser, group.body.id, member.id, "manager");
+    expect(res.status).toBe(403);
+    expect(res.body.error.reason).toBe("invalid_target");
+    // Making a manager a plain member is still fine for a disabled person.
+    await env.DB.prepare("UPDATE group_members SET role = 'manager' WHERE group_id = ? AND user_id = ?")
+      .bind(group.body.id, member.id)
+      .run();
+    expect((await put(ws.browser, group.body.id, member.id, "member")).status).toBe(200);
+  });
+
+  it("the write itself refuses an admin adding themselves, even past the route", async () => {
+    const admin = await addMember("admin");
+    const group = await create(ws.browser);
+    const result = await addGroupMember(ctx(), admin.id, group.body.id, admin.id, "member");
+    expect(result.ok).toBe(false);
+    expect(await count("SELECT count(*) AS n FROM group_members WHERE user_id = ?", admin.id)).toBe(0);
+  });
+
+  it("an invitation's groups are joined only by the user its accept recorded", async () => {
+    const group = await create(ws.browser);
+    const stranger = await addMember("member");
+    const created = await ws.browser.json<{ invitation: { id: string } }>("/api/admin/invitations", {
+      body: { email: uniqueEmail("g"), role: "member", sendEmail: false, groupIds: [group.body.id] },
+    });
+    // Run the join statement for someone the invitation wasn't accepted by: nothing happens.
+    const { Database } = await import("../../src/core/db");
+    const { joinInvitationGroupsStatement } = await import("../../src/features/identity/groups");
+    const database = new Database(env.DB);
+    await database.batchRun([
+      joinInvitationGroupsStatement(database, created.body.invitation.id, stranger.id, Date.now()),
+    ]);
+    expect(await count("SELECT count(*) AS n FROM group_members WHERE user_id = ?", stranger.id)).toBe(0);
   });
 });

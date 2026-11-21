@@ -12,6 +12,7 @@ import {
 import { auditStatement, hashPersonal } from "../../core/audit";
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk, type SqlValue } from "../../core/db";
+import { ulid } from "../../core/ids";
 import { displayNameOf } from "./account-security";
 import { deleteAvatarObjects } from "./avatar";
 import { emailSecurityNotices } from "./notice-email";
@@ -143,6 +144,68 @@ function revokeEverythingStatements(database: Database, userId: string, now: num
   ];
 }
 
+/**
+ * Statements revoking the pending invitations a person sent, once they're disabled or deleted (M1e,
+ * **default**): an invitation shouldn't outlive its inviter's access. Each is audited as
+ * `invitation.revoked` (the acting admin, with a `reason`), and a last catch-all revokes any sent after
+ * the read. Every statement runs only while the inviter isn't active, so nothing is revoked if the change
+ * didn't apply.
+ */
+async function revokeSentInvitationsStatements(
+  ctx: CoreContext,
+  database: Database,
+  actorId: string,
+  inviterId: string,
+  now: number,
+  reason: "inviter_disabled" | "inviter_deleted",
+): Promise<D1PreparedStatement[]> {
+  const pending = "accepted_at IS NULL AND accepted_attempt_id IS NULL AND revoked_at IS NULL";
+  const inactive = "EXISTS (SELECT 1 FROM users WHERE id = ? AND status IN ('disabled', 'deleted'))";
+  const rows = expectOk(
+    await database.all<{ id: string }>(`SELECT id FROM invitations WHERE invited_by = ? AND ${pending}`, inviterId),
+  );
+  const statements: D1PreparedStatement[] = [];
+  for (const row of rows) {
+    statements.push(
+      database.statement(
+        `UPDATE invitations SET revoked_at = ? WHERE id = ? AND ${pending} AND ${inactive}`,
+        now,
+        row.id,
+        inviterId,
+      ),
+      await auditStatement(
+        ctx,
+        {
+          action: "invitation.revoked",
+          actor: actorId,
+          target: { type: "invitation", id: row.id },
+          metadata: { reason },
+        },
+        { onlyIfPreviousChanged: true },
+      ),
+    );
+  }
+  statements.push(
+    database.statement(
+      `UPDATE invitations SET revoked_at = ? WHERE invited_by = ? AND ${pending} AND ${inactive}`,
+      now,
+      inviterId,
+      inviterId,
+    ),
+    await auditStatement(
+      ctx,
+      {
+        action: "invitation.revoked",
+        actor: actorId,
+        target: { type: "user", id: inviterId },
+        metadata: { reason, sentLater: true },
+      },
+      { onlyIfPreviousChanged: true },
+    ),
+  );
+  return statements;
+}
+
 /** Closes a person's live sockets; a failure is logged (the UserHub's recheck closes them anyway). */
 async function closeSockets(ctx: CoreContext, userId: string): Promise<void> {
   try {
@@ -185,6 +248,7 @@ export async function disableMember(
         { onlyIfPreviousChanged: true },
       ),
       ...revokeEverythingStatements(database, snap.targetId, now),
+      ...(await revokeSentInvitationsStatements(ctx, database, actor.userId, snap.targetId, now, "inviter_disabled")),
     ]),
   );
   if ((result[0]?.changes ?? 0) !== 1) return err(await explainNoop(ctx, snap, snap.targetRole === "owner"));
@@ -255,6 +319,11 @@ export async function changeMemberRole(
   // unconsumed RECOVERY_TOKEN satisfied the rule instead (Identity §2 "Promotion").
   const minPasskeys = !promotes ? 0 : newRole === "owner" && check.targetPasskeyCount >= 2 ? 2 : 1;
   const removesOwner = snap.targetRole === "owner";
+  const actorName = await displayNameOf(ctx.env.DB, actor.userId, "An owner");
+  // The notice and the magic-link revocation commit with the change: both are gated on its audit entry,
+  // which is written only if the guarded UPDATE applied.
+  const auditId = ulid();
+  const applied = { sql: "EXISTS (SELECT 1 FROM audit_log WHERE id = ?)", params: [auditId] };
   const result = expectOk(
     await database.batchRun([
       database.statement(
@@ -276,8 +345,29 @@ export async function changeMemberRole(
           target: { type: "user", id: snap.targetId },
           metadata: { from: snap.targetRole, to: newRole, promotion: promotes },
         },
-        { onlyIfPreviousChanged: true },
+        { onlyIfPreviousChanged: true, id: auditId },
       ),
+      noticeStatement(
+        database,
+        snap.targetId,
+        "role_changed",
+        { actorName, oldRole: snap.targetRole, newRole },
+        now,
+        applied,
+      ),
+      ...(snap.targetRole === "member" && promotes
+        ? [
+            database.statement(
+              `UPDATE magic_link_issues SET revoked_at = ?1
+                WHERE (user_id = ?2 OR email_normalised = (SELECT email_normalised FROM users WHERE id = ?2))
+                  AND consumed_at IS NULL AND revoked_at IS NULL
+                  AND EXISTS (SELECT 1 FROM audit_log WHERE id = ?3)`,
+              now,
+              snap.targetId,
+              auditId,
+            ),
+          ]
+        : []),
     ]),
   );
   if ((result[0]?.changes ?? 0) !== 1) {
@@ -291,23 +381,6 @@ export async function changeMemberRole(
     );
   }
 
-  // After the change commits: the notice, and for a member promoted, their magic links revoked.
-  const actorName = await displayNameOf(ctx.env.DB, actor.userId, "An owner");
-  const followUps: D1PreparedStatement[] = [
-    noticeStatement(database, snap.targetId, "role_changed", { actorName, oldRole: snap.targetRole, newRole }, now),
-  ];
-  if (snap.targetRole === "member" && promotes) {
-    followUps.push(
-      database.statement(
-        `UPDATE magic_link_issues SET revoked_at = ?1
-          WHERE (user_id = ?2 OR email_normalised = (SELECT email_normalised FROM users WHERE id = ?2))
-            AND consumed_at IS NULL AND revoked_at IS NULL`,
-        now,
-        snap.targetId,
-      ),
-    );
-  }
-  expectOk(await database.batchRun(followUps));
   await emailSecurityNotices(ctx, [
     { userId: snap.targetId, kind: "role_changed", details: { actorName, oldRole: snap.targetRole, newRole }, at: now },
   ]);
@@ -328,6 +401,10 @@ export async function signOutMember(
   const database = new Database(ctx.env.DB);
   const still = `EXISTS (SELECT 1 FROM users t WHERE t.id = ?1 AND t.role = ?2 AND t.status = ?3)
     AND EXISTS (SELECT 1 FROM users a WHERE a.id = ?4 AND a.status = 'active' AND a.role = ?5)`;
+  const stillPlain = `EXISTS (SELECT 1 FROM users t WHERE t.id = ? AND t.role = ? AND t.status = ?)
+    AND EXISTS (SELECT 1 FROM users a WHERE a.id = ? AND a.status = 'active' AND a.role = ?)`;
+  const stillParams = [snap.targetId, snap.targetRole, snap.targetStatus, snap.actorId, snap.actorRole];
+  const auditId = ulid();
   const rows = expectOk(
     await database.batch<{ id: string }>([
       database.statement(
@@ -338,27 +415,17 @@ export async function signOutMember(
         snap.actorId,
         snap.actorRole,
       ),
-      // The marker the audit entry needs: whether the guard held (the person may have had no session).
-      database.statement(
-        `SELECT 1 AS ok WHERE ${still}`,
-        snap.targetId,
-        snap.targetRole,
-        snap.targetStatus,
-        snap.actorId,
-        snap.actorRole,
+      // Audited in the same batch whenever the guard held, also when the person had no session.
+      await auditStatement(
+        ctx,
+        { action: "member.signed_out", actor: actor.userId, target: { type: "user", id: snap.targetId } },
+        { when: { sql: stillPlain, params: stillParams }, id: auditId },
       ),
+      database.statement("SELECT 1 AS ok FROM audit_log WHERE id = ?", auditId),
     ]),
   );
   const revoked = rows[0]?.length ?? 0;
-  if ((rows[1]?.length ?? 0) === 0) return err(await explainNoop(ctx, snap, false));
-  await database.batchRun([
-    await auditStatement(ctx, {
-      action: "member.signed_out",
-      actor: actor.userId,
-      target: { type: "user", id: snap.targetId },
-      metadata: { sessionsRevoked: revoked },
-    }),
-  ]);
+  if ((rows[2]?.length ?? 0) === 0) return err(await explainNoop(ctx, snap, false));
   // Sockets are closed even when no row was deleted: an expired session's sockets may still be open.
   try {
     await closeAllUserConnections(ctx.env, ctx.log, snap.targetId, "session_revoked");
@@ -403,6 +470,7 @@ export async function deleteMember(
         { onlyIfPreviousChanged: true },
       ),
       ...revokeEverythingStatements(database, snap.targetId, now),
+      ...(await revokeSentInvitationsStatements(ctx, database, actor.userId, snap.targetId, now, "inviter_deleted")),
     ]),
   );
   if ((result[0]?.changes ?? 0) !== 1) return err(await explainNoop(ctx, snap, snap.targetRole === "owner"));
@@ -438,6 +506,10 @@ export async function eraseDeletedMember(ctx: CoreContext, userId: string): Prom
   );
   if (!row) return false;
   const now = ctx.now();
+  // Recorded before anything else, so a row whose erase keeps failing goes to the back of the retry queue.
+  expectOk(
+    await database.run("UPDATE users SET erase_attempted_at = ? WHERE id = ? AND status = 'deleted'", now, userId),
+  );
   const email = row.email;
   const normalised = row.email_normalised ?? "";
   const deleted = "EXISTS (SELECT 1 FROM users WHERE id = ?1 AND status = 'deleted')";
@@ -524,12 +596,16 @@ export async function eraseDeletedMember(ctx: CoreContext, userId: string): Prom
   return true;
 }
 
-/** The repair job's half (hourly): finishes erases that didn't complete. At most 25 per run (default). */
+/**
+ * The repair job's half (hourly): finishes erases that didn't complete, least recently attempted first
+ * (`erase_attempted_at`), so one row that keeps failing can't starve the rest. At most 25 per run
+ * (default); each failure is logged with the member's ID.
+ */
 export async function eraseUnfinishedDeletions(ctx: CoreContext): Promise<number> {
   const rows = expectOk(
     await new Database(ctx.env.DB).all<{ id: string }>(
       `SELECT id FROM users WHERE status = 'deleted' AND (email IS NOT NULL OR avatar_key IS NOT NULL)
-        ORDER BY deleted_at LIMIT 25`,
+        ORDER BY coalesce(erase_attempted_at, 0), deleted_at LIMIT 25`,
     ),
   );
   let erased = 0;

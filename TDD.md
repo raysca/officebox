@@ -253,6 +253,7 @@ CREATE TABLE users (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   deleted_at INTEGER,
+  erase_attempted_at INTEGER,        -- last attempt at a deleted member's erase; the repair job retries oldest first (M1e, Platform §3.1)
   CHECK (status IN ('deleted', 'system') OR email IS NOT NULL)
 );
 -- No password_hash and no session_epoch: sign-in is passwordless, and revocation deletes sessions (§3.5, §8.1).

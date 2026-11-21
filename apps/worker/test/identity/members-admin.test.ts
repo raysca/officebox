@@ -581,3 +581,89 @@ describe("the member list (Admin §5; Identity §6)", () => {
     expect((await plain.browser.json<ErrorBody>("/api/admin/members")).status).toBe(403);
   });
 });
+
+describe("review fixes (M1e)", () => {
+  const ctx = (): CoreContext => ({ env, log: rootLogger, now: () => Date.now() });
+
+  it("deleting needs step-up (default): reauth_required with a stale assertion, then succeeds", async () => {
+    await onlyOneOwner();
+    const target = await plainUser("member");
+    await staleFreshAuth(ws.ownerId);
+    const refused = await remove(ws.browser, target.id);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error.code).toBe("reauth_required");
+    expect((await userRow(target.id))?.status).toBe("active");
+    // Disabling and signing out don't ask for it.
+    expect((await patch(ws.browser, target.id, { status: "disabled" })).status).toBe(200);
+    expect((await signOut(ws.browser, target.id)).status).toBe(200);
+    expect((await reauth(ws.browser, ws.authenticator)).status).toBe(200);
+    expect((await remove(ws.browser, target.id)).status).toBe(200);
+  });
+
+  it("disabling or deleting an inviter revokes the invitations they sent, each audited", async () => {
+    for (const action of ["disable", "delete"] as const) {
+      const admin = await addMember("admin");
+      const sent = await invite(admin.browser, uniqueEmail("pending"));
+      expect(sent.status).toBe(201);
+      const invitationId = sent.body.invitation.id;
+      const token = fragmentToken(sent.body.link)!;
+      expect((await act(ws.browser, action, admin.id)).status).toBe(200);
+      expect(
+        await count("SELECT count(*) AS n FROM invitations WHERE id = ? AND revoked_at IS NOT NULL", invitationId),
+      ).toBe(1);
+      expect(await auditCount("invitation.revoked", invitationId)).toBe(1);
+      const lookup = await new Browser().json("/api/invitations/lookup", { body: { token } });
+      expect(lookup.status).not.toBe(200);
+    }
+  });
+
+  it("a refused role change leaves no notice behind (the notice commits with the change)", async () => {
+    await onlyOneOwner();
+    const before = (await noticeKinds(ws.ownerId)).filter((k) => k === "role_changed").length;
+    expect((await patch(ws.browser, ws.ownerId, { role: "admin" })).body.error.reason).toBe("last_owner");
+    expect((await noticeKinds(ws.ownerId)).filter((k) => k === "role_changed").length).toBe(before);
+  });
+
+  it("signing out someone with no session is still audited, in the same batch", async () => {
+    const target = await plainUser("member");
+    const res = await signOut(ws.browser, target.id);
+    expect(res.body.signedOut).toBe(0);
+    expect(await auditCount("member.signed_out", target.id)).toBe(1);
+  });
+
+  it("an avatar uploaded for someone who isn't active is deleted again (nothing left in R2)", async () => {
+    const target = await plainUser("member", "disabled");
+    const { uploadAvatar } = await import("../../src/features/identity/avatar");
+    const { png } = await import("./images");
+    const request = new Request("https://officebox.test/api/me/avatar", {
+      method: "PUT",
+      headers: { "content-type": "image/png" },
+      body: png(8, 8),
+    });
+    const result = await uploadAvatar(ctx(), target.id, request);
+    expect(result.ok).toBe(false);
+    expect((await env.FILES.list({ prefix: `avatars/${target.id}/` })).objects).toHaveLength(0);
+  });
+
+  it("the repair job retries the least recently attempted erase first, so a failing row can't starve others", async () => {
+    const stuck = await plainUser("member");
+    const waiting = await plainUser("member");
+    const now = Date.now();
+    await env.DB.prepare("UPDATE users SET status = 'deleted', deleted_at = ?, erase_attempted_at = ? WHERE id = ?")
+      .bind(now - 10_000, now, stuck.id)
+      .run();
+    await env.DB.prepare("UPDATE users SET status = 'deleted', deleted_at = ? WHERE id = ?")
+      .bind(now, waiting.id)
+      .run();
+    const order = await env.DB.prepare(
+      `SELECT id FROM users WHERE status = 'deleted' AND (email IS NOT NULL OR avatar_key IS NOT NULL)
+        ORDER BY coalesce(erase_attempted_at, 0), deleted_at`,
+    ).all<{ id: string }>();
+    const ids = order.results.map((r) => r.id);
+    expect(ids.indexOf(waiting.id)).toBeLessThan(ids.indexOf(stuck.id));
+    await eraseUnfinishedDeletions(ctx());
+    const row = await userRow(waiting.id);
+    expect(row).toMatchObject({ email: null });
+    expect(row?.erase_attempted_at).toEqual(expect.any(Number));
+  });
+});
