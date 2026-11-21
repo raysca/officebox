@@ -275,7 +275,10 @@ export type GroupMemberAction = (typeof GROUP_MEMBER_ACTIONS)[number];
 
 /** Actions on a person's own things: only that person (Permissions §4.6 "Edit own profile, ..."). */
 export const SELF_ACTIONS = [
-  "profile.edit",
+  "profile.edit", // display name and profile fields (Identity §4.7; M1d)
+  "status.edit", // status emoji, text and expiry (Identity §4.7; M1d)
+  "handle.change", // own @handle (Identity §4.8; M1d)
+  "avatar.edit", // upload or remove own avatar (Identity §4.7; M1d)
   "devices.view", // list own sessions
   "devices.sign_out", // sign out one own session, all other devices, or everywhere
   "passkey.rename",
@@ -330,6 +333,13 @@ export type PermissionCheck =
   | { action: "workspace.export"; phase: ExportPhase; inMaintenance: boolean }
   | { action: GroupMemberAction; group: { managerIds: readonly string[] }; target: PersonRef }
   | { action: SelfAction; ownerId: string }
+  /**
+   * Viewing one person's profile, avatar or profile card (Permissions §4.6: everyone; Identity §4.10).
+   * Active and disabled members are visible (disabled ones under the directory's Deactivated filter);
+   * deleted members appear only as "Former member" and reserved rows never, so both are
+   * `invalid_target` **(default, M1d)**.
+   */
+  | { action: "profile.view"; target: PersonRef }
   | { action: "passkey.add"; ownerId: string; ownerPasskeyCount: number }
   | {
       action: "passkey.remove";
@@ -561,6 +571,12 @@ function groupMemberRule(actor: Actor, check: Extract<PermissionCheck, { action:
   return ALLOW;
 }
 
+function profileViewRule(actor: Actor, target: PersonRef): Decision {
+  const audience = workspaceRule(actor, "everyone");
+  if (!audience.ok) return audience;
+  return isInvalidTarget(target) ? deny("invalid_target") : ALLOW;
+}
+
 function ownRule(actor: Actor, ownerId: string): Decision {
   return actor.userId === ownerId ? ALLOW : deny("not_own");
 }
@@ -606,6 +622,9 @@ function rule(actor: Actor, check: PermissionCheck): Decision {
     case "group.remove_member":
       return groupMemberRule(actor, check);
     case "profile.edit":
+    case "status.edit":
+    case "handle.change":
+    case "avatar.edit":
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":
@@ -615,6 +634,8 @@ function rule(actor: Actor, check: PermissionCheck): Decision {
     case "security_notice.ack":
     case "passkey.add":
       return ownRule(actor, check.ownerId);
+    case "profile.view":
+      return profileViewRule(actor, check.target);
     case "passkey.remove":
       return passkeyRemoveRule(actor, check);
     case "setting.change":
@@ -682,12 +703,17 @@ export function decideWithoutFacts(actor: Actor, action: string): Decision {
     case "workspace.export":
     case "setting.change":
       return isManager(actor.role) ? ALLOW : deny("not_permitted");
+    case "profile.view":
+      return workspaceRule(actor, "everyone");
     case "member.change_role":
       if (!isManager(actor.role)) return deny("not_permitted");
       return actor.role === "owner" ? ALLOW : deny("owner_required");
     case "group.add_member":
     case "group.remove_member": // a group manager may be a member: the answer needs the group's managers
     case "profile.edit":
+    case "status.edit":
+    case "handle.change":
+    case "avatar.edit":
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":

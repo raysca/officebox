@@ -35,7 +35,7 @@ import {
  * §4.5 and §4.11, and Admin §3 and §17, never derived from the engine's logic.
  *
  * It grows per milestone: M1p covers workspace roles, the admin-power limits, the promotion and invite
- * gates, step-up, group membership and own-account actions; M1e adds the rest of groups and profiles;
+ * gates, step-up, group membership and own-account actions; M1d adds profiles; M1e the rest of groups;
  * M3a channels; M4 calls; M5a calendars; M6a documents; M7 the admin endpoints.
  *
  * `✓` allowed, otherwise the expected denial reason.
@@ -1207,6 +1207,53 @@ describe("union rule building blocks (Permissions §3.2, §5.1, §9)", () => {
   });
 });
 
+// Profiles (M1d; Permissions §4.6 "View the directory and profiles": everyone; Identity §4.10: disabled
+// members under the Deactivated filter, deleted ones only as "Former member", reserved rows never).
+// Viewing never needs step-up. Editing is the own-account rows above (profile, status, handle, avatar):
+// an admin or owner can't edit someone else's profile.
+const PROFILE_VIEW_MATRIX: Record<ActorRole, Record<"active" | "disabled" | "deleted" | "system", Expect>> = {
+  owner: { active: "✓", disabled: "✓", deleted: "invalid_target", system: "invalid_target" },
+  admin: { active: "✓", disabled: "✓", deleted: "invalid_target", system: "invalid_target" },
+  member: { active: "✓", disabled: "✓", deleted: "invalid_target", system: "invalid_target" },
+  guest: { active: "not_permitted", disabled: "not_permitted", deleted: "not_permitted", system: "not_permitted" },
+};
+
+describe("permission matrix: profiles (Permissions §4.6, Identity §4.7–§4.10)", () => {
+  for (const role of ACTOR_ROLES) {
+    for (const status of ["active", "disabled", "deleted", "system"] as const) {
+      for (const targetRole of TARGET_ROLES) {
+        const expected = PROFILE_VIEW_MATRIX[role][status];
+        it(`${role} views a ${status} ${targetRole}'s profile → ${expected}`, () => {
+          // A stale session doesn't matter: viewing isn't a step-up action.
+          const a = actor(role, { session: STALE });
+          expect(outcome(a, { action: "profile.view", target: person(targetRole, status) })).toBe(expected);
+        });
+      }
+    }
+  }
+
+  it("a disabled or deleted viewer sees nothing", () => {
+    for (const status of ["disabled", "deleted"] as const) {
+      expect(outcome(actor("member", { status }), { action: "profile.view", target: person("member") })).toBe(
+        "inactive",
+      );
+    }
+    expect(outcome(actor("member", { status: "system" }), { action: "profile.view", target: person("member") })).toBe(
+      "system_actor",
+    );
+  });
+
+  for (const action of ["profile.edit", "status.edit", "handle.change", "avatar.edit"] as const) {
+    it(`${action}: only the person, never an admin or owner on someone else's (no step-up)`, () => {
+      for (const role of ["owner", "admin", "member"] as const) {
+        const a = actor(role, { session: STALE });
+        expect(outcome(a, { action, ownerId: a.userId })).toBe("✓");
+        expect(outcome(a, { action, ownerId: "someone-else" })).toBe("not_own");
+      }
+    });
+  }
+});
+
 /**
  * The literal table covering each action outside the exported lists. Typed so that adding a check type
  * to the engine is a compile error until it is listed here with its table. The exported lists
@@ -1223,6 +1270,7 @@ const TABLE_FOR: Record<
   "member.change_role": CHANGE_ROLE_MATRIX,
   "member.export": MEMBER_EXPORT_MATRIX,
   "workspace.export": WORKSPACE_EXPORT_MATRIX,
+  "profile.view": PROFILE_VIEW_MATRIX,
   "passkey.add": OWN_MATRIX,
   "passkey.remove": PASSKEY_REMOVE,
   "setting.change": SETTING_MATRIX,

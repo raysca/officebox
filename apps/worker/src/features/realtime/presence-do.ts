@@ -189,6 +189,33 @@ export class WorkspacePresence extends CoreDurableObject {
     });
   }
 
+  /**
+   * Sets an online member's status text (M1d), `null` included, and tells the other online members.
+   * A member who isn't online is left alone: their hub passes the text when they come online.
+   */
+  setStatusText(userId: string, statusText: string | null): Promise<RpcResult<{ changed: boolean }>> {
+    return this.rpc(async (): Promise<RpcResult<{ changed: boolean }>> => {
+      const prev = this.sql
+        .exec<OnlineRow>(
+          "SELECT user_id, state, last_seen_at, status_text, availability_json FROM online WHERE user_id = ?",
+          userId,
+        )
+        .toArray()[0];
+      if (!prev || prev.status_text === statusText) return ok({ changed: false });
+      this.sql.exec("UPDATE online SET status_text = ? WHERE user_id = ?", statusText, userId);
+      const state = prev.state === "online" ? "online" : "idle";
+      await this.broadcastChange(
+        this.currentRecipientIds(),
+        userId,
+        state,
+        prev.last_seen_at,
+        statusText,
+        parseAvailability(prev.availability_json),
+      );
+      return ok({ changed: true });
+    });
+  }
+
   heartbeat(
     userId: string,
     state: "online" | "idle",

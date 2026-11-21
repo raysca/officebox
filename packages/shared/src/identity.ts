@@ -258,6 +258,10 @@ export const currentUserSchema = z.object({
   displayName: z.string(),
   handle: z.string().nullable(),
   role: workspaceRoleSchema,
+  /** M1d: the avatar's same-origin URL, or null for initials. Optional so older answers still parse. */
+  avatarUrl: z.string().nullable().optional(),
+  /** M1d: the member's IANA time zone. */
+  timezone: z.string().optional(),
 });
 export type CurrentUser = z.infer<typeof currentUserSchema>;
 

@@ -3,6 +3,7 @@ import {
   apiError,
   APP_CONTENT_SECURITY_POLICY,
   COMMON_SECURITY_HEADERS,
+  FILE_CONTENT_SECURITY_POLICY,
   FRAGMENT_PAGE_HEADERS,
   FRAGMENT_PAGES,
 } from "@officebox/shared";
@@ -105,7 +106,11 @@ export function createApp(options: AppOptions): Hono<AppEnv> {
     c.header("X-Request-Id", requestId);
     for (const [name, value] of Object.entries(COMMON_SECURITY_HEADERS)) c.header(name, value);
     const isApi = path === "/api" || path.startsWith("/api/") || path.startsWith("/ws/") || path === "/health";
-    c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
+    // A user file (an avatar) keeps the stricter file policy its route set (TDD §8.3).
+    const keepsFilePolicy = isApi && c.res.headers.get("Content-Security-Policy") === FILE_CONTENT_SECURITY_POLICY;
+    if (!keepsFilePolicy) {
+      c.header("Content-Security-Policy", isApi ? API_CONTENT_SECURITY_POLICY : APP_CONTENT_SECURITY_POLICY);
+    }
     // API responses carry user data: never stored by shared caches (TDD §8.2).
     if (isApi && !keepsApiCacheControl(c.res.headers.get("Cache-Control"))) c.header("Cache-Control", "no-store");
     // Pages whose links carry a token in the fragment: no Referer, never cached (Platform §10).

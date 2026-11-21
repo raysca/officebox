@@ -70,6 +70,7 @@ export type PermissionRequest =
   | { action: "workspace.export"; phase: ExportPhase; inMaintenance: boolean }
   | { action: GroupMemberAction; groupId: string; memberId: string }
   | { action: SelfAction; ownerId: string }
+  | { action: "profile.view"; targetId: string }
   | { action: "passkey.add" | "passkey.remove"; ownerId: string }
   | { action: "setting.change"; changeableBy: SettingChanger };
 
@@ -166,6 +167,9 @@ async function buildCheck(actor: Actor, request: PermissionRequest, facts: Permi
     case "setting.change":
     case "invitation.revoke":
     case "profile.edit":
+    case "status.edit":
+    case "handle.change":
+    case "avatar.edit":
     case "devices.view":
     case "devices.sign_out":
     case "passkey.rename":
@@ -210,6 +214,11 @@ async function buildCheck(actor: Actor, request: PermissionRequest, facts: Permi
         targetPasskeyCount,
         recoveryTokenUnconsumed,
       });
+    }
+    case "profile.view": {
+      const target = await loadPerson(facts, request.targetId);
+      if (!target.ok) return target;
+      return ok({ action: request.action, target: target.value });
     }
     case "member.export": {
       // The subject's role as stored now, at start and at every download (Admin §12).

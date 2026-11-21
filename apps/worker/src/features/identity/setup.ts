@@ -16,6 +16,7 @@ import { ulid } from "../../core/ids";
 import { authFor } from "./auth";
 import { randomToken, tokenHash } from "./crypto";
 import { issueTicket, type IssuedTicket } from "./enrolment";
+import { freeHeldHandleStatement, handleAvailability, handleError } from "./handles";
 import { clearPageInstallationCache, loadInstallation } from "./installation";
 import { runWithStore, currentStore } from "./request-store";
 import type { IdentitySecrets } from "./secrets";
@@ -348,6 +349,11 @@ export async function claimSetup(
     claimParams = [now - SETUP_OPEN_WINDOW_MS];
   }
 
+  // The owner's handle must be claimable (M1d): before any claim, the only rows are reserved ones (the
+  // assistant's derived handle), which the shared rules can't see.
+  const handleState = await handleAvailability(ctx.env.DB, body.ownerHandle, null, now);
+  if (!handleState.available) return err(handleError(handleState.reason ?? "taken"));
+
   const nonce = ulid();
   const host = new URL(origin).host;
   const db = new Database(ctx.env.DB);
@@ -496,12 +502,15 @@ async function createOwner(
     return err(apiError("conflict", "The owner account couldn't be created."));
   }
   const db = new Database(ctx.env.DB);
-  const handle = await db.run(
-    "INSERT INTO handles (handle, owner_type, owner_id, created_attempt_id) VALUES (?, 'user', ?, ?)",
-    body.ownerHandle,
-    user.id,
-    nonce,
-  );
+  const handle = await db.batchRun([
+    freeHeldHandleStatement(db, body.ownerHandle, ctx.now()),
+    db.statement(
+      "INSERT INTO handles (handle, owner_type, owner_id, created_attempt_id) VALUES (?, 'user', ?, ?)",
+      body.ownerHandle,
+      user.id,
+      nonce,
+    ),
+  ]);
   if (!handle.ok) ctx.log.warn("setup: handle already taken; the owner keeps the copy only", { ownerId: user.id });
   return ok(user.id);
 }

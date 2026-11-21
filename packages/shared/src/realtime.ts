@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { defineMessage, defineMessageSet, type MessageOf } from "./envelope";
 import { ulidSchema } from "./ids";
+import { timeZoneSchema } from "./profile";
 
 /**
  * Shared realtime contracts (M2a; TDD §2.2, §3.1–3.5; Notifications §5; Platform §12).
@@ -115,7 +116,8 @@ export type DndSchedule = z.infer<typeof dndScheduleSchema>;
 
 /** `PATCH /api/me/preferences` body for timezone and scheduled DND (Notifications §7). */
 export const updateRealtimePreferencesBodySchema = z.strictObject({
-  timezone: z.string().min(1).max(64).optional(),
+  // The same rule as `PATCH /me/profile` (M1d): IANA names only, canonicalised.
+  timezone: timeZoneSchema.optional(),
   dndSchedule: dndScheduleSchema.nullable().optional(),
 });
 export type UpdateRealtimePreferencesBody = z.infer<typeof updateRealtimePreferencesBodySchema>;

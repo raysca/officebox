@@ -43,6 +43,9 @@ export interface ApiRequestOptions<S extends z.ZodType> {
   method?: string;
   /** Sent as JSON. */
   body?: unknown;
+  /** Sent as is, with `contentType` (uploads such as avatars); instead of `body`. */
+  rawBody?: Blob | ArrayBuffer | Uint8Array<ArrayBuffer>;
+  contentType?: string;
   /** Validates a successful response body. Omit for responses without one (204). */
   schema?: S;
   signal?: AbortSignal;
@@ -107,6 +110,7 @@ async function send<S extends z.ZodType>(
   const headers: Record<string, string> = { Accept: "application/json", ...options.headers };
   if (!SAFE_METHODS.has(method)) headers[CSRF_HEADER] = "1";
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  else if (options.rawBody !== undefined && options.contentType) headers["Content-Type"] = options.contentType;
 
   // One controller for both the timeout and the caller's signal. AbortSignal.any() would be neater,
   // but Safari on iOS 16.4 (a supported browser, PRD §18) doesn't have it.
@@ -125,7 +129,7 @@ async function send<S extends z.ZodType>(
       response = await doFetch(path, {
         method,
         headers,
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        body: options.body === undefined ? options.rawBody : JSON.stringify(options.body),
         credentials: "same-origin",
         signal: controller.signal,
       });

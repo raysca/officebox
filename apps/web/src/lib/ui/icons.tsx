@@ -79,6 +79,14 @@ export const UserIcon = (p: P) => (
   </Icon>
 );
 
+export const PeopleIcon = (p: P) => (
+  <Icon {...p}>
+    <circle cx="9" cy="8" r="3.5" />
+    <path d="M2.5 20c1-3.5 3.5-5.5 6.5-5.5s5.5 2 6.5 5.5" />
+    <path d="M16 4.8a3.5 3.5 0 0 1 0 6.4M18 14.8c1.8.8 3 2.5 3.5 5.2" />
+  </Icon>
+);
+
 export const SunMoonIcon = (p: P) => (
   <Icon {...p}>
     <circle cx="12" cy="12" r="8" />

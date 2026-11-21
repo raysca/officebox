@@ -16,6 +16,7 @@ import { PublicLayout } from "./layout/PublicLayout";
 import { AcceptInvitationPage } from "./routes/accept-invitation";
 import { AdminPage } from "./routes/admin";
 import { DevicesPage } from "./routes/devices";
+import { DirectoryPage } from "./routes/directory";
 import { DomainPage } from "./routes/domain";
 import { DomainCompletePage } from "./routes/domain-complete";
 import { EmailConfirmPage } from "./routes/email-confirm";
@@ -25,6 +26,7 @@ import { MembersPage } from "./routes/members";
 import { CalendarPage, ChatPage, DocumentsPage, HomePage, NotFoundPage } from "./routes/pages";
 import { NotConfiguredPage } from "./routes/not-configured";
 import { PasskeysPage } from "./routes/passkeys";
+import { ProfilePage, profileSearchSchema } from "./routes/profile";
 import { OwnerRecoverPage, RecoverPage } from "./routes/recover";
 import { SettingsPage } from "./routes/settings";
 import { SetupPage } from "./routes/setup";
@@ -163,6 +165,16 @@ const passkeysRoute = createRoute({
   path: "/settings/passkeys",
   component: PasskeysPage,
 });
+// M1d: profile and status, and the member directory.
+const profileRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/settings/profile",
+  validateSearch: profileSearchSchema,
+  component: function ProfileRoute() {
+    return <ProfilePage welcome={profileRoute.useSearch().welcome === true} />;
+  },
+});
+const directoryRoute = createRoute({ getParentRoute: () => appRoute, path: "/directory", component: DirectoryPage });
 // Any other path: the not-found page inside the shell, behind the same session check. A splat route
 // rather than the root's notFoundComponent, which would render outside the shell.
 const notFoundRoute = createRoute({ getParentRoute: () => appRoute, path: "$", component: NotFoundPage });
@@ -191,6 +203,8 @@ export const routeTree = rootRoute.addChildren([
     adminDomainRoute,
     devicesRoute,
     passkeysRoute,
+    profileRoute,
+    directoryRoute,
     notFoundRoute,
   ]),
 ]);
