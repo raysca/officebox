@@ -270,7 +270,7 @@ describe("groups (Identity §4.9)", () => {
     await renderApp(`/groups/${GROUP.id}`, { fetch });
     expect(await screen.findByRole("heading", { level: 1, name: "Design" })).toBeDefined();
     await expectNoViolations();
-    await user.click(screen.getByRole("button", { name: "Make Ana Diaz a manager" }));
+    await user.click(screen.getByRole("button", { name: "Make manager: Ana Diaz" }));
     await waitFor(() =>
       expect(
         fetch.mock.calls.some(

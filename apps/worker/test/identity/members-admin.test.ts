@@ -1,7 +1,9 @@
 import { env } from "cloudflare:workers";
 import { WS_CLOSE_SESSION_REVOKED } from "@officebox/shared";
 import { beforeAll, describe, expect, it } from "vitest";
+import type { CoreContext } from "../../src/core/context";
 import { ulid } from "../../src/core/ids";
+import { rootLogger } from "../../src/core/log";
 import { eraseUnfinishedDeletions } from "../../src/features/identity/member-lifecycle";
 import { SoftAuthenticator } from "./authenticator";
 import {
@@ -522,8 +524,8 @@ describe("deleting a member: anonymised, signed out, handle held (Platform §3, 
     await env.DB.prepare("UPDATE users SET status = 'deleted', deleted_at = ?, avatar_key = ? WHERE id = ?")
       .bind(Date.now(), avatarKey, target.id)
       .run();
-    const ctx = { env, log: console as never, now: () => Date.now() };
-    expect(await eraseUnfinishedDeletions(ctx as never)).toBeGreaterThanOrEqual(1);
+    const ctx: CoreContext = { env, log: rootLogger, now: () => Date.now() };
+    expect(await eraseUnfinishedDeletions(ctx)).toBeGreaterThanOrEqual(1);
     expect(await userRow(target.id)).toMatchObject({ email: null, avatar_key: null, display_name: "Former member" });
     expect(await env.FILES.get(avatarKey)).toBeNull();
     const erasedOnce = await auditCount("member.erased", target.id);

@@ -1,7 +1,7 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: admins can export private content (disclosed), new `workspace.export` and `member.export` actions, the room-level maintenance flag, and break-glass removed from Later; token wording, the owners' invite gate, "no impersonation", step-up, promotion rules and the domain move updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: admins can export private content (disclosed), new `workspace.export` and `member.export` actions, the room-level maintenance flag, and break-glass removed from Later; token wording, the owners' invite gate, "no impersonation", step-up, promotion rules and the domain move updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2); **M1e (21 Nov 2026, default):** a group manager who isn't an admin can't remove another manager of their group (§4.6), and the matrix test covers the full M1 matrix (workspace roles, groups, profiles)
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
 **Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Admin & Operations](admin.md), [Platform](platform.md)
 
@@ -206,7 +206,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Invite with role member | — | — | — | ✓ | ✓ (once the owner has a second passkey or a set, unconsumed `RECOVERY_TOKEN`) |
 | Invite with role admin | — | — | — | — | ✓ (same condition) |
 | Create, rename or delete groups; appoint managers | — | — | — | ✓ | ✓ |
-| Add or remove group members | — | — | Own group | ✓ (adding **themselves** needs an owner) | ✓ |
+| Add or remove group members | — | — | Own group (not removing another manager: appointing and removing managers is an admin's, **default**, M1e) | ✓ (adding **themselves** needs an owner) | ✓ |
 | View the audit log | — | — | — | ✓ | ✓ |
 
 ### 4.7 Projects, Tasks & Issues ([Projects](projects.md))

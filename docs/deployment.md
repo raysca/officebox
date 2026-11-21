@@ -220,7 +220,22 @@ Go to **Admin → Invitations → Invite**, and enter an email and a role. Admin
 - Each link works once, only for that email address, and expires after 7 days.
 - The person picks a name and @handle, then creates a passkey.
 
-Pending invitations can be copied again, resent or revoked.
+Pending invitations can be copied again, resent or revoked. An invitation can also name **groups** the person joins when they accept.
+
+### Groups
+
+Go to **Admin → Groups** (or **Browse groups** in the Directory). Admins create, rename and delete groups and appoint **group managers**; managers add and remove the members of their own group. An admin can't add themselves to a group: an owner does it for them, because a group may later be given access to things. Each group has an @handle, from the same pool as people's. Deleting a group removes its members, and its @handle is held for 30 days. Every change is in the audit log.
+
+### Roles, deactivating and deleting
+
+In **Admin → Members**, search and filter the list, then press **Manage** next to someone:
+
+- **Change role** (owners only, confirmed with your passkey). Promoting to admin needs the person to have a passkey; to owner, two passkeys, or one plus an unused `RECOVERY_TOKEN`. There's always at least one active owner, so to hand over ownership, promote the new owner first, then change your own role.
+- **Deactivate** signs the person out everywhere at once and stops them signing in, until you **Reactivate** them. Nothing they own is removed. Admins can do this for members; an owner for anyone.
+- **Sign out of all devices** ends every session (for a lost laptop, say); they can sign in again.
+- **Delete account** removes their personal details, sign-in methods and group memberships; what they wrote stays, shown as "Former member". It can't be undone. Their @handle is held for 30 days, and their email address can be invited again.
+
+Nobody can deactivate or delete themselves, or the last active owner.
 
 ### Lost passkeys and email changes
 

@@ -55,6 +55,7 @@ export default defineConfig({
         /onboarding\.spec\.ts/,
         /quick-start\.spec\.ts/,
         /m1c\.spec\.ts/,
+        /m1e\.spec\.ts/,
       ],
       use: { ...devices["Desktop Chrome"], storageState: OWNER_STATE },
     },
@@ -84,6 +85,13 @@ export default defineConfig({
     {
       name: "m1c",
       testMatch: /m1c\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    // M1e groups and members administration: a fresh deploy of its own (wrangler dev on E2E_PORT + 7, with
+    // RECOVERY_TOKEN set), because it deactivates and deletes people.
+    {
+      name: "m1e",
+      testMatch: /m1e\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
     },
   ],
