@@ -323,7 +323,7 @@ export const memberProfileSchema = z.object({
   status: memberStatusSchema.nullable(),
   /** Disabled members appear under the Deactivated filter (Identity §4.10). */
   deactivated: z.boolean(),
-  /** The member's groups; filled from M1e, when groups exist. */
+  /** The member's groups (M1e), by name. */
   groups: z.array(groupRefSchema),
 });
 export type MemberProfile = z.infer<typeof memberProfileSchema>;
@@ -361,10 +361,14 @@ export type DirectoryFilter = z.infer<typeof directoryFilterSchema>;
 export const DIRECTORY_PAGE_SIZE = 50;
 export const MAX_DIRECTORY_QUERY_LENGTH = 100;
 
-/** `GET /api/members?q=&filter=&cursor=&limit=` (query string, validated on the Worker). */
+/**
+ * `GET /api/members?q=&filter=&group=&cursor=&limit=` (query string, validated on the Worker). `q` also
+ * matches group names and handles, and `group` keeps members of one group (Identity §4.10; M1e).
+ */
 export const directoryQuerySchema = z.strictObject({
   q: z.string().trim().max(MAX_DIRECTORY_QUERY_LENGTH).optional(),
   filter: directoryFilterSchema.default("active"),
+  group: ulidSchema.optional(),
   cursor: z.string().max(400).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(DIRECTORY_PAGE_SIZE),
 });

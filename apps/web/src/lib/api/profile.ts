@@ -67,13 +67,15 @@ export async function checkHandle(handle: string, signal?: AbortSignal) {
 
 export const directoryQueryKey = ["members", "directory"] as const;
 
-export function directoryQuery(q: string, filter: DirectoryFilter) {
+export function directoryQuery(q: string, filter: DirectoryFilter, group = "") {
   return infiniteQueryOptions({
-    queryKey: [...directoryQueryKey, filter, q] as const,
+    queryKey: [...directoryQueryKey, filter, q, group] as const,
     initialPageParam: null as string | null,
     queryFn: async ({ pageParam, signal }) => {
       const params = new URLSearchParams({ filter });
       if (q.trim() !== "") params.set("q", q.trim());
+      // M1e: members of one group (Identity §4.10).
+      if (group !== "") params.set("group", group);
       if (pageParam) params.set("cursor", pageParam);
       return unwrap(await apiRequest(`/api/members?${params.toString()}`, { schema: directoryPageSchema, signal }));
     },

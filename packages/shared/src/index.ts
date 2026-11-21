@@ -33,3 +33,4 @@ export * from "./email";
 export * from "./settings";
 export * from "./realtime";
 export * from "./profile";
+export * from "./groups";

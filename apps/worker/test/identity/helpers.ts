@@ -203,6 +203,8 @@ export async function resetInstallation(): Promise<void> {
     env.DB.prepare("DELETE FROM auth_verifications"),
     env.DB.prepare("DELETE FROM magic_link_issues"),
     env.DB.prepare("DELETE FROM user_devices"),
+    env.DB.prepare("DELETE FROM group_members"),
+    env.DB.prepare("DELETE FROM groups"),
     env.DB.prepare("DELETE FROM invitations"),
     env.DB.prepare("DELETE FROM handles WHERE owner_type != 'reserved'"),
     env.DB.prepare("DELETE FROM users WHERE status != 'system'"),

@@ -1,4 +1,5 @@
 import {
+  adminMembersQuerySchema,
   apiError,
   can,
   completeDomainMoveBodySchema,
@@ -10,7 +11,9 @@ import {
   startDomainMoveBodySchema,
   sendTestEmailBodySchema,
   ulidSchema,
+  validationError,
   type ApiError,
+  type PermissionCheck,
   type SettingsList,
 } from "@officebox/shared";
 import { Hono } from "hono";
@@ -20,7 +23,7 @@ import { authOf, coreContext, type AppContext, type AppEnv } from "../../core/co
 import { Database, expectOk } from "../../core/db";
 import { signInKeySources } from "../../core/keys";
 import { readJson, respond } from "../../core/errors";
-import { authorize } from "../../core/permissions";
+import { authorize, authorizeWithFacts } from "../../core/permissions";
 import { refundLimit, takeCounterLimit } from "../../core/rate-limit";
 import { TEST_EMAIL_LIMIT } from "../email/limits";
 import { SETTINGS, SettingsStore } from "../../core/settings";
@@ -41,6 +44,13 @@ import { cancelDomainMove, domainStatus, openMoveLink, startDomainMove } from ".
 import { changeEmail } from "../identity/email-change";
 import { ticketCookie } from "../identity/enrolment";
 import { acknowledgeReset, listAdminMembers } from "../identity/members-admin";
+import {
+  changeMemberRole,
+  deleteMember,
+  disableMember,
+  enableMember,
+  signOutMember,
+} from "../identity/member-lifecycle";
 import { limitDomainComplete } from "../identity/rate-limits";
 import { issueRecoveryLink } from "../identity/recovery";
 import { currentStore } from "../identity/request-store";
@@ -59,9 +69,13 @@ import { currentStore } from "../identity/request-store";
  * | `POST /admin/invitations` | `invitation.create` (admins: members; owners: admins too, with the invite gate) |
  * | `GET /admin/invitations/:id/link` · `POST …/:id/resend` | `invitation.create` for the invitation's role |
  * | `DELETE /admin/invitations/:id` | `invitation.revoke` for the invitation's role |
- * | `GET /admin/members` (M1c) | Owner, admin (`admin.members.view`); the recovery-link flag for owners only |
+ * | `GET /admin/members` (M1c; filters M1e) | Owner, admin (`admin.members.view`); the recovery-link flag for owners only |
  * | `POST /admin/members/:id/recovery-link` (M1c) | `member.issue_recovery_link` (members only for admins; step-up) |
  * | `PATCH /admin/members/:id` `{ email }` (M1c) | `member.change_email` (members only for admins; step-up) |
+ * | `PATCH /admin/members/:id` `{ role }` (M1e) | `member.change_role` (owners only; step-up; promotion passkey rules) |
+ * | `PATCH /admin/members/:id` `{ status }` (M1e) | `member.disable` / `member.enable` (members only for admins) |
+ * | `POST /admin/members/:id/sign-out` (M1e) | `member.sign_out_all` (members only for admins) |
+ * | `DELETE /admin/members/:id` (M1e) | `member.delete` (members only for admins; never yourself or the last owner) |
  * | `POST /admin/members/:id/acknowledge-reset` (M1c) | Owner (`member.acknowledge_reset`) |
  * | `GET /admin/domain` · `POST /admin/domain` · `DELETE /admin/domain/pending` (M1c) | Owner; starting needs step-up |
  * | `POST /admin/domain/complete` (M1c) | The move link, on the pending origin only (no session) |
@@ -93,6 +107,17 @@ function memberId(c: AppContext): string | null {
 }
 
 const NO_MEMBER: ApiError = apiError("not_found", "No such member.");
+
+/** The engine's check for an admin action on a person (`authorizeWithFacts` built it from the request). */
+function memberCheck(check: PermissionCheck): Extract<PermissionCheck, { target: unknown }> {
+  if (!("target" in check)) throw new Error("member action authorized without a target");
+  return check;
+}
+
+function roleCheck(check: PermissionCheck): Extract<PermissionCheck, { action: "member.change_role" }> {
+  if (check.action !== "member.change_role") throw new Error("role change authorized as another action");
+  return check;
+}
 
 const adminRoutes = new Hono<AppEnv>()
   // The domain move's commit step, on the **new** origin (M1c; Identity §4.4): public there (the move
@@ -129,7 +154,9 @@ const adminRoutes = new Hono<AppEnv>()
     const me = authOf(c);
     const allowed = await authorize(permissionContext(c, me), { action: "admin.members.view" });
     if (!allowed.ok) return respond(c, allowed);
-    return respond(c, ok({ members: await listAdminMembers(coreContext(c), me.role) }));
+    const query = adminMembersQuerySchema.safeParse(c.req.query());
+    if (!query.success) return respond(c, err(validationError(query.error)));
+    return respond(c, ok({ members: await listAdminMembers(coreContext(c), me.role, query.data) }));
   })
   .post("/members/:id/recovery-link", async (c) => {
     const me = authOf(c);
@@ -152,11 +179,58 @@ const adminRoutes = new Hono<AppEnv>()
     if (!id) return respond(c, err(NO_MEMBER));
     const body = await readJson(c, patchMemberBodySchema, SMALL_BODY);
     if (!body.ok) return respond(c, body);
+    const change = body.value;
+    const ctx = coreContext(c);
+    const actor = { userId: me.userId, role: me.role };
+    if ("role" in change) {
+      // Owners only, step-up, and the promotion passkey rules (Identity §2, §4.11; Permissions §6).
+      const allowed = await authorizeWithFacts(permissionContext(c, me), {
+        action: "member.change_role",
+        targetId: id,
+        newRole: change.role,
+      });
+      if (!allowed.ok) return respond(c, allowed);
+      return respond(c, await changeMemberRole(ctx, actor, roleCheck(allowed.value)));
+    }
+    if ("status" in change) {
+      // Admins for members only; owners for anyone; never yourself or the last owner (Permissions §6).
+      const action = change.status === "disabled" ? "member.disable" : "member.enable";
+      const allowed = await authorizeWithFacts(permissionContext(c, me), { action, targetId: id });
+      if (!allowed.ok) return respond(c, allowed);
+      const check = memberCheck(allowed.value);
+      return respond(
+        c,
+        change.status === "disabled" ? await disableMember(ctx, actor, check) : await enableMember(ctx, actor, check),
+      );
+    }
     // Admins for members only; owners for anyone; step-up (Identity §4.11; Permissions §6).
     const allowed = await authorize(permissionContext(c, me), { action: "member.change_email", targetId: id });
     if (!allowed.ok) return respond(c, allowed);
     const { secrets, installation } = await services(c);
-    return respond(c, await changeEmail(coreContext(c), secrets, installation, me.userId, id, body.value.email));
+    return respond(c, await changeEmail(ctx, secrets, installation, me.userId, id, change.email));
+  })
+  .post("/members/:id/sign-out", async (c) => {
+    const me = authOf(c);
+    const id = memberId(c);
+    const view = await authorize(permissionContext(c, me), { action: "admin.members.view" });
+    if (!view.ok) return respond(c, view);
+    if (!id) return respond(c, err(NO_MEMBER));
+    const allowed = await authorizeWithFacts(permissionContext(c, me), { action: "member.sign_out_all", targetId: id });
+    if (!allowed.ok) return respond(c, allowed);
+    const actor = { userId: me.userId, role: me.role };
+    return respond(c, await signOutMember(coreContext(c), actor, memberCheck(allowed.value)));
+  })
+  .delete("/members/:id", async (c) => {
+    const me = authOf(c);
+    const id = memberId(c);
+    const view = await authorize(permissionContext(c, me), { action: "admin.members.view" });
+    if (!view.ok) return respond(c, view);
+    if (!id) return respond(c, err(NO_MEMBER));
+    // Admins for members only; owners for anyone; never yourself or the last owner (Permissions §6).
+    const allowed = await authorizeWithFacts(permissionContext(c, me), { action: "member.delete", targetId: id });
+    if (!allowed.ok) return respond(c, allowed);
+    const actor = { userId: me.userId, role: me.role };
+    return respond(c, await deleteMember(coreContext(c), actor, memberCheck(allowed.value)));
   })
   .post("/members/:id/acknowledge-reset", async (c) => {
     const me = authOf(c);

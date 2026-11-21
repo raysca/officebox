@@ -35,7 +35,9 @@ import {
  * §4.5 and §4.11, and Admin §3 and §17, never derived from the engine's logic.
  *
  * It grows per milestone: M1p covers workspace roles, the admin-power limits, the promotion and invite
- * gates, step-up, group membership and own-account actions; M1d adds profiles; M1e the rest of groups;
+ * gates, step-up, group membership and own-account actions; M1d adds profiles; M1e the rest of groups
+ * (managers can't remove other managers; groups.manage) and completes the M1 matrix (workspace roles,
+ * groups, profiles);
  * M3a channels; M4 calls; M5a calendars; M6a documents; M7 the admin endpoints.
  *
  * `✓` allowed, otherwise the expected denial reason.
@@ -622,6 +624,39 @@ describe("permission matrix: group membership (Permissions §4.6, §6; Identity 
   it("covers both group actions", () => {
     expect([...GROUP_MEMBER_ACTIONS].sort()).toEqual(["group.add_member", "group.remove_member"]);
   });
+
+  // M1e (default): appointing and removing managers is an admin's (Identity §2 "Groups", §4.9), so a
+  // group manager who isn't an admin can't remove another manager of their group.
+  const REMOVE_MANAGER: readonly [who: string, role: WorkspaceRole, manages: boolean, expected: Expect][] = [
+    ["owner", "owner", false, "✓"],
+    ["admin", "admin", false, "✓"],
+    ["admin who manages the group", "admin", true, "✓"],
+    ["group manager", "member", true, "not_permitted"],
+    ["member", "member", false, "not_permitted"],
+    ["guest", "guest", false, "not_permitted"],
+  ];
+  for (const [who, role, manages, expected] of REMOVE_MANAGER) {
+    it(`${who}: remove another manager of the group → ${expected}`, () => {
+      const a = actor(role, { userId: `actor-${who}` });
+      const group = { managerIds: manages ? [a.userId, "another-manager"] : ["another-manager"] };
+      const target = person("member", "active", "another-manager");
+      expect(outcome(a, { action: "group.remove_member", group, target })).toBe(expected);
+    });
+  }
+
+  it("a group manager may still remove a plain member, and leave the group themselves", () => {
+    const a = actor("member", { userId: "mgr" });
+    const group = { managerIds: ["mgr", "another-manager"] };
+    expect(outcome(a, { action: "group.remove_member", group, target: person("member", "active", "plain") })).toBe("✓");
+    expect(outcome(a, { action: "group.remove_member", group, target: person("member", "active", "mgr") })).toBe("✓");
+  });
+
+  it("disabled people can be removed from a group but not added (default)", () => {
+    const group = { managerIds: [] };
+    const target = person("member", "disabled");
+    expect(outcome(actor("owner"), { action: "group.add_member", group, target })).toBe("invalid_target");
+    expect(outcome(actor("owner"), { action: "group.remove_member", group, target })).toBe("✓");
+  });
 });
 
 describe("permission matrix: own account (Permissions §4.6 'Edit own profile, status, handle, sign-in methods, devices')", () => {
@@ -949,6 +984,8 @@ const STEP_UP_CHECKS = (a: Actor): [string, PermissionCheck][] => [
   ],
   ["change someone's email", { action: "member.change_email", target: person("member"), activeOwnerCount: 3 }],
   ["issue a recovery link", { action: "member.issue_recovery_link", target: person("admin"), activeOwnerCount: 3 }],
+  // M1e (default): deleting (anonymising) a member is irreversible, so it asks for a fresh passkey.
+  ["delete a member", { action: "member.delete", target: person("member"), activeOwnerCount: 3 }],
   ["start a domain move", { action: "domain.move_start" }],
   ["add a passkey", { action: "passkey.add", ownerId: a.userId, ownerPasskeyCount: 1 }],
   [
@@ -965,7 +1002,6 @@ const STEP_UP_CHECKS = (a: Actor): [string, PermissionCheck][] => [
 const NO_STEP_UP_CHECKS = (a: Actor): [string, PermissionCheck][] => [
   ["disable", { action: "member.disable", target: person("member"), activeOwnerCount: 3 }],
   ["re-enable", { action: "member.enable", target: person("member", "disabled"), activeOwnerCount: 3 }],
-  ["delete", { action: "member.delete", target: person("member"), activeOwnerCount: 3 }],
   ["sign out all sessions", { action: "member.sign_out_all", target: person("member"), activeOwnerCount: 3 }],
   ["invite", { action: "invitation.create", role: "admin", actorPasskeyCount: 2, recoveryTokenUnconsumed: false }],
   ["start a workspace export", { action: "workspace.export", phase: "start", inMaintenance: true }],
@@ -985,6 +1021,7 @@ describe("step-up: a passkey assertion within 10 minutes (Permissions §6; Ident
         "audit.csv.download",
         "domain.move_start",
         "member.change_email",
+        "member.delete", // M1e (default): deleting is irreversible
         "member.change_role",
         "member.export",
         "member.issue_recovery_link",

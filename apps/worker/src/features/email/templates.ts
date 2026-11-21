@@ -1,4 +1,4 @@
-import type { PasskeyCreatedVia, SecurityNoticeDetails, SecurityNoticeKind } from "@officebox/shared";
+import type { PasskeyCreatedVia, SecurityNoticeDetails, SecurityNoticeKind, WorkspaceRole } from "@officebox/shared";
 
 /**
  * Fixed email templates (TDD §7.6; Notifications §6 "Template"). Every value from people or settings
@@ -141,6 +141,8 @@ const VIA_LABEL: Record<PasskeyCreatedVia, string> = {
   domain_move: "during the workspace's move to a new address",
 };
 
+const ROLE_LABEL: Record<WorkspaceRole, string> = { owner: "owner", admin: "admin", member: "member", guest: "guest" };
+
 function noticeLines(kind: SecurityNoticeKind, details: SecurityNoticeDetails): { title: string; lines: string[] } {
   switch (kind) {
     case "passkey_added": {
@@ -212,6 +214,14 @@ function noticeLines(kind: SecurityNoticeKind, details: SecurityNoticeDetails): 
     }
     case "member_export":
       return { title: "An admin exported your data", lines: ["An admin exported a copy of your data."] };
+    case "role_changed": {
+      const to = details.newRole ? ROLE_LABEL[details.newRole] : "a new role";
+      const by = details.actorName ? ` by ${oneLine(details.actorName)}` : "";
+      return {
+        title: "Your role was changed",
+        lines: [`Your role in the workspace was changed to ${to}${by}.`],
+      };
+    }
   }
 }
 

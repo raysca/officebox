@@ -18,6 +18,7 @@ import {
 import type { CoreContext } from "../../core/context";
 import { Database, expectOk, type SqlValue } from "../../core/db";
 import { avatarUrl } from "./avatar";
+import { groupsOfUsers } from "./groups";
 import { handleChangeAllowance, prepareHandleChange, runHandleBatch } from "./handles";
 
 /**
@@ -63,7 +64,9 @@ function storedStatus(row: ProfileRow, now: number): MemberStatus | null {
   return effectiveStatus({ emoji: row.status_emoji, text: row.status_text, expiresAt: row.status_expires_at }, now);
 }
 
-function toProfile(row: ProfileRow, now: number): MemberProfile {
+type GroupRefs = MemberProfile["groups"];
+
+function toProfile(row: ProfileRow, now: number, groups: GroupRefs = []): MemberProfile {
   const hours = parseWorkingHours(row.working_hours);
   return {
     id: row.id,
@@ -82,8 +85,7 @@ function toProfile(row: ProfileRow, now: number): MemberProfile {
     region: row.region,
     status: storedStatus(row, now),
     deactivated: row.status === "disabled",
-    // Groups arrive with M1e; until then nobody is in one.
-    groups: [],
+    groups,
   };
 }
 
@@ -97,7 +99,8 @@ async function profileRow(d1: D1Database, userId: string): Promise<ProfileRow | 
 export async function getMember(ctx: CoreContext, userId: string): Promise<MemberProfile | null> {
   const row = await profileRow(ctx.env.DB, userId);
   if (!row || row.email === null || (row.status !== "active" && row.status !== "disabled")) return null;
-  return toProfile(row, ctx.now());
+  const groups = await groupsOfUsers(ctx.env.DB, [row.id]);
+  return toProfile(row, ctx.now(), groups.get(row.id));
 }
 
 /** `GET /me/profile`. */
@@ -107,7 +110,12 @@ export async function getMyProfile(ctx: CoreContext, userId: string): Promise<Re
     return err(apiError("unauthenticated", "Sign in to continue."));
   }
   const allowance = await handleChangeAllowance(ctx.env.DB, userId, ctx.now());
-  return ok({ ...toProfile(row, ctx.now()), onboardedAt: row.onboarded_at, handleChangesLeft: allowance.left });
+  const groups = await groupsOfUsers(ctx.env.DB, [row.id]);
+  return ok({
+    ...toProfile(row, ctx.now(), groups.get(row.id)),
+    onboardedAt: row.onboarded_at,
+    handleChangesLeft: allowance.left,
+  });
 }
 
 /** What a profile edit changed that others react to (the time zone feeds availability). */
@@ -236,8 +244,8 @@ function containsPattern(text: string): string {
 }
 
 /**
- * `GET /members` (Identity §4.10): search by name, handle, email, title or team (group search and the
- * group filter arrive with groups in M1e), active members by default or the Deactivated filter, sorted by
+ * `GET /members` (Identity §4.10): search by name, handle, email, title, team or group (a group's name or
+ * handle, M1e), filter by group (M1e), active members by default or the Deactivated filter, sorted by
  * name, paged with a keyset cursor. Matching ignores case for ASCII letters (SQLite LIKE) **(default)**.
  */
 export async function listDirectory(ctx: CoreContext, query: DirectoryQuery): Promise<Result<DirectoryPage, ApiError>> {
@@ -248,8 +256,18 @@ export async function listDirectory(ctx: CoreContext, query: DirectoryQuery): Pr
     const text = q.replace(/^@/, "").toLowerCase();
     const pattern = containsPattern(text);
     const columns = ["lower(display_name)", "handle", "email_normalised", "lower(job_title)", "lower(team)"];
-    where.push(`(${columns.map((column) => `${column} LIKE ? ESCAPE '\\'`).join(" OR ")})`);
-    params.push(pattern, pattern, pattern, pattern, pattern);
+    const inGroup = `EXISTS (SELECT 1 FROM group_members gm JOIN groups g ON g.id = gm.group_id
+        WHERE gm.user_id = users.id AND g.deleted_at IS NULL
+          AND (lower(g.name) LIKE ? ESCAPE '\\' OR g.handle LIKE ? ESCAPE '\\'))`;
+    where.push(`(${[...columns.map((column) => `${column} LIKE ? ESCAPE '\\'`), inGroup].join(" OR ")})`);
+    params.push(pattern, pattern, pattern, pattern, pattern, pattern, pattern);
+  }
+  if (query.group) {
+    where.push(
+      `EXISTS (SELECT 1 FROM group_members gm JOIN groups g ON g.id = gm.group_id
+        WHERE gm.user_id = users.id AND gm.group_id = ? AND g.deleted_at IS NULL)`,
+    );
+    params.push(query.group);
   }
   if (query.cursor !== undefined) {
     const after = decodeCursor(query.cursor);
@@ -269,8 +287,12 @@ export async function listDirectory(ctx: CoreContext, query: DirectoryQuery): Pr
   const now = ctx.now();
   const page = rows.slice(0, query.limit);
   const last = page[page.length - 1];
+  const groups = await groupsOfUsers(
+    ctx.env.DB,
+    page.map((row) => row.id),
+  );
   return ok({
-    members: page.map((row) => toProfile(row, now)),
+    members: page.map((row) => toProfile(row, now, groups.get(row.id))),
     nextCursor: rows.length > query.limit && last ? encodeCursor(last.display_name, last.id) : null,
   });
 }

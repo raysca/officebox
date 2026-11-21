@@ -1,7 +1,9 @@
 import type { DirectoryFilter, MemberProfile } from "@officebox/shared";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useState } from "react";
+import { groupsQuery } from "../../lib/api/groups";
 import { directoryQuery, memberQuery } from "../../lib/api/profile";
+import { Link } from "../../lib/ui/Link";
 import { localTime, regionLabel, workingHoursSummary } from "../../lib/profile-format";
 import { Alert } from "../../lib/ui/Alert";
 import { Avatar } from "../../lib/ui/Avatar";
@@ -46,12 +48,15 @@ function statusText(member: MemberProfile): string | null {
 export function DirectoryPage() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<DirectoryFilter>("active");
+  const [group, setGroup] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
   const q = useDebounced(search);
-  const people = useInfiniteQuery(directoryQuery(q, filter));
+  const people = useInfiniteQuery(directoryQuery(q, filter, group));
+  const groups = useQuery(groupsQuery);
   const now = useMinuteClock();
   const searchId = useId();
   const filterId = useId();
+  const groupId = useId();
 
   const members = people.data?.pages.flatMap((page) => page.members) ?? [];
 
@@ -76,6 +81,26 @@ export function DirectoryPage() {
             autoComplete="off"
           />
         </div>
+        {groups.data && groups.data.length > 0 ? (
+          <div className="flex flex-col gap-1">
+            <label htmlFor={groupId} className="text-sm font-medium">
+              {copy.groupFilter}
+            </label>
+            <select
+              id={groupId}
+              className="rounded-md border border-border-strong bg-bg px-3 py-2 text-base text-fg"
+              value={group}
+              onChange={(e) => setGroup(e.target.value)}
+            >
+              <option value="">{copy.allGroups}</option>
+              {groups.data.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
         <div role="group" aria-labelledby={filterId} className="flex flex-col gap-1">
           <span id={filterId} className="text-sm font-medium">
             {copy.filterLabel}
@@ -95,6 +120,9 @@ export function DirectoryPage() {
         </div>
       </div>
 
+      <p>
+        <Link to="/groups">{copy.groupsLink}</Link>
+      </p>
       {people.isPending ? <p role="status">{copy.loading}</p> : null}
       {people.isError ? (
         <Alert>

@@ -58,9 +58,11 @@ import { err, ok, type Result } from "./result";
  * rule function then compares with {@link resourceRoleAtLeast}. There is no deny: sharing can only
  * widen. Event visibility (Permissions §4.4) is a filter applied after the calendar role.
  *
- * **Groups (M1e)** are already here ({@link GROUP_MEMBER_ACTIONS}); M1e adds the routes and loaders.
- * The admin self-grant rule on group drives and folders (Permissions §6, "needs an owner") belongs to
- * the M6a sharing check and follows the same pattern as `group.add_member`.
+ * **Groups (M1e):** `groups.manage` (create, rename, delete, appoint or remove managers) and the
+ * membership checks {@link GROUP_MEMBER_ACTIONS}, with group managers' facts loaded per group. Viewing
+ * groups is `directory.view` (groups are part of the directory, Identity §4.10). The admin self-grant
+ * rule on group drives and folders (Permissions §6, "needs an owner") belongs to the M6a sharing check
+ * and follows the same pattern as `group.add_member`.
  */
 
 // ---- Roles and statuses ------------------------------------------------------------------------
@@ -264,7 +266,7 @@ export const MEMBER_ADMIN_ACTIONS = [
   "member.issue_recovery_link", // step-up
   "member.disable",
   "member.enable",
-  "member.delete",
+  "member.delete", // step-up (M1e, default: it's irreversible)
   "member.sign_out_all",
 ] as const;
 export type MemberAdminAction = (typeof MEMBER_ADMIN_ACTIONS)[number];
@@ -369,6 +371,9 @@ export const STEP_UP_ACTIONS = [
   "member.change_role",
   "member.change_email",
   "member.issue_recovery_link",
+  // Deleting (anonymising) a member is irreversible, so it asks for a fresh passkey too (M1e, **default**,
+  // for product-owner review; not in Identity §2's list). Disabling and signing out don't.
+  "member.delete",
   "domain.move_start",
   "passkey.add",
   "passkey.remove",
@@ -567,6 +572,16 @@ function groupMemberRule(actor: Actor, check: Extract<PermissionCheck, { action:
   // it would give them everything shared with the group (default for the manager case).
   if (action === "group.add_member" && actor.role === "admin" && target.userId === actor.userId) {
     return deny("owner_required");
+  }
+  // Appointing and removing managers is an admin's (Identity §2 "Groups", §4.9), so a group manager
+  // who isn't an admin can't remove another manager; they may leave the group themselves (default, M1e).
+  if (
+    action === "group.remove_member" &&
+    !isManager(actor.role) &&
+    target.userId !== actor.userId &&
+    group.managerIds.includes(target.userId)
+  ) {
+    return deny("not_permitted");
   }
   return ALLOW;
 }

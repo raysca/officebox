@@ -188,6 +188,10 @@ describe("Members and the workspace address (admin)", () => {
     passkeyCount: 1,
     recoveryFlag: { at: Date.UTC(2026, 10, 1), byName: "Pat Doe" },
     pendingEmail: null,
+    groups: [],
+    lastActiveAt: null,
+    joinedAt: Date.UTC(2026, 9, 1),
+    pendingSecurityNotice: false,
   };
 
   it("issues a recovery link to copy, shows the owners' flag, and changes an email", async () => {

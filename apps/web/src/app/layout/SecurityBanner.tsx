@@ -25,6 +25,10 @@ function describe(notice: SecurityNotice): string {
   if (notice.kind === "email_changed") return copy.email_changed(notice.details.newEmail, notice.details.actorName);
   if (notice.kind === "owner_recovery_used") return copy.owner_recovery_used(notice.details.subjectName);
   if (notice.kind === "domain_moved") return copy.domain_moved(notice.details.origin, notice.details.actorName);
+  if (notice.kind === "role_changed") {
+    const role = notice.details.newRole ? messages.members.role[notice.details.newRole].toLowerCase() : undefined;
+    return copy.role_changed(role, notice.details.actorName);
+  }
   return copy.other;
 }
 

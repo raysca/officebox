@@ -2,6 +2,7 @@ import { defineJob, type CronJob } from "../../core/cron";
 import { Database, expectOk } from "../../core/db";
 import { pruneCounterEventsStatement } from "./counters";
 import { expirePendingMove } from "./domain-move";
+import { eraseUnfinishedDeletions } from "./member-lifecycle";
 import { repairInvitations } from "./invitations";
 import { DEVICE_RETENTION_MS } from "./known-devices";
 import { expireStaleClaim, observeReleaseIfMarked, repairSetup } from "./setup";
@@ -16,7 +17,8 @@ const EMAIL_DELIVERY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
  *   claimed owner has a passkey but completion didn't run, and releases a claim that expired 24 hours
  *   after it was made, in one conditional batch. The invitation half rolls partial accepts forward or
  *   releases them, never resurrecting a consumed invitation (`repairInvitations`, M1b). It also clears
- *   a pending domain move 24 hours after it started and audits it (`expirePendingMove`, M1c).
+ *   a pending domain move 24 hours after it started and audits it (`expirePendingMove`, M1c), and
+ *   finishes the erase of deleted members whose erase didn't complete (`eraseUnfinishedDeletions`, M1e).
  * - **identity.prune** (daily): deletes expired sessions (better-auth deletes them lazily, only when the
  *   cookie is presented again), expired WebAuthn challenges and spent or expired enrolment tickets.
  *   Expired sessions are deleted by SQL here: their sockets were already closed by the UserHub's
@@ -37,6 +39,9 @@ export const IDENTITY_JOBS: readonly CronJob[] = [
         ctx.log.info("identity repair", { completed, released, releasedOutsideApp, moveExpired });
       }
       await repairInvitations(ctx);
+      // Member deletion's erase (Platform §3.1, M1e) finished for any account where it didn't complete.
+      const erased = await eraseUnfinishedDeletions(ctx);
+      if (erased > 0) ctx.log.info("identity repair: erased deleted members", { erased });
     },
   }),
   defineJob({

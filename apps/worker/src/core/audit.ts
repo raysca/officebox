@@ -1,6 +1,6 @@
 import type { Env } from "../env";
 import type { CoreContext } from "./context";
-import { Database } from "./db";
+import { Database, type SqlValue } from "./db";
 import { ulid } from "./ids";
 import { tokenHashKeyOrNull } from "./keys";
 import { rootLogger } from "./log";
@@ -98,6 +98,13 @@ export interface AuditStatementOptions {
    * `changes()`), so a guarded update that matched nothing leaves no audit entry.
    */
   onlyIfPreviousChanged?: boolean;
+  /**
+   * Write the entry only if this SQL condition holds when the statement runs (M1e), for an entry that
+   * must commit with a guarded change even when that change touched no rows. Plain `?` placeholders.
+   */
+  when?: { sql: string; params: SqlValue[] };
+  /** The entry's ID, so later statements in the same batch can be gated on it having been written (M1e). */
+  id?: string;
 }
 
 /** Target type and ID are IDs by convention; they are still redacted in case one carries an email. */
@@ -122,7 +129,7 @@ export async function auditStatement(
   }
   const metadata = await sanitiseMetadata(ctx.env, entry.metadata);
   const values = [
-    ulid(),
+    options.id ?? ulid(),
     entry.actor,
     entry.action,
     await sanitiseTarget(ctx.env, entry.target?.type),
@@ -131,6 +138,15 @@ export async function auditStatement(
     ctx.now(),
   ];
   const columns = "INSERT INTO audit_log (id, actor_id, action, target_type, target_id, metadata, created_at)";
+  if (options.onlyIfPreviousChanged && options.when)
+    throw new Error("audit: use onlyIfPreviousChanged or when, not both");
+  if (options.when) {
+    return new Database(ctx.env.DB).statement(
+      `${columns} SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${options.when.sql}`,
+      ...values,
+      ...options.when.params,
+    );
+  }
   const sql = options.onlyIfPreviousChanged
     ? `${columns} SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() > 0`
     : `${columns} VALUES (?, ?, ?, ?, ?, ?, ?)`;

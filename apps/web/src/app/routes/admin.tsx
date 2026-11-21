@@ -8,7 +8,8 @@ import { Page } from "../Page";
 
 /**
  * The admin area's landing page (Admin §3). M1b brings Invitations and Settings, M1c Members (recovery
- * links and email changes) and the workspace address (owners); the other admin pages
+ * links and email changes) and the workspace address (owners), M1e roles, deactivation, deletion and
+ * Groups; the other admin pages
  * arrive with their milestones. Shown only to owners and admins (the nav item asks the engine); every
  * page's API asks again.
  */
@@ -36,6 +37,12 @@ export function AdminPage() {
               <Link to="/admin/members">{messages.admin.membersLink}</Link>
             </p>
             <p className="text-sm text-muted">{messages.admin.membersSummary}</p>
+          </li>
+          <li className="rounded-lg border border-border p-4">
+            <p className="font-medium">
+              <Link to="/groups">{messages.admin.groupsLink}</Link>
+            </p>
+            <p className="text-sm text-muted">{messages.admin.groupsSummary}</p>
           </li>
           {isOwner ? (
             <li className="rounded-lg border border-border p-4">

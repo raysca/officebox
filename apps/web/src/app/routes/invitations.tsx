@@ -16,6 +16,7 @@ import {
   settingsQuery,
 } from "../../lib/api/admin";
 import { ApiRequestError, describeApiError, errorReasonOf } from "../../lib/api/client";
+import { groupsQuery } from "../../lib/api/groups";
 import { useMe } from "../../lib/api/identity";
 import { Alert } from "../../lib/ui/Alert";
 import { Button } from "../../lib/ui/Button";
@@ -260,6 +261,9 @@ function InviteDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<InvitableRole>("member");
   const [sendEmail, setSendEmail] = useState(true);
+  // Groups to join on accepting (Identity §4.2; M1e).
+  const groups = useQuery(groupsQuery);
+  const [groupIds, setGroupIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [gated, setGated] = useState(false);
@@ -295,7 +299,12 @@ function InviteDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
       requestAnimationFrame(() => formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus());
       return;
     }
-    mutation.mutate({ email: email.trim(), role, sendEmail: emailOn && sendEmail });
+    mutation.mutate({
+      email: email.trim(),
+      role,
+      sendEmail: emailOn && sendEmail,
+      ...(groupIds.length > 0 ? { groupIds } : {}),
+    });
   }
 
   if (created) {
@@ -370,6 +379,28 @@ function InviteDialog({ onClose, onCreated }: { onClose: () => void; onCreated: 
             </p>
           )}
         </fieldset>
+        {groups.data && groups.data.length > 0 ? (
+          <fieldset className="flex flex-col gap-2">
+            <legend className="text-sm font-medium">{copy.groupsLabel}</legend>
+            <p className="text-sm text-muted">{copy.groupsHint}</p>
+            <div className="flex max-h-40 flex-col gap-1 overflow-y-auto">
+              {groups.data.map((group) => (
+                <label key={group.id} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={groupIds.includes(group.id)}
+                    onChange={(e) =>
+                      setGroupIds((ids) =>
+                        e.target.checked ? [...ids, group.id] : ids.filter((id) => id !== group.id),
+                      )
+                    }
+                  />
+                  {group.name}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        ) : null}
         {emailOn ? (
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={sendEmail} onChange={(e) => setSendEmail(e.target.checked)} />

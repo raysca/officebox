@@ -1,7 +1,7 @@
 # Spec: Permissions
 
 **Status:** Approved (product owner, 15 Nov 2026)
-**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: admins can export private content (disclosed), new `workspace.export` and `member.export` actions, the room-level maintenance flag, and break-glass removed from Later; token wording, the owners' invite gate, "no impersonation", step-up, promotion rules and the domain move updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2)
+**Revision:** Written after the independent spec review (14 Nov 2026); updated for the approved [Assistant](assistant.md) spec (15 Nov 2026), whose §17 lists the changes; updated for the approved [Admin & Operations](admin.md) spec (15 Nov 2026), whose §19 lists the changes: admins can export private content (disclosed), new `workspace.export` and `member.export` actions, the room-level maintenance flag, and break-glass removed from Later; token wording, the owners' invite gate, "no impersonation", step-up, promotion rules and the domain move updated for passwordless sign-in (15 Nov 2026, [Identity](identity.md) §2); **M1e (21 Nov 2026, default):** a group manager who isn't an admin can't remove another manager of their group (§4.6), and the matrix test covers the full M1 matrix (workspace roles, groups, profiles)
 **Scope:** Cross-cutting. Defines the permission engine that every feature uses.
 **Related:** PRD §10.1; TDD §2.1 (permission resolution), §3.5; [Identity & Access](identity.md), [Chat](chat.md), [Calls](calls.md), [Calendar](calendar.md), [Documents](documents.md), [Assistant](assistant.md), [Admin & Operations](admin.md), [Platform](platform.md)
 
@@ -206,7 +206,7 @@ Resource roles apply to documents, whiteboards, files and folders. Effective rol
 | Invite with role member | — | — | — | ✓ | ✓ (once the owner has a second passkey or a set, unconsumed `RECOVERY_TOKEN`) |
 | Invite with role admin | — | — | — | — | ✓ (same condition) |
 | Create, rename or delete groups; appoint managers | — | — | — | ✓ | ✓ |
-| Add or remove group members | — | — | Own group | ✓ (adding **themselves** needs an owner) | ✓ |
+| Add or remove group members | — | — | Own group (not removing another manager: appointing and removing managers is an admin's, **default**, M1e) | ✓ (adding **themselves** needs an owner) | ✓ |
 | View the audit log | — | — | — | ✓ | ✓ |
 
 ### 4.7 Projects, Tasks & Issues ([Projects](projects.md))
@@ -313,7 +313,7 @@ effective role(user, item) = max(
 | Export one member's data for a data-protection request (`member.export`; [Admin](admin.md) §12) | Members only | ✓ (required when the subject is, or has since become, an admin or owner) |
 | Maintenance mode ([Admin](admin.md) §13) | — (view only) | ✓ |
 
-**Step-up** ([Identity](identity.md) §4.5): these powers also need a **fresh passkey assertion within the last 10 minutes** on the acting session, otherwise the typed error `reauth_required`: changing a role (including promotion to admin or owner), changing an email address, issuing a recovery link, moving the domain, and adding or removing one's own passkeys. Acknowledging one's own security-notice banner uses the same check (`security_notice.ack`, Identity §4.6a), so a stolen session can't dismiss a notice. The permission engine decides *whether* the actor may act; the step-up check runs after it and decides *whether this session may act now*. Both are tested, allowed and denied.
+**Step-up** ([Identity](identity.md) §4.5): these powers also need a **fresh passkey assertion within the last 10 minutes** on the acting session, otherwise the typed error `reauth_required`: changing a role (including promotion to admin or owner), changing an email address, issuing a recovery link, moving the domain, and adding or removing one's own passkeys; and, from M1e, **deleting a member** (`member.delete`, irreversible; **default**, for product-owner review). Disabling and signing out need no step-up. Acknowledging one's own security-notice banner uses the same check (`security_notice.ack`, Identity §4.6a), so a stolen session can't dismiss a notice. The permission engine decides *whether* the actor may act; the step-up check runs after it and decides *whether this session may act now*. Both are tested, allowed and denied.
 
 **Notification and token revocation:**
 - When anyone issues a **recovery link** for a person or **changes their email**:

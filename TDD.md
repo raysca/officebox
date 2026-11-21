@@ -253,6 +253,7 @@ CREATE TABLE users (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   deleted_at INTEGER,
+  erase_attempted_at INTEGER,        -- last attempt at a deleted member's erase; the repair job retries oldest first (M1e, Platform §3.1)
   CHECK (status IN ('deleted', 'system') OR email IS NOT NULL)
 );
 -- No password_hash and no session_epoch: sign-in is passwordless, and revocation deletes sessions (§3.5, §8.1).
@@ -326,16 +327,21 @@ CREATE TABLE mfa_factors (           -- Phase 2 (TOTP); table created in Phase 1
 
 CREATE TABLE groups (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  handle TEXT,                       -- copy of the authoritative handles row (Identity §5)
   description TEXT,
   created_by TEXT NOT NULL REFERENCES users(id),
   created_at INTEGER NOT NULL,
-  deleted_at INTEGER
+  updated_at INTEGER NOT NULL,
+  deleted_at INTEGER                 -- soft delete: members removed, handle held 30 days (Platform §4)
 );
+-- Unique among groups that aren't deleted, so a deleted group's name can be reused (M1e, default).
+CREATE UNIQUE INDEX groups_name_live ON groups(name COLLATE NOCASE) WHERE deleted_at IS NULL;
 
 CREATE TABLE group_members (
   group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
   user_id TEXT NOT NULL REFERENCES users(id),
+  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('manager', 'member')),  -- a fixed set (Permissions §9)
   added_at INTEGER NOT NULL,
   PRIMARY KEY (group_id, user_id)
 );
@@ -1825,7 +1831,7 @@ Three Cron Triggers (every 5 minutes, hourly and daily) run the jobs below. The 
 | Sending pending CSV invitations (wait while maintenance or protective mode is on) | Daily | Admin §5.1 |
 | Due-date reminders, email digests (per preference), storage sampling | Hourly | PRD §5.3, §8; §7.7 |
 | Purge due objects, time-based retention (audit log, inbox items, expired sessions and `auth_verifications`, `magic_link_issues` and `auth_tokens` 7 days after use or expiry, `user_devices` unused for 400 days, revoked and expired-unconsumed invitations after 30 days **(default)**, `email_deliveries` after 30 days **(default)**, tickets, huddle records) | Daily | §2.3 |
-| Identity repair: complete setup if the owner has a passkey; roll forward or release partial invitation accepts (§8.1); expire setup claims and pending domain moves | Hourly | §6.8, §8.1 |
+| Identity repair: complete setup if the owner has a passkey; roll forward or release partial invitation accepts (§8.1); expire setup claims and pending domain moves; finish the erase of deleted members whose erase didn't complete (M1e, Platform §3.1) | Hourly | §6.8, §8.1 |
 | Assistant purge jobs: expired `assistant_interactions`, transcripts past retention and their vectors, `file_derived_text` for purged versions, finished `personal_reminders` (M9) | Daily | §2.3, Assistant §14.3 |
 | ChatChannel event-log trimming, D1 copy reconciliation, version thinning | Daily | §2.2, §3.3, §4.3 |
 | Release manifest check | Daily | §6.7 |

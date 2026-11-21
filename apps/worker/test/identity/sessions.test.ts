@@ -65,7 +65,9 @@ describe("better-auth sessions (Identity §4.5)", () => {
     expect(row?.device_label).toBe("Chrome on macOS");
     expect(row?.fresh_auth_method).toBe("passkey");
     expect(typeof row?.expires_at).toBe("number"); // epoch ms, not ISO text
-    expect(row!.expires_at - row!.created_at).toBe(30 * DAY);
+    // better-auth reads the clock separately for the two dates, so they can be a millisecond or two apart.
+    expect(row!.expires_at - row!.created_at).toBeGreaterThanOrEqual(30 * DAY - 50);
+    expect(row!.expires_at - row!.created_at).toBeLessThanOrEqual(30 * DAY);
     void browser;
   });
 
