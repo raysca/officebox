@@ -29,6 +29,7 @@ import { invitationEmail } from "../email/templates";
 import { authFor } from "./auth";
 import { base64url, hmacSha256, randomToken, tokenHash } from "./crypto";
 import { issueTicket, type IssuedTicket } from "./enrolment";
+import { joinInvitationGroupsStatement, liveGroupNames, parseGroupIds } from "./groups";
 import { freeHeldHandleStatement, handleAvailability, handleError } from "./handles";
 import type { ClaimedInstallation } from "./installation";
 import { currentStore, runWithStore } from "./request-store";
@@ -104,11 +105,13 @@ interface InvitationRow {
   created_at: number;
   /** M1c: a committed domain move invalidated the link; copy again or resend makes a new one. */
   origin_moved_at: number | null;
+  /** M1e: the groups to join on accepting (JSON array of IDs). */
+  group_ids: string | null;
   inviter_name?: string | null;
 }
 
 const COLUMNS = `i.id, i.email, i.email_normalised, i.role, i.token_nonce, i.invited_by, i.expires_at, i.accepted_at,
-  i.accepted_by, i.accepted_attempt_id, i.revoked_at, i.last_sent_at, i.created_at, i.origin_moved_at`;
+  i.accepted_by, i.accepted_attempt_id, i.revoked_at, i.last_sent_at, i.created_at, i.origin_moved_at, i.group_ids`;
 
 function roleOf(row: InvitationRow): InvitableRole {
   const parsed = invitableRoleSchema.safeParse(row.role);
@@ -121,7 +124,9 @@ function statusOf(row: InvitationRow, now: number): InvitationStatus {
   return row.expires_at <= now ? "expired" : "pending";
 }
 
-function summary(row: InvitationRow, now: number): InvitationSummary {
+type GroupNames = Map<string, { name: string }>;
+
+function summary(row: InvitationRow, now: number, groupNames: GroupNames = new Map()): InvitationSummary {
   return {
     id: row.id,
     email: row.email,
@@ -132,6 +137,10 @@ function summary(row: InvitationRow, now: number): InvitationSummary {
     lastSentAt: row.last_sent_at,
     status: statusOf(row, now),
     needsNewLink: row.origin_moved_at !== null,
+    groups: parseGroupIds(row.group_ids).flatMap((id) => {
+      const group = groupNames.get(id);
+      return group ? [{ id, name: group.name }] : [];
+    }),
   };
 }
 
@@ -163,7 +172,8 @@ export async function listInvitations(ctx: CoreContext): Promise<InvitationSumma
     ),
   );
   const now = ctx.now();
-  return rows.map((row) => summary(row, now));
+  const names = await liveGroupNames(ctx.env.DB);
+  return rows.map((row) => summary(row, now, names));
 }
 
 async function sendInvitationEmail(
@@ -239,10 +249,20 @@ export async function createInvitation(
     return err(apiError("conflict", "This person is already a member.", { reason: "already_member" }));
   }
   if (existing) {
-    // Disabled (or reserved): offered "re-enable" instead (Identity §4.2; the action arrives in M1e).
+    // Disabled (or reserved): offered "re-enable" instead (Identity §4.2; re-enable is M1e's PATCH { status }).
     return err(
       apiError("conflict", "This person's account is disabled. Re-enable it instead.", { reason: "member_disabled" }),
     );
+  }
+
+  // Groups to join on accepting (Identity §4.2; M1e): each must exist now.
+  const groupIds = [...new Set(body.groupIds ?? [])];
+  if (groupIds.length > 0) {
+    const names = await liveGroupNames(ctx.env.DB);
+    if (groupIds.some((g) => !names.has(g))) {
+      const message = "A group in this invitation doesn't exist.";
+      return err(apiError("not_found", message, { reason: "unknown_group", fields: { groupIds: [message] } }));
+    }
   }
 
   const id = ulid();
@@ -259,8 +279,8 @@ export async function createInvitation(
       normalised,
     ),
     database.statement(
-      `INSERT INTO invitations (id, email, email_normalised, role, token_hash, token_nonce, invited_by, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO invitations (id, email, email_normalised, role, token_hash, token_nonce, invited_by, expires_at, created_at, group_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       email,
       normalised,
@@ -270,12 +290,13 @@ export async function createInvitation(
       actorId,
       expiresAt,
       now,
+      groupIds.length > 0 ? JSON.stringify(groupIds) : null,
     ),
     await auditStatement(ctx, {
       action: "invitation.created",
       actor: actorId,
       target: { type: "invitation", id },
-      metadata: { email, role: body.role, emailed: body.sendEmail },
+      metadata: { email, role: body.role, emailed: body.sendEmail, ...(groupIds.length > 0 ? { groupIds } : {}) },
     }),
   ]);
   if (!inserted.ok) {
@@ -294,7 +315,8 @@ export async function createInvitation(
     : "not_requested";
   ctx.log.info("invitation created", { invitationId: id, role: body.role, email: emailOutcome });
   const fresh = (await loadById(ctx.env.DB, id)) ?? row;
-  return ok({ invitation: summary(fresh, ctx.now()), link, email: emailOutcome });
+  const names = await liveGroupNames(ctx.env.DB);
+  return ok({ invitation: summary(fresh, ctx.now(), names), link, email: emailOutcome });
 }
 
 /** A pending, unexpired invitation by ID, or the error to return. */
@@ -627,6 +649,8 @@ export async function acceptInvitation(
         },
         { onlyIfPreviousChanged: true },
       ),
+      // The groups the invitation named (M1e; Identity §4.2), skipping any deleted since.
+      joinInvitationGroupsStatement(database, row.id, userId, ctx.now()),
     ]),
   );
   const ticket = await issueTicket(ctx.env.DB, secrets.tokenHashKey, userId, "invitation", null, ctx.now());
@@ -736,8 +760,11 @@ export async function repairInvitations(ctx: CoreContext, limit = 100): Promise<
           { onlyIfPreviousChanged: true },
         ),
       );
+      const finishIndex = statements.length - 2;
+      // The invitation's groups too (M1e), idempotently.
+      statements.push(joinInvitationGroupsStatement(database, row.id, user.id, now));
       const result = expectOk(await database.batchRun(statements));
-      if ((result[result.length - 2]?.changes ?? 0) === 1) report.rolledForward++;
+      if ((result[finishIndex]?.changes ?? 0) === 1) report.rolledForward++;
       continue;
     }
     const handle = expectOk(

@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { ulidSchema } from "./ids";
-import { FRESH_AUTH_METHODS, INVITABLE_WORKSPACE_ROLES, workspaceRoleSchema } from "./permissions";
+import {
+  ASSIGNABLE_WORKSPACE_ROLES,
+  FRESH_AUTH_METHODS,
+  INVITABLE_WORKSPACE_ROLES,
+  workspaceRoleSchema,
+} from "./permissions";
 
 /**
  * Identity & Access schemas for M1a (Identity §4.1, §4.4, §4.5, §4.6a, §6): first-run setup with a
@@ -210,6 +215,7 @@ export const SECURITY_NOTICE_KINDS = [
   "owner_recovery_used",
   "domain_moved",
   "member_export",
+  "role_changed", // M1e: an owner changed this person's workspace role (Notifications §3)
 ] as const;
 export const securityNoticeKindSchema = z.enum(SECURITY_NOTICE_KINDS);
 export type SecurityNoticeKind = z.infer<typeof securityNoticeKindSchema>;
@@ -228,6 +234,9 @@ export const securityNoticeDetailsSchema = z.object({
   newEmail: z.string().optional(),
   /** A domain move (M1c; Identity §4.4): the new canonical origin. */
   origin: z.string().optional(),
+  /** A role change (M1e; Identity §4.11): the role before and after. */
+  oldRole: workspaceRoleSchema.optional(),
+  newRole: workspaceRoleSchema.optional(),
 });
 export type SecurityNoticeDetails = z.infer<typeof securityNoticeDetailsSchema>;
 
@@ -360,6 +369,9 @@ export type ReauthResult = z.infer<typeof reauthResultSchema>;
 /** Invitations are single-use and expire after 7 days (Identity §2, Platform §10). */
 export const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Groups an invitation can carry **(default, M1e)**. */
+export const MAX_INVITATION_GROUPS = 20;
+
 export const invitableRoleSchema = z.enum(INVITABLE_WORKSPACE_ROLES);
 export type InvitableRole = z.infer<typeof invitableRoleSchema>;
 
@@ -371,6 +383,8 @@ export const createInvitationBodySchema = z.strictObject({
   email: emailSchema,
   role: invitableRoleSchema,
   sendEmail: z.boolean(),
+  /** Groups to join on accepting (Identity §4.2; M1e). Groups deleted by then are skipped. */
+  groupIds: z.array(ulidSchema).max(MAX_INVITATION_GROUPS).optional(),
 });
 export type CreateInvitationBody = z.infer<typeof createInvitationBodySchema>;
 
@@ -405,6 +419,8 @@ export const invitationSummarySchema = z.object({
    * works (Identity §4.4). "Copy again" or "Resend" makes a new one. Optional for older Workers.
    */
   needsNewLink: z.boolean().optional(),
+  /** M1e: the groups the invitee joins on accepting (deleted groups left out). Optional for older Workers. */
+  groups: z.array(z.object({ id: ulidSchema, name: z.string() })).optional(),
 });
 export type InvitationSummary = z.infer<typeof invitationSummarySchema>;
 
@@ -561,12 +577,35 @@ export type OwnerRecoveryBody = z.infer<typeof ownerRecoveryBodySchema>;
 /** Email-change confirmation links are single-use and valid for 24 hours (Platform §10). */
 export const EMAIL_CHANGE_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** Roles a role change can give (Identity §4.11): never `guest` until Phase 2. */
+export const assignableRoleSchema = z.enum(ASSIGNABLE_WORKSPACE_ROLES);
+export type AssignableRole = z.infer<typeof assignableRoleSchema>;
+
 /**
- * `PATCH /api/admin/members/:id`. M1c handles `email`; role and status changes arrive with M1e, which
- * extends this schema.
+ * `PATCH /api/admin/members/:id`: exactly one change per request (Identity §6). `{ email }` (M1c,
+ * step-up), `{ role }` (M1e: owners only, step-up, the promotion passkey rules) or `{ status }` (M1e:
+ * `disabled` disables, `active` re-enables). One change per request, so each is authorized and audited
+ * on its own **(default)**.
  */
-export const patchMemberBodySchema = z.strictObject({ email: emailSchema });
+export const patchMemberBodySchema = z.union([
+  z.strictObject({ email: emailSchema }),
+  z.strictObject({ role: assignableRoleSchema }),
+  z.strictObject({ status: z.enum(["active", "disabled"]) }),
+]);
 export type PatchMemberBody = z.infer<typeof patchMemberBodySchema>;
+
+/** The answer to a role or status change: the person as now stored, and whether anything changed. */
+export const memberChangeResultSchema = z.object({
+  id: ulidSchema,
+  role: workspaceRoleSchema,
+  status: z.enum(["active", "disabled"]),
+  changed: z.boolean(),
+});
+export type MemberChangeResult = z.infer<typeof memberChangeResultSchema>;
+
+/** `DELETE /api/admin/members/:id`: the account is anonymised (Platform §3.1). */
+export const memberDeletedResultSchema = z.object({ id: ulidSchema, deleted: z.literal(true) });
+export type MemberDeletedResult = z.infer<typeof memberDeletedResultSchema>;
 
 /**
  * The outcome of an email change: `pending_confirmation` when email is configured (a confirmation link
@@ -590,13 +629,39 @@ export type EmailChangeConfirmResult = z.infer<typeof emailChangeConfirmResultSc
 
 // ---- Members for the admin area (Identity §4.6, §4.11; Admin §5; M1c's subset) ----------------
 
+/** Member list statuses (Admin §5): `invited` rows are pending invitations, with no account yet. */
+export const ADMIN_MEMBER_STATUSES = ["active", "invited", "disabled"] as const;
+export const adminMemberStatusSchema = z.enum(ADMIN_MEMBER_STATUSES);
+export type AdminMemberStatus = z.infer<typeof adminMemberStatusSchema>;
+
+/** The "last active" filter (Admin §5) **(default)**: within 7 or 30 days, not for 30 days or more, or never. */
+export const LAST_ACTIVE_FILTERS = ["within_7d", "within_30d", "over_30d", "never"] as const;
+export const lastActiveFilterSchema = z.enum(LAST_ACTIVE_FILTERS);
+export type LastActiveFilter = z.infer<typeof lastActiveFilterSchema>;
+
+/**
+ * `GET /api/admin/members?q=&role=&status=&group=&lastActive=` (Admin §5): search by name, handle or
+ * email; filter by role, status (none given: active and disabled members), group and last active.
+ */
+export const adminMembersQuerySchema = z.strictObject({
+  q: z.string().trim().max(100).optional(),
+  role: assignableRoleSchema.optional(),
+  status: adminMemberStatusSchema.optional(),
+  group: ulidSchema.optional(),
+  lastActive: lastActiveFilterSchema.optional(),
+});
+export type AdminMembersQuery = z.infer<typeof adminMembersQuerySchema>;
+
+export const adminMemberGroupSchema = z.object({ id: ulidSchema, name: z.string(), handle: z.string().nullable() });
+
 export const adminMemberSchema = z.object({
+  /** The user's ID, or for an `invited` row the invitation's. */
   id: ulidSchema,
   email: z.string(),
   displayName: z.string(),
   handle: z.string().nullable(),
   role: workspaceRoleSchema,
-  status: z.enum(["active", "disabled"]),
+  status: adminMemberStatusSchema,
   passkeyCount: z.number().int().nonnegative(),
   /**
    * Owners only: a recovery link was issued without email and no owner has acknowledged it yet
@@ -605,6 +670,12 @@ export const adminMemberSchema = z.object({
   recoveryFlag: z.object({ at: z.number().int(), byName: z.string().nullable() }).nullable(),
   /** An email change waiting for its confirmation link to be used. */
   pendingEmail: z.string().nullable(),
+  /** M1e (Admin §5): the member's groups, the day of their last session refresh, and when they joined. */
+  groups: z.array(adminMemberGroupSchema),
+  lastActiveAt: z.number().int().nullable(),
+  joinedAt: z.number().int().nullable(),
+  /** A security notice is waiting on their banner (Admin §5 "Flags"). */
+  pendingSecurityNotice: z.boolean(),
 });
 export type AdminMember = z.infer<typeof adminMemberSchema>;
 

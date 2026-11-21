@@ -46,9 +46,18 @@ export function d1Facts(env: Env): PermissionFacts {
       // Email configured and `magic_link_enabled` on (Identity §2 "Removing the last passkey").
       return magicLinksAvailable({ env, log: rootLogger, now: Date.now });
     },
-    groupManagerIds() {
-      // Groups arrive in M1e; until then no group exists.
-      return Promise.resolve(null);
+    async groupManagerIds(groupId) {
+      // A deleted group doesn't exist for permission purposes (M1e).
+      const rows = expectOk(
+        await db.all<{ user_id: string | null }>(
+          `SELECT gm.user_id FROM groups g
+             LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.role = 'manager'
+            WHERE g.id = ? AND g.deleted_at IS NULL`,
+          groupId,
+        ),
+      );
+      if (rows.length === 0) return null;
+      return rows.map((r) => r.user_id).filter((id): id is string => id !== null);
     },
   };
 }

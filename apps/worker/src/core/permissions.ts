@@ -274,6 +274,22 @@ export async function authorize(
   request: PermissionRequest,
   options: AuthorizeOptions = {},
 ): Promise<Result<void, ApiError>> {
+  const decided = await authorizeWithFacts(ctx, request, options);
+  return decided.ok ? ok() : decided;
+}
+
+/**
+ * Like {@link authorize}, but returns the check the engine allowed, with the facts it decided on (M1e).
+ * A write that acts on the decision makes itself conditional on exactly those facts (the target's role
+ * and status, the actor's role, the active owners), so a change that raced the decision (the target
+ * promoted, the actor demoted, another owner disabled) makes the write a no-op instead of acting on
+ * facts the engine never saw.
+ */
+export async function authorizeWithFacts(
+  ctx: PermissionContext,
+  request: PermissionRequest,
+  options: AuthorizeOptions = {},
+): Promise<Result<PermissionCheck, ApiError>> {
   const pre = decideWithoutFacts(ctx.actor, request.action);
   if (!pre.ok) return refuse(ctx, request.action, pre.error, options);
   const check = await buildCheck(ctx.actor, request, ctx.facts);
@@ -282,5 +298,6 @@ export async function authorize(
     ctx.log.info("permission target not found", { action: request.action, actorId: ctx.actor.userId });
     return err(NOT_FOUND);
   }
-  return authorizeCheck(ctx, check.value, options);
+  const decided = authorizeCheck(ctx, check.value, options);
+  return decided.ok ? ok(check.value) : decided;
 }

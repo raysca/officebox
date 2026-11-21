@@ -35,7 +35,9 @@ import {
  * §4.5 and §4.11, and Admin §3 and §17, never derived from the engine's logic.
  *
  * It grows per milestone: M1p covers workspace roles, the admin-power limits, the promotion and invite
- * gates, step-up, group membership and own-account actions; M1d adds profiles; M1e the rest of groups;
+ * gates, step-up, group membership and own-account actions; M1d adds profiles; M1e the rest of groups
+ * (managers can't remove other managers; groups.manage) and completes the M1 matrix (workspace roles,
+ * groups, profiles);
  * M3a channels; M4 calls; M5a calendars; M6a documents; M7 the admin endpoints.
  *
  * `✓` allowed, otherwise the expected denial reason.
@@ -621,6 +623,39 @@ describe("permission matrix: group membership (Permissions §4.6, §6; Identity 
 
   it("covers both group actions", () => {
     expect([...GROUP_MEMBER_ACTIONS].sort()).toEqual(["group.add_member", "group.remove_member"]);
+  });
+
+  // M1e (default): appointing and removing managers is an admin's (Identity §2 "Groups", §4.9), so a
+  // group manager who isn't an admin can't remove another manager of their group.
+  const REMOVE_MANAGER: readonly [who: string, role: WorkspaceRole, manages: boolean, expected: Expect][] = [
+    ["owner", "owner", false, "✓"],
+    ["admin", "admin", false, "✓"],
+    ["admin who manages the group", "admin", true, "✓"],
+    ["group manager", "member", true, "not_permitted"],
+    ["member", "member", false, "not_permitted"],
+    ["guest", "guest", false, "not_permitted"],
+  ];
+  for (const [who, role, manages, expected] of REMOVE_MANAGER) {
+    it(`${who}: remove another manager of the group → ${expected}`, () => {
+      const a = actor(role, { userId: `actor-${who}` });
+      const group = { managerIds: manages ? [a.userId, "another-manager"] : ["another-manager"] };
+      const target = person("member", "active", "another-manager");
+      expect(outcome(a, { action: "group.remove_member", group, target })).toBe(expected);
+    });
+  }
+
+  it("a group manager may still remove a plain member, and leave the group themselves", () => {
+    const a = actor("member", { userId: "mgr" });
+    const group = { managerIds: ["mgr", "another-manager"] };
+    expect(outcome(a, { action: "group.remove_member", group, target: person("member", "active", "plain") })).toBe("✓");
+    expect(outcome(a, { action: "group.remove_member", group, target: person("member", "active", "mgr") })).toBe("✓");
+  });
+
+  it("disabled people can be removed from a group but not added (default)", () => {
+    const group = { managerIds: [] };
+    const target = person("member", "disabled");
+    expect(outcome(actor("owner"), { action: "group.add_member", group, target })).toBe("invalid_target");
+    expect(outcome(actor("owner"), { action: "group.remove_member", group, target })).toBe("✓");
   });
 });
 
