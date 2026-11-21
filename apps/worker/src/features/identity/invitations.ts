@@ -547,8 +547,11 @@ export async function acceptInvitation(
   const now = ctx.now();
   const consumed = expectOk(
     await database.run(
+      // M1e: and only while the inviter is still active (a disabled or deleted inviter's invitations are
+      // revoked; this closes the race with that revocation).
       `UPDATE invitations SET accepted_attempt_id = ?1
-        WHERE id = ?2 AND accepted_attempt_id IS NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?3`,
+        WHERE id = ?2 AND accepted_attempt_id IS NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?3
+          AND EXISTS (SELECT 1 FROM users i WHERE i.id = invitations.invited_by AND i.status = 'active')`,
       attemptId,
       row.id,
       now,

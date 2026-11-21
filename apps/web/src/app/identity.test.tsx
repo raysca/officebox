@@ -182,7 +182,8 @@ describe("setup (Identity §4.1)", () => {
     ).toBeDefined();
     expect(within(list).getAllByText("Working")).toHaveLength(5);
     expect(within(list).getByText("Needs attention:")).toBeDefined();
-    expect(screen.getByText("1 required service needs attention.")).toBeDefined();
+    // The live-region summary can render a tick after the list (it was flaky under load as getByText).
+    expect(await screen.findByText("1 required service needs attention.")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Create workspace" })).toBeNull();
     await expectNoViolations();
     failing = false;

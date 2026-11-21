@@ -148,19 +148,21 @@ function revokeEverythingStatements(database: Database, userId: string, now: num
  * Statements revoking the pending invitations a person sent, once they're disabled or deleted (M1e,
  * **default**): an invitation shouldn't outlive its inviter's access. Each is audited as
  * `invitation.revoked` (the acting admin, with a `reason`), and a last catch-all revokes any sent after
- * the read. Every statement runs only while the inviter isn't active, so nothing is revoked if the change
- * didn't apply.
+ * the read. Every statement is gated on the change's own audit entry, written only if the guarded
+ * disable or delete applied, so a refused change revokes and audits nothing.
  */
-async function revokeSentInvitationsStatements(
+export async function revokeSentInvitationsStatements(
   ctx: CoreContext,
   database: Database,
   actorId: string,
   inviterId: string,
   now: number,
   reason: "inviter_disabled" | "inviter_deleted",
+  /** The ID of the disable's or delete's audit entry: written only if that change applied. */
+  appliedAuditId: string,
 ): Promise<D1PreparedStatement[]> {
   const pending = "accepted_at IS NULL AND accepted_attempt_id IS NULL AND revoked_at IS NULL";
-  const inactive = "EXISTS (SELECT 1 FROM users WHERE id = ? AND status IN ('disabled', 'deleted'))";
+  const applied = "EXISTS (SELECT 1 FROM audit_log WHERE id = ?)";
   const rows = expectOk(
     await database.all<{ id: string }>(`SELECT id FROM invitations WHERE invited_by = ? AND ${pending}`, inviterId),
   );
@@ -168,10 +170,10 @@ async function revokeSentInvitationsStatements(
   for (const row of rows) {
     statements.push(
       database.statement(
-        `UPDATE invitations SET revoked_at = ? WHERE id = ? AND ${pending} AND ${inactive}`,
+        `UPDATE invitations SET revoked_at = ? WHERE id = ? AND ${pending} AND ${applied}`,
         now,
         row.id,
-        inviterId,
+        appliedAuditId,
       ),
       await auditStatement(
         ctx,
@@ -187,10 +189,10 @@ async function revokeSentInvitationsStatements(
   }
   statements.push(
     database.statement(
-      `UPDATE invitations SET revoked_at = ? WHERE invited_by = ? AND ${pending} AND ${inactive}`,
+      `UPDATE invitations SET revoked_at = ? WHERE invited_by = ? AND ${pending} AND ${applied}`,
       now,
       inviterId,
-      inviterId,
+      appliedAuditId,
     ),
     await auditStatement(
       ctx,
@@ -226,6 +228,7 @@ export async function disableMember(
     return ok({ id: snap.targetId, role: snap.targetRole, status: "disabled", changed: false });
   }
   const now = ctx.now();
+  const auditId = ulid();
   const database = new Database(ctx.env.DB);
   const guard = stillAsDecided(snap);
   const result = expectOk(
@@ -245,10 +248,18 @@ export async function disableMember(
           target: { type: "user", id: snap.targetId },
           metadata: { role: snap.targetRole },
         },
-        { onlyIfPreviousChanged: true },
+        { onlyIfPreviousChanged: true, id: auditId },
       ),
       ...revokeEverythingStatements(database, snap.targetId, now),
-      ...(await revokeSentInvitationsStatements(ctx, database, actor.userId, snap.targetId, now, "inviter_disabled")),
+      ...(await revokeSentInvitationsStatements(
+        ctx,
+        database,
+        actor.userId,
+        snap.targetId,
+        now,
+        "inviter_disabled",
+        auditId,
+      )),
     ]),
   );
   if ((result[0]?.changes ?? 0) !== 1) return err(await explainNoop(ctx, snap, snap.targetRole === "owner"));
@@ -407,6 +418,21 @@ export async function signOutMember(
   const auditId = ulid();
   const rows = expectOk(
     await database.batch<{ id: string }>([
+      // Audited first, in the same batch, whenever the guard holds (also with no session), with the
+      // number of sessions about to be revoked counted in SQL. The metadata is that count alone, so it
+      // needs none of the writer's sanitising.
+      database.statement(
+        `INSERT INTO audit_log (id, actor_id, action, target_type, target_id, metadata, created_at)
+         SELECT ?, ?, 'member.signed_out', 'user', ?,
+                json_object('sessionsRevoked', (SELECT count(*) FROM sessions WHERE user_id = ?)), ?
+          WHERE ${stillPlain}`,
+        auditId,
+        actor.userId,
+        snap.targetId,
+        snap.targetId,
+        ctx.now(),
+        ...stillParams,
+      ),
       database.statement(
         `DELETE FROM sessions WHERE user_id = ?1 AND ${still} RETURNING id`,
         snap.targetId,
@@ -415,16 +441,10 @@ export async function signOutMember(
         snap.actorId,
         snap.actorRole,
       ),
-      // Audited in the same batch whenever the guard held, also when the person had no session.
-      await auditStatement(
-        ctx,
-        { action: "member.signed_out", actor: actor.userId, target: { type: "user", id: snap.targetId } },
-        { when: { sql: stillPlain, params: stillParams }, id: auditId },
-      ),
       database.statement("SELECT 1 AS ok FROM audit_log WHERE id = ?", auditId),
     ]),
   );
-  const revoked = rows[0]?.length ?? 0;
+  const revoked = rows[1]?.length ?? 0;
   if ((rows[2]?.length ?? 0) === 0) return err(await explainNoop(ctx, snap, false));
   // Sockets are closed even when no row was deleted: an expired session's sockets may still be open.
   try {
@@ -447,6 +467,7 @@ export async function deleteMember(
 ): Promise<Result<MemberDeletedResult, ApiError>> {
   const snap = snapshotOf(actor.userId, actor.role, check);
   const now = ctx.now();
+  const auditId = ulid();
   const database = new Database(ctx.env.DB);
   const guard = stillAsDecided(snap);
   const result = expectOk(
@@ -467,10 +488,18 @@ export async function deleteMember(
           target: { type: "user", id: snap.targetId },
           metadata: { role: snap.targetRole, previousStatus: snap.targetStatus },
         },
-        { onlyIfPreviousChanged: true },
+        { onlyIfPreviousChanged: true, id: auditId },
       ),
       ...revokeEverythingStatements(database, snap.targetId, now),
-      ...(await revokeSentInvitationsStatements(ctx, database, actor.userId, snap.targetId, now, "inviter_deleted")),
+      ...(await revokeSentInvitationsStatements(
+        ctx,
+        database,
+        actor.userId,
+        snap.targetId,
+        now,
+        "inviter_deleted",
+        auditId,
+      )),
     ]),
   );
   if ((result[0]?.changes ?? 0) !== 1) return err(await explainNoop(ctx, snap, snap.targetRole === "owner"));

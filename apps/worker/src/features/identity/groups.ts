@@ -181,14 +181,19 @@ async function groupHandleProblem(
   return availability.available ? null : (availability.reason ?? "taken");
 }
 
-/** Frees `handle` for a claim in the same batch: an expired hold, or one this group released. */
-function freeHeldForGroup(database: Database, handle: string, now: number, groupId: string) {
+/**
+ * Frees `handle` for a claim in the same batch: an expired hold, or one this group released. Only while
+ * `actorId` may still manage groups, so a demoted or disabled actor frees nothing either.
+ */
+function freeHeldForGroup(database: Database, handle: string, now: number, groupId: string, actorId: string) {
   return database.statement(
     `DELETE FROM handles WHERE handle = ?1 AND released_at IS NOT NULL
-        AND (released_at <= ?2 OR (owner_type = 'group' AND owner_id = ?3))`,
+        AND (released_at <= ?2 OR (owner_type = 'group' AND owner_id = ?3))
+        AND ${ACTOR_MANAGES_GROUPS.replace("?", "?4")}`,
     handle,
     now - HANDLE_HOLD_MS,
     groupId,
+    actorId,
   );
 }
 
@@ -226,7 +231,7 @@ export async function createGroup(
 
   const database = new Database(ctx.env.DB);
   const statements = [
-    freeHeldForGroup(database, body.handle, now, id),
+    freeHeldForGroup(database, body.handle, now, id, actorId),
     database.statement(
       `INSERT INTO groups (id, name, handle, description, created_by, created_at, updated_at)
        SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${ACTOR_MANAGES_GROUPS}`,
@@ -337,7 +342,7 @@ export async function updateGroup(
   const statements: D1PreparedStatement[] = [];
   if (handleChanges && handle !== null) {
     statements.push(
-      freeHeldForGroup(database, handle, now, groupId),
+      freeHeldForGroup(database, handle, now, groupId, actorId),
       database.statement(
         `INSERT INTO handles (handle, owner_type, owner_id) SELECT ?3, 'group', ?1 WHERE ${still}`,
         groupId,

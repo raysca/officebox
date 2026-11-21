@@ -4,7 +4,13 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { CoreContext } from "../../src/core/context";
 import { ulid } from "../../src/core/ids";
 import { rootLogger } from "../../src/core/log";
-import { eraseUnfinishedDeletions } from "../../src/features/identity/member-lifecycle";
+import { Database } from "../../src/core/db";
+import {
+  changeMemberRole,
+  deleteMember,
+  eraseUnfinishedDeletions,
+  revokeSentInvitationsStatements,
+} from "../../src/features/identity/member-lifecycle";
 import { SoftAuthenticator } from "./authenticator";
 import {
   addMember,
@@ -403,6 +409,12 @@ describe("signing a member out of every session (Identity §4.11)", () => {
     const res = await signOut(ws.browser, member.id);
     expect(res.status).toBe(200);
     expect(res.body.signedOut).toBe(2);
+    const entry = await env.DB.prepare(
+      "SELECT metadata FROM audit_log WHERE action = 'member.signed_out' AND target_id = ?",
+    )
+      .bind(member.id)
+      .first<{ metadata: string }>();
+    expect(JSON.parse(entry!.metadata)).toEqual({ sessionsRevoked: 2 });
     expect(await within(hub!.closed, 5000)).toBe(WS_CLOSE_SESSION_REVOKED);
     expect((await member.browser.json("/api/me")).status).toBe(401);
     expect((await second.json("/api/me")).status).toBe(401);
@@ -629,6 +641,12 @@ describe("review fixes (M1e)", () => {
     const res = await signOut(ws.browser, target.id);
     expect(res.body.signedOut).toBe(0);
     expect(await auditCount("member.signed_out", target.id)).toBe(1);
+    const entry = await env.DB.prepare(
+      "SELECT metadata FROM audit_log WHERE action = 'member.signed_out' AND target_id = ?",
+    )
+      .bind(target.id)
+      .first<{ metadata: string }>();
+    expect(JSON.parse(entry!.metadata)).toEqual({ sessionsRevoked: 0 });
   });
 
   it("an avatar uploaded for someone who isn't active is deleted again (nothing left in R2)", async () => {
@@ -665,5 +683,127 @@ describe("review fixes (M1e)", () => {
     const row = await userRow(waiting.id);
     expect(row).toMatchObject({ email: null });
     expect(row?.erase_attempted_at).toEqual(expect.any(Number));
+  });
+});
+
+describe("second review fixes (M1e)", () => {
+  const ctx = (): CoreContext => ({ env, log: rootLogger, now: () => Date.now() });
+
+  async function pendingInvitation(inviterId: string): Promise<string> {
+    const id = ulid();
+    const email = uniqueEmail("inv");
+    await env.DB.prepare(
+      `INSERT INTO invitations (id, email, email_normalised, role, token_hash, token_nonce, invited_by, expires_at, created_at)
+       VALUES (?, ?, ?, 'member', ?, 'n', ?, ?, ?)`,
+    )
+      .bind(id, email, email, `h-${id}`, inviterId, Date.now() + 86_400_000, Date.now())
+      .run();
+    return id;
+  }
+  const revoked = async (id: string) =>
+    count("SELECT count(*) AS n FROM invitations WHERE id = ? AND revoked_at IS NOT NULL", id);
+
+  it("a refused delete (the actor demoted mid-request) revokes no invitation and writes no audit", async () => {
+    const admin = await addMember("admin");
+    const inviter = await plainUser("member", "disabled");
+    const invitationId = await pendingInvitation(inviter.id);
+    // The engine allowed the admin; then they're demoted before the batch.
+    await env.DB.prepare("UPDATE users SET role = 'member' WHERE id = ?").bind(admin.id).run();
+    const result = await deleteMember(
+      ctx(),
+      { userId: admin.id, role: "admin" },
+      {
+        action: "member.delete",
+        target: { userId: inviter.id, role: "member", status: "disabled" },
+        activeOwnerCount: 1,
+      },
+    );
+    expect(result.ok).toBe(false);
+    expect(await revoked(invitationId)).toBe(0);
+    expect(await auditCount("invitation.revoked", invitationId)).toBe(0);
+    expect(await auditCount("member.deleted", inviter.id)).toBe(0);
+  });
+
+  it("an active inviter's invitations are untouched when someone else is disabled", async () => {
+    const otherAdmin = await addMember("admin");
+    const theirs = await pendingInvitation(otherAdmin.id);
+    const target = await plainUser("member");
+    expect((await patch(ws.browser, target.id, { status: "disabled" })).status).toBe(200);
+    expect(await revoked(theirs)).toBe(0);
+  });
+
+  it("the catch-all revokes an invitation sent after the read, audited once as sentLater", async () => {
+    const inviter = await plainUser("admin", "disabled");
+    const database = new Database(env.DB);
+    const statements = await revokeSentInvitationsStatements(
+      ctx(),
+      database,
+      ws.ownerId,
+      inviter.id,
+      Date.now(),
+      "inviter_disabled",
+      "01J000000000000000000APPLY",
+    );
+    const late = await pendingInvitation(inviter.id);
+    await env.DB.prepare(
+      "INSERT INTO audit_log (id, actor_id, action, created_at) VALUES ('01J000000000000000000APPLY', NULL, 'test.applied', 0)",
+    ).run();
+    await database.batchRun(statements);
+    expect(await revoked(late)).toBe(1);
+    const entry = await env.DB.prepare(
+      "SELECT metadata FROM audit_log WHERE action = 'invitation.revoked' AND target_id = ?",
+    )
+      .bind(inviter.id)
+      .first<{ metadata: string }>();
+    expect(JSON.parse(entry!.metadata)).toEqual({ reason: "inviter_disabled", sentLater: true });
+  });
+
+  it("a promotion that doesn't apply leaves the person's magic links alone", async () => {
+    const owner = await addMember("owner");
+    const target = await plainUser("member", "active", 1);
+    const token = `ml-${ulid()}`;
+    await env.DB.prepare(
+      `INSERT INTO magic_link_issues (token_hash, email_normalised, user_id, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind(token, target.email, target.id, Date.now() + 600_000, Date.now())
+      .run();
+    // The owner is demoted between the engine's decision and the write.
+    await env.DB.prepare("UPDATE users SET role = 'admin' WHERE id = ?").bind(owner.id).run();
+    const result = await changeMemberRole(
+      ctx(),
+      { userId: owner.id, role: "owner" },
+      {
+        action: "member.change_role",
+        target: { userId: target.id, role: "member", status: "active" },
+        newRole: "admin",
+        activeOwnerCount: 2,
+        targetPasskeyCount: 1,
+        recoveryTokenUnconsumed: false,
+      },
+    );
+    expect(result.ok).toBe(false);
+    expect(
+      await count("SELECT count(*) AS n FROM magic_link_issues WHERE token_hash = ? AND revoked_at IS NULL", token),
+    ).toBe(1);
+    expect(await noticeKinds(target.id)).not.toContain("role_changed");
+  });
+
+  it("an invitation whose inviter is no longer active can't be accepted (410)", async () => {
+    const admin = await addMember("admin");
+    const sent = await invite(admin.browser, uniqueEmail("late"));
+    expect(sent.status).toBe(201);
+    // Disabled without the revocation (as if the accept raced it).
+    await env.DB.prepare("UPDATE users SET status = 'disabled' WHERE id = ?").bind(admin.id).run();
+    const accept = await new Browser().json("/api/invitations/accept", {
+      body: { token: fragmentToken(sent.body.link), name: "Late Comer", handle: uniqueHandle("late") },
+    });
+    expect(accept.status).toBe(410);
+    expect(
+      await count(
+        "SELECT count(*) AS n FROM invitations WHERE id = ? AND accepted_attempt_id IS NULL",
+        sent.body.invitation.id,
+      ),
+    ).toBe(1);
   });
 });

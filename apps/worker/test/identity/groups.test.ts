@@ -318,6 +318,21 @@ describe("review fixes (M1e)", () => {
       ),
     ).toBe(1);
     expect((await detail(ws.browser, group.body.id)).body.handle).toBe(group.body.handle);
+
+    // Taking back a handle the group released (held) frees the hold first: not for a demoted actor either.
+    const held = group.body.handle!;
+    const other = uniqueHandle("other");
+    await env.DB.prepare("UPDATE users SET role = 'admin' WHERE id = ?").bind(admin.id).run();
+    expect((await updateGroup(ctx(), admin.id, group.body.id, { handle: other })).ok).toBe(true);
+    await env.DB.prepare("UPDATE users SET role = 'member' WHERE id = ?").bind(admin.id).run();
+    expect((await updateGroup(ctx(), admin.id, group.body.id, { handle: held })).ok).toBe(false);
+    expect(
+      await count(
+        "SELECT count(*) AS n FROM handles WHERE handle = ? AND owner_id = ? AND released_at IS NOT NULL",
+        held,
+        group.body.id,
+      ),
+    ).toBe(1);
   });
 
   it("a disabled member can't be made a manager", async () => {

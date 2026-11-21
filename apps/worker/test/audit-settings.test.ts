@@ -93,6 +93,34 @@ describe("audit log", () => {
     expect(await sanitiseMetadata({}, {})).toBeNull();
     await expect(auditStatement(ctx(), { action: "Bad Action", actor: null })).rejects.toThrow(/Invalid audit action/);
   });
+
+  it("takes a caller's ID, and writes with `when` only while the condition holds (M1e)", async () => {
+    const target = crypto.randomUUID();
+    const id = "01J00000000000000000000AUD";
+    const yes = await auditStatement(
+      ctx(),
+      { action: "member.signed_out", actor: null, target: { type: "user", id: target } },
+      { id, when: { sql: "? = ?", params: [1, 1] } },
+    );
+    const no = await auditStatement(
+      ctx(),
+      { action: "member.signed_out", actor: null, target: { type: "user", id: target } },
+      { when: { sql: "? = ?", params: [1, 2] } },
+    );
+    await env.DB.batch([yes, no]);
+    const rows = await auditRows(target);
+    expect(rows).toHaveLength(1);
+    expect(
+      await env.DB.prepare("SELECT count(*) AS n FROM audit_log WHERE id = ?").bind(id).first<{ n: number }>(),
+    ).toEqual({ n: 1 });
+    await expect(
+      auditStatement(
+        ctx(),
+        { action: "a.b", actor: null },
+        { onlyIfPreviousChanged: true, when: { sql: "1", params: [] } },
+      ),
+    ).rejects.toThrow(/not both/);
+  });
 });
 
 describe("settings store", () => {
